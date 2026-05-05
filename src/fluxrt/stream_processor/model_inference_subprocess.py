@@ -184,6 +184,18 @@ class ModelInferenceSubprocess:
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
 
+    def set_reference_image(self, image) -> None:
+        """
+        Update the reference image on the fly.
+        image: numpy uint8 RGB array
+        Only valid when use_reference_image is true in config.
+        """
+        if not self.config.get("use_reference_image", False):
+            raise ValueError(
+                "set_reference_image called but use_reference_image is not enabled in the stream processor config"
+            )
+        self.command_queue.put(("set_reference_image", image))
+
     def update_process_state(self) -> None:
         """
         Called by the internal process
@@ -196,6 +208,14 @@ class ModelInferenceSubprocess:
                     self.process_state[name] = value
                     if name == "prompt":
                         self.update_prompt_embeds(value)
+                elif cmd == "set_reference_image":
+                    image = payload  # numpy uint8 RGB array
+                    resolution = self.config["reference_image_resolution"]
+                    image = cv2.resize(
+                        image, (resolution["width"], resolution["height"])
+                    )
+                    self.reference_image = Image.fromarray(image)
+                    self.update_controller.reset_cache()
 
         except Empty:
             pass

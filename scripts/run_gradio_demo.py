@@ -7,10 +7,7 @@ import gradio as gr
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
 
-default_prompt = (
-    "Turn this image into cyberpunk night street scene, "
-    "red and blue neon lamps, cinematic lighting, bokeh"
-)
+default_prompt = "Turn this image into cyberpunk night, red and blue neon lamps, cinematic lighting, bokeh"
 
 stream_processor = None
 input_tensor = None
@@ -26,6 +23,7 @@ def get_processor():
 
     if stream_processor is None:
         stream_processor = StreamProcessor("configs/stream_processor_config.json")
+        # stream_processor = StreamProcessor("configs/config_with_reference.json")
         stream_processor.start()
         stream_processor.set_prompt(default_prompt)
 
@@ -61,6 +59,13 @@ def process_frame(frame):
 def set_prompt(prompt: str):
     sp, _, _, _ = get_processor()
     sp.set_prompt(prompt)
+
+
+def set_reference_image_ui(image):
+    if image is None:
+        return
+    sp, _, _, _ = get_processor()
+    sp.set_reference_image(image)
 
 
 def switch_mode(mode: str, request: gr.Request | None):
@@ -118,6 +123,7 @@ def process_local_video(video_path: str | None, request: gr.Request | None):
 
 def main():
     get_processor()
+    use_reference_image = stream_processor.config.get("use_reference_image", False)
 
     with gr.Blocks() as demo:
         mode = gr.Radio(
@@ -150,11 +156,25 @@ def main():
                 local_input = gr.Image(label="Input stream")
                 local_output = gr.Image(streaming=True, label="Processed stream")
 
-        prompt = gr.Textbox(
-            value=default_prompt,
-            label="Prompt",
-            lines=3,
-        )
+        if use_reference_image:
+            with gr.Row():
+                prompt = gr.Textbox(
+                    value=default_prompt,
+                    label="Prompt",
+                    lines=3,
+                )
+                ref_image_input = gr.Image(
+                    label="Reference Image",
+                    type="numpy",
+                    sources=["upload"],
+                    image_mode="RGB",
+                )
+        else:
+            prompt = gr.Textbox(
+                value=default_prompt,
+                label="Prompt",
+                lines=3,
+            )
 
         mode.change(
             switch_mode,
@@ -186,6 +206,13 @@ def main():
         )
 
         prompt.change(set_prompt, inputs=prompt, outputs=None)
+
+        if use_reference_image:
+            ref_image_input.change(
+                set_reference_image_ui,
+                inputs=ref_image_input,
+                outputs=None,
+            )
 
     demo.queue(default_concurrency_limit=1).launch()
 
