@@ -1,5 +1,5 @@
 {
-    "default_prompt" : "",
+    "default_prompt" : "Black background, dark noisy texture, metalic, smooth, gray grain, 4k, high quality",
     "default_steps" : 2,
     "default_seed" : 52,
     "models_path" : "FLUX.2-klein-4B",

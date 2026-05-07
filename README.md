@@ -12,7 +12,7 @@ On a single **NVIDIA RTX 5090**, FluxRT achieves:
 | **Frame Rate**         | 25–50 FPS    |
 | **End-to-End Latency** | ~0.2 seconds |
 
-![Main Demo](./assets/main_demo.gif)
+![Main Demo](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/main_demo.gif)
 
 ## Real-Time Reference Image Workflows
 
@@ -20,11 +20,11 @@ FluxRT natively supports all FLUX.2 reference image features.
 
 Example: a simple real-time AI fitting room using a clothing item image as reference input.
 
-![Reference Demo](./assets/reference_demo.gif)
+![Reference Demo](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/reference_demo.gif)
 
 Example 2: interactive paint-style app with iterative image updates.
 
-![Interacive paint demo](./assets/paint_demo.gif)
+![Interacive paint demo](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/paint_demo.gif)
 
 
 # Quick Start
@@ -181,7 +181,7 @@ Below is a comparison against the baseline (resolution: 576 × 320, 2 inference 
 
 | Dynamic Area | Baseline (No Cache)                                     | With Spatial Cache                                    |
 | ------------ | ------------------------------------------------------- | ----------------------------------------------------- |
-| Demo         | ![Spatial Cache OFF](./assets/spatial_cache_off.gif)    | ![Spatial Cache ON](./assets/spatial_cache_on.gif)    |
+| Demo         | ![Spatial Cache OFF](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/spatial_cache_off.gif)    | ![Spatial Cache ON](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/spatial_cache_on.gif)    |
 | 0–10%        | 20 FPS                                                  | 50 FPS                                                |
 | 50%          | 20 FPS                                                  | 35 FPS                                                |
 | 90–100%      | 20 FPS                                                  | 25 FPS                                                |

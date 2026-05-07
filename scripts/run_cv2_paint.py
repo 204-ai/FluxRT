@@ -22,7 +22,9 @@ def main():
     h, w = resolution["height"], resolution["width"]
     mask_h, mask_w = h // 16, w // 16
 
-    image = cv2.imread("assets/background.png")
+    image = np.ones((h, w, 3), dtype=np.uint8) * 32
+    # image = cv2.imread("assets/background.png") # uncomment to load a custom image
+
     resized_frame = crop_maximal_rectangle(image, h, w)
     input_tensor.copy_from(resized_frame)
 
