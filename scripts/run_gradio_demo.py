@@ -22,7 +22,7 @@ def get_processor():
     global stream_processor, input_tensor, output_tensor, resolution
 
     if stream_processor is None:
-        # stream_processor = StreamProcessor("configs/stream_processor_config.json")
+        # stream_processor = StreamProcessor("configs/stream_processor_config.json") # uncomment if you dont need reference image
         stream_processor = StreamProcessor("configs/config_with_reference.json")
         stream_processor.start()
         stream_processor.set_prompt(default_prompt)
@@ -62,8 +62,6 @@ def set_prompt(prompt: str):
 
 
 def set_reference_image_ui(image):
-    if image is None:
-        return
     sp, _, _, _ = get_processor()
     sp.set_reference_image(image)
 
@@ -79,20 +77,15 @@ def switch_mode(mode: str, request: gr.Request | None):
     return (
         gr.update(visible=webcam_visible),
         gr.update(visible=local_visible),
-        None,
-        None,
-        gr.update(value=None),
-        None,
-        None,
     )
 
 
 def process_webcam(frame):
     if frame is None:
-        return None, None
+        return None
 
-    input_frame, processed = process_frame(to_bgr(frame))
-    return to_rgb(input_frame), to_rgb(processed)
+    _, processed = process_frame(to_bgr(frame))
+    return to_rgb(processed)
 
 
 def process_local_video(video_path: str | None, request: gr.Request | None):
@@ -138,8 +131,9 @@ def main():
                     sources=["webcam"],
                     streaming=True,
                     type="numpy",
-                    label="Input stream",
+                    label="Webcam",
                 )
+
                 webcam_output = gr.Image(
                     streaming=True,
                     label="Processed stream",
@@ -182,18 +176,13 @@ def main():
             outputs=[
                 webcam_panel,
                 local_panel,
-                webcam_input,
-                webcam_output,
-                video_file,
-                local_input,
-                local_output,
             ],
         )
 
         webcam_input.stream(
             process_webcam,
             inputs=webcam_input,
-            outputs=[webcam_input, webcam_output],
+            outputs=[webcam_output],
             stream_every=0.04,
             concurrency_limit=1,
         )

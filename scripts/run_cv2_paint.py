@@ -3,6 +3,7 @@ from fluxrt.utils import crop_maximal_rectangle
 import cv2
 import numpy as np
 import threading
+import time
 
 MASK_COLOR = np.array([30, 140, 255], dtype=np.uint8)
 MASK_ALPHA = 0.45
@@ -17,6 +18,10 @@ def main():
     output_tensor = stream_processor.get_output_tensor()
 
     stream_processor.start()
+
+    print("Initializing...")
+    while not stream_processor.is_ready():
+        time.sleep(0.1)
 
     resolution = stream_processor.get_resolution()
     h, w = resolution["height"], resolution["width"]

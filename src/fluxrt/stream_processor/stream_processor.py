@@ -1,5 +1,5 @@
 import multiprocessing
-from multiprocessing import Process, Value, Manager, Event
+from multiprocessing import Value
 from fluxrt.utils import SharedTensor
 from fluxrt.stream_processor.model_inference_subprocess import (
     ModelInferenceSubprocess,
@@ -7,9 +7,8 @@ from fluxrt.stream_processor.model_inference_subprocess import (
 from fluxrt.stream_processor.output_scheduler_subprocess import (
     OutputSchedulerSubprocess,
 )
-from queue import Empty
 import json
-import time
+import numpy as np
 
 
 class StreamProcessor:
@@ -33,6 +32,7 @@ class StreamProcessor:
 
         self.pack_is_ready = Value("b", False)
         self.last_processing_time = Value("f", 0.0)
+        self.frame_written = Value("b", False)
 
         self.model_inference_subprocess = ModelInferenceSubprocess(
             self.config,
@@ -48,6 +48,7 @@ class StreamProcessor:
             self.output_shared_tensor.name,
             self.pack_is_ready,
             self.last_processing_time,
+            self.frame_written,
         )
 
     def parse_config(self, config_path: str) -> dict:
@@ -83,14 +84,14 @@ class StreamProcessor:
     def set_param(self, name: str, value) -> None:
         self.model_inference_subprocess.set_param(name=name, value=value)
 
-    def set_reference_image(self, image) -> None:
+    def set_reference_image(self, image: np.ndarray | None) -> None:
         if not self.config.get("use_reference_image", False):
             raise ValueError(
                 "set_reference_image called but use_reference_image is not enabled in the config"
             )
         self.model_inference_subprocess.set_reference_image(image)
 
-    def set_mask(self, mask) -> None:
+    def set_mask(self, mask: np.ndarray) -> None:
         if self.config.get("mask_calculation_method", "auto") != "manual":
             raise ValueError(
                 "set_mask called but mask_calculation_method is not set to manual in the config"
@@ -99,6 +100,9 @@ class StreamProcessor:
 
     def get_resolution(self) -> dict:
         return self.resolution
+
+    def is_ready(self) -> bool:
+        return bool(self.frame_written.value)
 
     def get_input_shared_tensor_name(self) -> str:
         return self.input_shared_tensor.name

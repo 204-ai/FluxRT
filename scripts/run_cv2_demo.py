@@ -1,6 +1,7 @@
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
 import cv2
+import time
 
 
 def main():
@@ -16,7 +17,11 @@ def main():
     )
 
     resolution = stream_processor.get_resolution()
-    cap = cv2.VideoCapture("local_samples/video.mp4")
+    cap = cv2.VideoCapture(0)
+
+    print("Initializing...")
+    while not stream_processor.is_ready():
+        time.sleep(0.1)
 
     while True:
         ret, frame = cap.read()

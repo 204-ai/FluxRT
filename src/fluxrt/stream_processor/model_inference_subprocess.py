@@ -159,11 +159,19 @@ class ModelInferenceSubprocess:
         self.update_prompt_embeds(self.process_state["prompt"])
         self.previous_frame = None
 
-        if self.config["use_reference_image"]:
-            image = cv2.imread(self.config["reference_image_path"])
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            resolution = self.config["reference_image_resolution"]
-            image = cv2.resize(image, (resolution["width"], resolution["height"]))
+        if self.config.get("use_reference_image", False):
+            image = cv2.imread(self.config.get("reference_image_path", ""))
+            resolution = self.config.get("reference_image_resolution")
+            if image is None:
+                image = np.zeros(
+                    (resolution["height"], resolution["width"], 3), dtype=np.uint8
+                )
+                print(
+                    "Warning: use_reference_image is set to true but no valid reference_image_path is provided."
+                )
+            else:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                image = cv2.resize(image, (resolution["width"], resolution["height"]))
             self.reference_image = Image.fromarray(image)
 
         target_fps = self.config.get("target_fps", None)
@@ -185,7 +193,7 @@ class ModelInferenceSubprocess:
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
 
-    def set_reference_image(self, image) -> None:
+    def set_reference_image(self, image: np.ndarray | None) -> None:
         """
         Update the reference image on the fly.
         image: numpy uint8 RGB array
@@ -222,13 +230,22 @@ class ModelInferenceSubprocess:
                     if name == "prompt":
                         self.update_prompt_embeds(value)
                 elif cmd == "set_reference_image":
-                    image = payload  # numpy uint8 RGB array
+                    image = payload  # numpy uint8 RGB array or None
                     resolution = self.config["reference_image_resolution"]
-                    image = cv2.resize(
-                        image, (resolution["width"], resolution["height"])
-                    )
-                    self.reference_image = Image.fromarray(image)
+                    if image is not None:
+                        image = cv2.resize(
+                            image, (resolution["width"], resolution["height"])
+                        )
+                        self.reference_image = Image.fromarray(image)
+                    else:
+                        self.reference_image = Image.fromarray(
+                            np.zeros(
+                                (resolution["height"], resolution["width"], 3),
+                                dtype=np.uint8,
+                            )
+                        )
                     self.update_controller.reset_cache()
+
                 elif cmd == "set_mask":
                     mask = payload  # numpy uint8 array of shape (h // compression_ratio, w // compression_ratio)
                     mask_tensor = (

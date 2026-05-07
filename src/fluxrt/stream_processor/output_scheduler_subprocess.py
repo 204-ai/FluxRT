@@ -11,12 +11,14 @@ class OutputSchedulerSubprocess:
         output_shared_tensor_name: str,
         pack_is_ready,
         last_processing_time,
+        frame_written=None,
     ):
         self.config = config
         self.output_batch_shared_tensor_name = output_batch_shared_tensor_name
         self.output_shared_tensor_name = output_shared_tensor_name
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
+        self.frame_written = frame_written
 
         self.running = Value("b", False)
         self.process = None
@@ -64,6 +66,8 @@ class OutputSchedulerSubprocess:
                 self.output_shared_tensor.copy_from(
                     self.output_batch_shared_tensor.array[i]
                 )
+                if self.frame_written is not None and not self.frame_written.value:
+                    self.frame_written.value = True
                 if i < self.batch_size - 1:
                     time.sleep(sleep_interval)
 
