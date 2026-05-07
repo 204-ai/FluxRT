@@ -126,7 +126,6 @@ Minimal local demo:
 python scripts/run_cv2_demo.py
 ```
 
-
 ### OpenCV Reference Image Demo
 
 ```bash
@@ -137,6 +136,13 @@ python scripts/run_cv2_reference_demo.py
 
 ```bash
 python scripts/run_cv2_paint.py
+```
+
+### Process local video with FluxRT
+This script also supports CLI
+
+```bash
+python scripts/process_local_video.py --input input.mp4 --output out.mp4 --prompt "Turn this into oil on canvas art"
 ```
 
 # How It Works
