@@ -7,7 +7,7 @@ import gradio as gr
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
 
-default_prompt = "Turn this image into cyberpunk night, red and blue neon lamps, cinematic lighting, bokeh"
+default_prompt = "Turn this image into cyberpunk night, red and blue neon lamps, bokeh"
 
 stream_processor = None
 input_tensor = None
@@ -16,6 +16,8 @@ resolution = None
 
 stop_video_event = threading.Event()
 processor_lock = threading.Lock()
+current_video_id = 0
+current_video_id_lock = threading.Lock()
 
 
 def get_processor():
@@ -75,8 +77,10 @@ def switch_mode(mode: str, request: gr.Request | None):
     webcam_visible = mode == "webcam"
     local_visible = mode == "local"
     return (
-        gr.update(visible=webcam_visible),
-        gr.update(visible=local_visible),
+        gr.update(visible=webcam_visible),  # webcam_output_col
+        gr.update(visible=local_visible),  # local_output_col
+        gr.update(visible=webcam_visible),  # webcam_input_col
+        gr.update(visible=local_visible),  # local_input_col
     )
 
 
@@ -89,8 +93,13 @@ def process_webcam(frame):
 
 
 def process_local_video(video_path: str | None, request: gr.Request | None):
+    global current_video_id
     if not video_path:
         return None, None
+
+    with current_video_id_lock:
+        current_video_id += 1
+        my_id = current_video_id
 
     stop_video_event.clear()
     cap = cv2.VideoCapture(video_path)
@@ -99,6 +108,9 @@ def process_local_video(video_path: str | None, request: gr.Request | None):
 
     try:
         while not stop_video_event.is_set():
+            with current_video_id_lock:
+                if current_video_id != my_id:
+                    break
             ok, frame = cap.read()
             if not ok:
                 break
@@ -125,8 +137,19 @@ def main():
             label="Mode",
         )
 
-        with gr.Column(visible=True) as webcam_panel:
-            with gr.Row():
+        # Top: full-width processed output
+        with gr.Column(visible=True) as webcam_output_col:
+            webcam_output = gr.Image(
+                streaming=True,
+                label="Processed stream",
+            )
+
+        with gr.Column(visible=False) as local_output_col:
+            local_output = gr.Image(streaming=True, label="Processed stream")
+
+        # Bottom row: input | prompt | reference image
+        with gr.Row():
+            with gr.Column(visible=True) as webcam_input_col:
                 webcam_input = gr.Image(
                     sources=["webcam"],
                     streaming=True,
@@ -134,48 +157,37 @@ def main():
                     label="Webcam",
                 )
 
-                webcam_output = gr.Image(
-                    streaming=True,
-                    label="Processed stream",
+            with gr.Column(visible=False) as local_input_col:
+                video_file = gr.File(
+                    label="Choose local video",
+                    file_count="single",
+                    file_types=["video"],
+                    type="filepath",
                 )
-
-        with gr.Column(visible=False) as local_panel:
-            video_file = gr.File(
-                label="Choose local video",
-                file_count="single",
-                file_types=["video"],
-                type="filepath",
-            )
-            with gr.Row():
                 local_input = gr.Image(label="Input stream")
-                local_output = gr.Image(streaming=True, label="Processed stream")
 
-        if use_reference_image:
-            with gr.Row():
-                prompt = gr.Textbox(
-                    value=default_prompt,
-                    label="Prompt",
-                    lines=3,
-                )
-                ref_image_input = gr.Image(
-                    label="Reference Image",
-                    type="numpy",
-                    sources=["upload"],
-                    image_mode="RGB",
-                )
-        else:
             prompt = gr.Textbox(
                 value=default_prompt,
                 label="Prompt",
                 lines=3,
             )
 
+            if use_reference_image:
+                ref_image_input = gr.Image(
+                    label="Reference Image",
+                    type="numpy",
+                    sources=["upload"],
+                    image_mode="RGB",
+                )
+
         mode.change(
             switch_mode,
             inputs=mode,
             outputs=[
-                webcam_panel,
-                local_panel,
+                webcam_output_col,
+                local_output_col,
+                webcam_input_col,
+                local_input_col,
             ],
         )
 
@@ -191,7 +203,6 @@ def main():
             process_local_video,
             inputs=video_file,
             outputs=[local_input, local_output],
-            concurrency_limit=1,
         )
 
         prompt.change(set_prompt, inputs=prompt, outputs=None)
