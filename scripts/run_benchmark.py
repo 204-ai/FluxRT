@@ -1,3 +1,5 @@
+import argparse
+
 from fluxrt import StreamProcessor
 from fluxrt.utils.scan_hardware import scan_hardware
 import cv2
@@ -7,12 +9,18 @@ import time
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run FluxRT benchmark.")
+    parser.add_argument("--int8", action="store_true", help="Enable int8 quantization")
+    args = parser.parse_args()
+
     config_path = "configs/benchmark_config.json"
 
     stream_processor = StreamProcessor(config_path)
     input_tensor = stream_processor.get_input_tensor()
     output_tensor = stream_processor.get_output_tensor()
 
+    if args.int8:
+        stream_processor.enable_quantization()
     stream_processor.start()
 
     resolution = stream_processor.get_resolution()

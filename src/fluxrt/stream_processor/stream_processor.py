@@ -113,3 +113,6 @@ class StreamProcessor:
     def get_last_processing_time(self) -> float:
         with self.last_processing_time.get_lock():
             return self.last_processing_time.value
+
+    def enable_quantization(self) -> None:
+        self.model_inference_subprocess.enable_quantization()

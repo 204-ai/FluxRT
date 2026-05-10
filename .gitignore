@@ -1,9 +1,11 @@
 .vscode/
 local_samples/
+experiments/
 
 # Weights
 interpolation_model/
 FLUX.2-klein-4B/
+FLUX.2-klein-4B-int8/
 RIFE-safetensors/
 
 

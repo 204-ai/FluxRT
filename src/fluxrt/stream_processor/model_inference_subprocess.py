@@ -3,6 +3,7 @@ import time
 import os
 import cv2
 import numpy as np
+import json
 from safetensors.torch import load_file
 from multiprocessing import Process, Value, Manager
 from copy import deepcopy
@@ -11,7 +12,8 @@ from PIL import Image
 
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.models import AutoencoderKLFlux2
-from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
+from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM, AutoConfig
+from accelerate import init_empty_weights
 
 from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
@@ -47,6 +49,12 @@ class ModelInferenceSubprocess:
         self.shared_state = manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
 
+    def enable_quantization(self):
+        """
+        Should be called before the subprocess is started.
+        """
+        self.config["enable_int8_quantization"] = True
+
     def init_process_state(self):
         self.device = "cuda"
         self.process_state = {
@@ -55,15 +63,8 @@ class ModelInferenceSubprocess:
             "seed": self.config["default_seed"],
         }
 
-    def load_models(self):
-        self.interpolation_model = IFNet()
-        self.interpolation_model.load_state_dict(
-            load_file("RIFE-safetensors/flownet.safetensors")
-        )
-        self.interpolation_model.to("cuda", dtype=torch.float16)
-        self.interpolation_model.eval()
-
-        device = "cuda"
+    def load_models_without_quantization(self):
+        device = self.device
         dtype = torch.bfloat16
 
         models_path = self.config["models_path"]
@@ -83,7 +84,63 @@ class ModelInferenceSubprocess:
             f"{models_path}/tokenizer", local_files_only=True, device=device
         )
 
-        if self.config["compile_models"]:
+    def load_quantized_models(self):
+        from optimum.quanto import requantize
+        from fluxrt.stream_processor.quantized_flux2 import (
+            QuantizedFlux2Transformer2DModel,
+        )
+
+        device = self.device
+        dtype = torch.bfloat16
+
+        models_path = self.config["models_path"]
+        int8_models_path = self.config["int8_models_path"]
+
+        qtransformer = QuantizedFlux2Transformer2DModel.from_pretrained(
+            int8_models_path, local_files_only=True
+        )
+        qtransformer.to(device=device, dtype=dtype)
+        self.transformer = qtransformer._wrapped
+
+        self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            f"{models_path}/scheduler", local_files_only=True, device=device
+        )
+        self.vae = AutoencoderKLFlux2.from_pretrained(
+            f"{models_path}/vae", local_files_only=True, device=device
+        ).to(device, dtype)
+
+        config = AutoConfig.from_pretrained(
+            f"{int8_models_path}/text_encoder", local_files_only=True
+        )
+        with init_empty_weights():
+            text_encoder = Qwen3ForCausalLM(config)
+
+        with open(f"{int8_models_path}/text_encoder/quanto_qmap.json", "r") as f:
+            qmap = json.load(f)
+        state_dict = load_file(f"{int8_models_path}/text_encoder/model.safetensors")
+        requantize(text_encoder, state_dict=state_dict, quantization_map=qmap)
+        text_encoder.eval()
+        text_encoder.to(device, dtype=dtype)
+        self.text_encoder = text_encoder
+
+        self.tokenizer = Qwen2TokenizerFast.from_pretrained(
+            f"{int8_models_path}/tokenizer", local_files_only=True
+        )
+
+    def load_models(self):
+        self.interpolation_model = IFNet()
+        self.interpolation_model.load_state_dict(
+            load_file("RIFE-safetensors/flownet.safetensors")
+        )
+        self.interpolation_model.to("cuda", dtype=torch.float16)
+        self.interpolation_model.eval()
+
+        if self.config.get("enable_int8_quantization", False):
+            self.load_quantized_models()
+        else:
+            self.load_models_without_quantization()
+
+        if self.config.get("compile_models", False):
             self.transformer = torch.compile(
                 self.transformer,
             )
@@ -118,7 +175,7 @@ class ModelInferenceSubprocess:
             update_controller=self.update_controller,
             subprocess_config=self.config,
         )
-        self.pipe.to(device)
+        self.pipe.to(self.device)
 
     def update_prompt_embeds(self, prompt):
         self.prompt_embeds, text_ids = self.pipe.encode_prompt(

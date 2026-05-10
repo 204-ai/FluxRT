@@ -1,3 +1,4 @@
+import argparse
 import threading
 import time
 
@@ -13,6 +14,7 @@ stream_processor = None
 input_tensor = None
 output_tensor = None
 resolution = None
+use_int8 = False
 
 stop_video_event = threading.Event()
 processor_lock = threading.Lock()
@@ -26,6 +28,8 @@ def get_processor():
     if stream_processor is None:
         # stream_processor = StreamProcessor("configs/stream_processor_config.json") # uncomment if you dont need reference image
         stream_processor = StreamProcessor("configs/config_with_reference.json")
+        if use_int8:
+            stream_processor.enable_quantization()
         stream_processor.start()
         stream_processor.set_prompt(default_prompt)
 
@@ -127,6 +131,12 @@ def process_local_video(video_path: str | None, request: gr.Request | None):
 
 
 def main():
+    global use_int8
+    parser = argparse.ArgumentParser(description="Run FluxRT Gradio demo.")
+    parser.add_argument("--int8", action="store_true", help="Enable int8 quantization")
+    args, _ = parser.parse_known_args()
+    use_int8 = args.int8
+
     get_processor()
     use_reference_image = stream_processor.config.get("use_reference_image", False)
 

@@ -20,13 +20,12 @@ The system is intended for:
 - interactive art tools
 - creative coding
 
-On a single **NVIDIA RTX 5090**, FluxRT achieves:
+With resolution `512 × 512`, FluxRT achieves:
 
-| Metric                 | Value        |
-|------------------------|--------------|
-| **Resolution**         | 512 × 512    |
-| **Frame Rate**         | 20–40 FPS    |
-| **End-to-End Latency** | ~0.2 seconds |
+| GPU                    | RTX 5090        |        RTX 4090 |
+|------------------------|---------------- | --------------- |
+| **Frame Rate**         | 20–40 FPS       | 15–30 FPS       |
+| **End-to-End Latency** | ~0.2 seconds    | ~0.3 seconds    |
 
 ![Main Demo](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/main_demo.gif)
 
@@ -47,13 +46,11 @@ Example 2: interactive paint-style app with iterative image updates.
 
 ### System Requirements
 
-| Component | Requirement               |
-| --------- | ------------------------- |
-| GPU       | NVIDIA RTX 5090 or higher |
-| VRAM      | 32 GB+                    |
-| RAM       | 64 GB recommended         |
-| Python    | 3.12+                     |
-| CUDA      | 12.8+                     |
+|           | Minimal (int8 only) | Recommended         |
+| --------- | ------------------- | ------------------- |
+| GPU       | NVIDIA RTX 4090     | NVIDIA RTX 5090     |
+| VRAM      | 20 GB               | 32 GB               |
+| RAM       | 16 GB               | 32 GB               |
 
 
 ## 1. Clone the Repository
@@ -79,6 +76,8 @@ pip install -e .
 ```
 
 ## 3. Download Required Models
+
+Ensure you have git lfs installed or run `git lfs install`
 
 ### RIFE Frame Interpolation Model
 
@@ -106,6 +105,20 @@ cd FluxRT
 git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
 ```
 
+### Optional: int8 quantized FLUX.2-klein-4B
+
+Download from Hugging Face:
+
+[https://huggingface.co/aydin99/FLUX.2-klein-4B-int8](https://huggingface.co/aydin99/FLUX.2-klein-4B-int8)
+
+This is required only if you want to use quantized `int8` inference.
+Note that downloading unquantized `FLUX.2-klein-4B` model (previous point) is **still reqired**.
+
+```bash
+cd FluxRT
+git clone https://huggingface.co/aydin99/FLUX.2-klein-4B-int8
+```
+
 <details>
 <summary>Required directory structure</summary>
 
@@ -113,12 +126,17 @@ git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
 FluxRT/
 ├── RIFE-safetensors/
 │   └── flownet.safetensors
-└── FLUX.2-klein-4B/
-    ├── model_index.json
-    ├── scheduler/
+├── FLUX.2-klein-4B/
+│   ├── model_index.json
+│   ├── scheduler/
+│   ├── text_encoder/
+│   ├── tokenizer/
+│   ├── transformer/
+│   └── vae/
+└── FLUX.2-klein-4B-int8/ (optional)
+    ├── diffusion_pytorch_model.safetensors
     ├── text_encoder/
     ├── tokenizer/
-    ├── transformer/
     └── vae/
 ```
 
@@ -126,6 +144,8 @@ FluxRT/
 
 
 ## 4. Run the Demos
+
+To enable `int8` quantization you can either add falg `--int8` when running any script or set `enable_int8_quantization` to `true` in  the corresponding config.
 
 ### Gradio Demo
 
@@ -138,6 +158,11 @@ Interactive web UI with:
 
 ```bash
 python scripts/run_gradio_demo.py
+```
+Or to use `int8` quantization:
+
+```bash
+python scripts/run_gradio_demo.py --int8
 ```
 
 Then open:

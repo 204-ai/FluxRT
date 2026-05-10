@@ -24,6 +24,7 @@ def main():
     parser.add_argument(
         "--prompt", default=DEFAULT_PROMPT, help="Style prompt for processing"
     )
+    parser.add_argument("--int8", action="store_true", help="Enable int8 quantization")
     args = parser.parse_args()
 
     config_path = "configs/stream_processor_config.json"
@@ -32,6 +33,8 @@ def main():
     input_tensor = stream_processor.get_input_tensor()
     output_tensor = stream_processor.get_output_tensor()
 
+    if args.int8:
+        stream_processor.enable_quantization()
     stream_processor.start()
     stream_processor.set_prompt(args.prompt)
 

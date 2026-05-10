@@ -1,3 +1,5 @@
+import argparse
+
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
 import cv2
@@ -11,12 +13,18 @@ BRUSH_RADIUS = 15
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run FluxRT paint demo.")
+    parser.add_argument("--int8", action="store_true", help="Enable int8 quantization")
+    args = parser.parse_args()
+
     config_path = "configs/paint_config.json"
 
     stream_processor = StreamProcessor(config_path)
     input_tensor = stream_processor.get_input_tensor()
     output_tensor = stream_processor.get_output_tensor()
 
+    if args.int8:
+        stream_processor.enable_quantization()
     stream_processor.start()
 
     print("Initializing...")

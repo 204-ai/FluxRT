@@ -1,3 +1,5 @@
+import argparse
+
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
 import cv2
@@ -6,6 +8,10 @@ import time
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run FluxRT reference image demo.")
+    parser.add_argument("--int8", action="store_true", help="Enable int8 quantization")
+    args = parser.parse_args()
+
     # Note: the path to reference image is defined in this config.
     config_path = "configs/config_with_reference.json"
 
@@ -13,6 +19,8 @@ def main():
     input_tensor = stream_processor.get_input_tensor()
     output_tensor = stream_processor.get_output_tensor()
 
+    if args.int8:
+        stream_processor.enable_quantization()
     stream_processor.start()
 
     resolution = stream_processor.get_resolution()
