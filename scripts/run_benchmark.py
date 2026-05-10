@@ -92,6 +92,9 @@ def main():
     print("Configuration:\n")
     print(json.dumps(stream_processor.config, indent=2, default=str))
 
+    if args.int8:
+        print("\nQuantization: int8 enabled through --int8 flag\n")
+
     print("\nHardware Information:\n")
     hardware_info = scan_hardware()
     print(json.dumps(hardware_info, indent=2, default=str))
