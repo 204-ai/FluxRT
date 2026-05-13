@@ -55,8 +55,8 @@ IF EXIST "!CONDA_BASE!\envs\%CONDA_ENV%" (
     echo [+] Conda environment '%CONDA_ENV%' already exists.
 ) ELSE (
     echo [+] Creating conda environment '%CONDA_ENV%' (python=3.12^)...
-    conda create -n %CONDA_ENV% python=3.12 pip -y
-    IF ERRORLEVEL 1 (
+    cmd /c conda create -n %CONDA_ENV% python=3.12 pip -y
+    IF NOT EXIST "!CONDA_BASE!\envs\%CONDA_ENV%" (
         echo [ERROR] Failed to create conda environment.
         exit /b 1
     )
