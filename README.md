@@ -52,6 +52,8 @@ Example 2: interactive paint-style app with iterative image updates.
 
 Ensure you have **git**, **git lfs** and **conda** installed.
 
+CUDA **12.8** is recommended. 
+
 ## Windows
 
 ```bash
