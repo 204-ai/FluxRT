@@ -31,7 +31,12 @@ from fluxrt.utils import crop_maximal_rectangle
 
 POLL_MS = 40
 MAX_CAM_INDEX = 8
-CAM_BACKEND = cv2.CAP_MSMF if platform.system() == "Windows" else cv2.CAP_V4L2
+if platform.system() == "Windows":
+    CAM_BACKEND = cv2.CAP_DSHOW
+    CAM_BACKEND_FALLBACK = cv2.CAP_MSMF
+else:
+    CAM_BACKEND = cv2.CAP_V4L2
+    CAM_BACKEND_FALLBACK = None
 DEFAULT_CONFIG = "configs/config_with_reference.json"
 
 # ── colour tokens ────────────────────────────────────────────────────────────
@@ -61,6 +66,8 @@ def enumerate_cameras() -> list[tuple[int, str]]:
     found = []
     for i in range(MAX_CAM_INDEX):
         cap = cv2.VideoCapture(i, CAM_BACKEND)
+        if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
+            cap = cv2.VideoCapture(i, CAM_BACKEND_FALLBACK)
         if cap.isOpened():
             found.append((i, f"Camera {i}"))
             cap.release()
