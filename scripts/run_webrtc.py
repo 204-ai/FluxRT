@@ -877,6 +877,17 @@ def main() -> None:
             "from the first WebRTC peer that sends a video track."
         ),
     )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="Path to TLS cert (enables HTTPS, required by browsers for "
+        "getUserMedia on non-localhost origins).",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="Path to TLS private key. Use together with --ssl-certfile.",
+    )
     args = parser.parse_args()
 
     log.info("Loading StreamProcessor from %s", args.config)
@@ -904,8 +915,23 @@ def main() -> None:
         )
         producer_thread.start()
 
-    log.info("Open http://<this-host>:%d/ in a LAN browser", args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    use_tls = bool(args.ssl_certfile and args.ssl_keyfile)
+    scheme = "https" if use_tls else "http"
+    log.info("Open %s://<this-host>:%d/ in a LAN browser", scheme, args.port)
+    if not use_tls:
+        log.warning(
+            "Running plain HTTP — browsers will block getUserMedia on non-"
+            "localhost origins. Pass --ssl-certfile + --ssl-keyfile for HTTPS."
+        )
+
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
+    )
 
 
 if __name__ == "__main__":
