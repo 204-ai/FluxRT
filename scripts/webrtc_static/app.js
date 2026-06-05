@@ -471,6 +471,9 @@ useCam.addEventListener('change', async () => {
     handMarker.disabled = true;
     return;
   }
+  // Default to mirrored (selfie) view when the user enables their own camera.
+  flipInput.checked = true;
+  input.setMirror(true);
   await refreshCameras();
 });
 
