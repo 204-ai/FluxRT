@@ -1,5 +1,5 @@
 {
-    "default_prompt" : "person with giant googly eyes, background in the style of Stanley Kubrick",
+    "default_prompt" : "person with giant googly eyes",
     "default_steps" : 2,
     "default_seed" : 52,
     "models_path" : "FLUX.2-klein-4B",
