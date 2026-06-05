@@ -677,6 +677,14 @@ CLIENT_HTML = """<!doctype html>
   .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; }
   input[type=text] { flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
   input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
+  textarea#prompt {
+    flex: 1 1 280px;
+    padding: 8px 10px;
+    background: #222; color: #eee;
+    border: 1px solid #333; border-radius: 4px;
+    font: inherit; line-height: 1.4;
+    resize: none; min-height: 36px; max-height: 240px; overflow-y: auto;
+  }
   button { padding: 8px 14px; background: #2a6cd4; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
   button:hover { background: #3a7ce4; }
   button:disabled { background: #444; cursor: not-allowed; }
@@ -711,12 +719,29 @@ CLIENT_HTML = """<!doctype html>
     <video id="v" autoplay playsinline muted></video>
   </div>
 
-  <div class="controls">
+  <div class="controls" style="align-items:flex-start;">
     <button id="start">Start</button>
     <button id="stop" disabled>Stop</button>
-    <input id="prompt" type="text" placeholder="Prompt — press Enter to apply">
+    <textarea id="prompt" rows="1" placeholder="Prompt — Enter to apply, Shift+Enter for newline"></textarea>
     <label>seed <input id="seed" type="number" value="52"></label>
     <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
+  </div>
+
+  <div class="ref" id="comfyRow">
+    <label style="font-size:12px;color:#aaa;">Comfy server:</label>
+    <select id="comfySelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;min-width:120px;">
+      <option value="">(loading...)</option>
+    </select>
+    <button id="comfyPull">Pull latest output → reference</button>
+    <span id="comfyStatus" style="font-size:11px;color:#888;"></span>
+  </div>
+
+  <div class="ref" id="refRow">
+    <div class="drop" id="drop">Drop image here or click to choose a reference</div>
+    <input type="file" id="file" accept="image/*" hidden>
+    <img class="preview" id="preview" alt="reference preview">
+    <div class="meta" id="refMeta">no reference</div>
+    <button id="clearRef">Clear</button>
   </div>
 
   <div class="controls" style="border-top:1px solid #2a2a2a;">
@@ -754,23 +779,6 @@ CLIENT_HTML = """<!doctype html>
     <label>length <input id="trailLen" type="range" min="4" max="80" step="1" value="20" style="vertical-align:middle;"></label>
     <span id="trailLenLbl" style="font-size:11px;color:#888;min-width:28px;">20</span>
     <span id="poseStatus" style="font-size:11px;color:#888;align-self:center;"></span>
-  </div>
-
-  <div class="ref" id="comfyRow">
-    <label style="font-size:12px;color:#aaa;">Comfy server:</label>
-    <select id="comfySelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;min-width:120px;">
-      <option value="">(loading...)</option>
-    </select>
-    <button id="comfyPull">Pull latest output → reference</button>
-    <span id="comfyStatus" style="font-size:11px;color:#888;"></span>
-  </div>
-
-  <div class="ref" id="refRow">
-    <div class="drop" id="drop">Drop image here or click to choose a reference</div>
-    <input type="file" id="file" accept="image/*" hidden>
-    <img class="preview" id="preview" alt="reference preview">
-    <div class="meta" id="refMeta">no reference</div>
-    <button id="clearRef">Clear</button>
   </div>
 
   <pre class="log" id="log"></pre>
@@ -1140,9 +1148,31 @@ CLIENT_HTML = """<!doctype html>
   startBtn.addEventListener('click', start);
   stopBtn.addEventListener('click', stop);
 
+  // Auto-resize the prompt textarea to fit its content (up to CSS max-height).
+  function autoSizePrompt() {
+    promptIn.style.height = 'auto';
+    promptIn.style.height = (promptIn.scrollHeight + 2) + 'px';
+  }
+  promptIn.addEventListener('input', autoSizePrompt);
+  // Initial fit + refit after programmatic value updates (state:prompt broadcasts).
+  autoSizePrompt();
+  const _origPromptDescriptor = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype, 'value'
+  );
+  Object.defineProperty(promptIn, 'value', {
+    get() { return _origPromptDescriptor.get.call(this); },
+    set(v) { _origPromptDescriptor.set.call(this, v); autoSizePrompt(); },
+    configurable: true,
+  });
+
   promptIn.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && promptIn.value.trim()) {
-      sendCtrl('prompt:' + promptIn.value.trim());
+    // Plain Enter sends; Shift+Enter (or Cmd/Ctrl+Enter) inserts a newline.
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+      const v = promptIn.value.trim();
+      if (v) {
+        e.preventDefault();
+        sendCtrl('prompt:' + v);
+      }
     }
   });
   seedIn.addEventListener('change', () => sendCtrl('seed:' + seedIn.value));
