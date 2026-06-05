@@ -427,8 +427,11 @@ CLIENT_HTML = """<!doctype html>
   #status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #333; }
   #status.live { background: #1f7a3a; }
   #status.err { background: #7a1f1f; }
-  .stage { display: flex; justify-content: center; padding: 12px; background: #0a0a0a; }
-  video { width: 100%; max-width: 1024px; background: #000; display: block; }
+  .stage { display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
+  .stage video { flex: 1 1 0; min-width: 0; max-width: 100%; background: #000; display: block; }
+  .stage.split video { max-width: 50%; }
+  .stage video#inv { display: none; }
+  .stage.split video#inv { display: block; }
   .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; }
   input[type=text] { flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
   input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
@@ -461,7 +464,8 @@ CLIENT_HTML = """<!doctype html>
     <span id="status">idle</span>
   </header>
 
-  <div class="stage">
+  <div class="stage" id="stage">
+    <video id="inv" autoplay playsinline muted></video>
     <video id="v" autoplay playsinline muted></video>
   </div>
 
@@ -475,6 +479,7 @@ CLIENT_HTML = """<!doctype html>
 
   <div class="controls" style="border-top:1px solid #2a2a2a;">
     <label><input id="useCam" type="checkbox"> Use my camera as input</label>
+    <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
     <select id="camSelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;flex:1 1 220px;" disabled>
       <option value="">— pick a camera —</option>
     </select>
@@ -502,10 +507,23 @@ CLIENT_HTML = """<!doctype html>
   const stepsIn = document.getElementById('steps');
   const logEl = document.getElementById('log');
   const useCam = document.getElementById('useCam');
+  const showInput = document.getElementById('showInput');
   const camSelect = document.getElementById('camSelect');
   const inputStatus = document.getElementById('inputStatus');
+  const stage = document.getElementById('stage');
+  const inv = document.getElementById('inv');
 
   let pc = null, ch = null, localStream = null;
+
+  function applyInputPreview() {
+    if (showInput.checked && localStream) {
+      inv.srcObject = localStream;
+      stage.classList.add('split');
+    } else {
+      inv.srcObject = null;
+      stage.classList.remove('split');
+    }
+  }
 
   function logLine(s) {
     const t = new Date().toLocaleTimeString();
@@ -564,6 +582,8 @@ CLIENT_HTML = """<!doctype html>
           direction: 'sendrecv',
           streams: [localStream],
         });
+        showInput.disabled = false;
+        applyInputPreview();
       } catch (e) {
         logLine('Camera access failed: ' + e.message);
         setStatus('camera blocked', 'err');
@@ -615,6 +635,9 @@ CLIENT_HTML = """<!doctype html>
       localStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
       localStream = null;
     }
+    inv.srcObject = null;
+    stage.classList.remove('split');
+    showInput.disabled = true;
     v.srcObject = null;
     setStatus('idle', '');
     startBtn.disabled = false;
@@ -745,8 +768,15 @@ CLIENT_HTML = """<!doctype html>
     }
   }
 
+  showInput.addEventListener('change', applyInputPreview);
+
   useCam.addEventListener('change', async () => {
     camSelect.disabled = !useCam.checked;
+    if (!useCam.checked) {
+      showInput.checked = false;
+      showInput.disabled = true;
+      applyInputPreview();
+    }
     if (useCam.checked) {
       // First call to enumerate after granting permission gives real labels.
       try {
