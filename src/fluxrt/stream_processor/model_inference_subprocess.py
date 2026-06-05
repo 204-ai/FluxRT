@@ -67,6 +67,16 @@ class ModelInferenceSubprocess:
         self.shared_state = self._manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
 
+    def __getstate__(self):
+        # The subprocess is spawned via Process(target=self.process_main),
+        # which pickles `self`. The SyncManager holds a weakref and is not
+        # picklable, so drop it from the child's state. Only the parent calls
+        # stop(), where _manager still exists; the picklable queue/dict
+        # proxies the child actually uses are kept.
+        state = self.__dict__.copy()
+        state.pop("_manager", None)
+        return state
+
     def enable_quantization(self):
         """
         Should be called before the subprocess is started.
