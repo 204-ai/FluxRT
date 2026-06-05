@@ -29,6 +29,7 @@ from typing import Optional
 
 import av
 import cv2
+import httpx
 import numpy as np
 import uvicorn
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
@@ -74,6 +75,10 @@ input_owner_lock = threading.Lock()
 peer_input_active = threading.Event()
 
 MAX_REFERENCE_BYTES = 10 * 1024 * 1024  # 10 MB cap for uploaded reference images.
+
+# Configured ComfyUI servers (populated in main() from --comfy-server flags).
+# Maps display name → base URL (no trailing slash).
+comfy_servers: dict[str, str] = {}
 
 
 def broadcast_ctrl(msg: str) -> None:
@@ -312,6 +317,41 @@ def _reference_enabled() -> bool:
     return bool(sp and sp.config.get("use_reference_image", False))
 
 
+def _apply_reference_bytes(body: bytes, source_label: str) -> dict:
+    """Decode image bytes, set as reference, cache preview, bump version,
+    broadcast. Returns the JSON-shaped result dict. Raises HTTPException
+    on decode failure. Used by both /reference upload and /comfy/pull."""
+    try:
+        img = Image.open(io.BytesIO(body)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Decode error: {exc}")
+
+    rgb = np.array(img)
+    sp.set_reference_image(rgb)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    global latest_reference_png, ref_version
+    with reference_lock:
+        latest_reference_png = buf.getvalue()
+        ref_version += 1
+        version = ref_version
+
+    log.info(
+        "Reference image set from %s: %dx%d (%d bytes, v%d)",
+        source_label, *rgb.shape[1::-1], len(body), version,
+    )
+    broadcast_ctrl(f"ref:set:{version}")
+
+    return {
+        "ok": True,
+        "size": [int(rgb.shape[1]), int(rgb.shape[0])],
+        "bytes": len(body),
+        "version": version,
+        "source": source_label,
+    }
+
+
 @app.post("/reference")
 async def post_reference(request: Request):
     if not _reference_enabled():
@@ -332,40 +372,82 @@ async def post_reference(request: Request):
             detail=f"Image too large (>{MAX_REFERENCE_BYTES // (1024 * 1024)} MB)",
         )
 
+    return JSONResponse(_apply_reference_bytes(body, "upload"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ComfyUI integration — pull latest output image from a configured server
+# and use it as the reference image. See the SKILL.md in
+# `~/Downloads/qwen-edit-test/` for the canonical comfy endpoints.
+# ──────────────────────────────────────────────────────────────────────────────
+@app.get("/comfy/servers")
+async def list_comfy_servers():
+    return {
+        "servers": [{"name": n, "url": u} for n, u in comfy_servers.items()],
+    }
+
+
+@app.post("/comfy/pull")
+async def pull_comfy(request: Request):
+    if not _reference_enabled():
+        raise HTTPException(status_code=400, detail="Reference image disabled")
+
+    name = request.query_params.get("server", "")
+    if not name or name not in comfy_servers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown comfy server: {name!r}. "
+            f"Known: {list(comfy_servers.keys())}",
+        )
+    base = comfy_servers[name].rstrip("/")
+
     try:
-        img = Image.open(io.BytesIO(body)).convert("RGB")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Decode error: {exc}")
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            hr = await client.get(f"{base}/history", params={"max_items": 20})
+            hr.raise_for_status()
+            history = hr.json()
 
-    rgb = np.array(img)
+            # `history` is dict insertion-ordered; newest entries last.
+            chosen = None
+            for prompt_id, entry in reversed(list(history.items())):
+                outputs = entry.get("outputs", {}) or {}
+                for node_id, out in outputs.items():
+                    for image in out.get("images", []) or []:
+                        if image.get("type") != "output":
+                            continue
+                        chosen = (prompt_id, node_id, image)
+                        break
+                    if chosen:
+                        break
+                if chosen:
+                    break
 
-    # `set_reference_image` runs in the inference subprocess; it accepts
-    # uint8 RGB and resizes to `reference_image_resolution` internally.
-    sp.set_reference_image(rgb)
+            if not chosen:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No output images in recent comfy history",
+                )
 
-    # Cache a PNG preview for GET /reference.
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    global latest_reference_png, ref_version
-    with reference_lock:
-        latest_reference_png = buf.getvalue()
-        ref_version += 1
-        version = ref_version
+            prompt_id, node_id, image = chosen
+            params = {
+                "filename": image["filename"],
+                "type": image["type"],
+                "subfolder": image.get("subfolder", ""),
+            }
+            vr = await client.get(f"{base}/view", params=params)
+            vr.raise_for_status()
+            body = vr.content
 
-    log.info(
-        "Reference image set: %dx%d (%d bytes uploaded, v%d)",
-        *rgb.shape[1::-1], len(body), version,
-    )
-    broadcast_ctrl(f"ref:set:{version}")
+    except httpx.HTTPError as exc:
+        log.warning("Comfy pull HTTP error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Comfy server error: {exc}")
 
-    return JSONResponse(
-        {
-            "ok": True,
-            "size": [int(rgb.shape[1]), int(rgb.shape[0])],
-            "bytes": len(body),
-            "version": version,
-        }
-    )
+    label = f"comfy:{name}:{image['filename']}"
+    result = _apply_reference_bytes(body, label)
+    result["prompt_id"] = prompt_id
+    result["node_id"] = node_id
+    result["filename"] = image["filename"]
+    return JSONResponse(result)
 
 
 @app.delete("/reference")
@@ -485,6 +567,15 @@ CLIENT_HTML = """<!doctype html>
       <option value="">— pick a camera —</option>
     </select>
     <span id="inputStatus" style="font-size:12px;color:#888;align-self:center;">input: server</span>
+  </div>
+
+  <div class="ref" id="comfyRow">
+    <label style="font-size:12px;color:#aaa;">Comfy server:</label>
+    <select id="comfySelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;min-width:120px;">
+      <option value="">(loading...)</option>
+    </select>
+    <button id="comfyPull">Pull latest output → reference</button>
+    <span id="comfyStatus" style="font-size:11px;color:#888;"></span>
   </div>
 
   <div class="ref" id="refRow">
@@ -801,6 +892,7 @@ CLIENT_HTML = """<!doctype html>
       const j = await r.json();
       if (!j.reference_enabled) {
         refRow.classList.add('disabled');
+        document.getElementById('comfyRow').classList.add('disabled');
         refMeta.textContent = 'disabled in config';
         drop.textContent = 'Reference disabled — start server with --config configs/config_with_reference.json';
       } else if (j.reference_set) {
@@ -944,6 +1036,63 @@ CLIENT_HTML = """<!doctype html>
     }
   });
 
+  // ── comfy server reference puller ─────────────────────────────────────────
+  const comfySelect = document.getElementById('comfySelect');
+  const comfyPullBtn = document.getElementById('comfyPull');
+  const comfyStatus = document.getElementById('comfyStatus');
+
+  async function loadComfyServers() {
+    try {
+      const r = await fetch('/comfy/servers');
+      const j = await r.json();
+      comfySelect.innerHTML = '';
+      if (!j.servers || j.servers.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(none configured)';
+        comfySelect.appendChild(opt);
+        comfyPullBtn.disabled = true;
+        return;
+      }
+      j.servers.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.name;
+        opt.textContent = `${s.name} (${s.url})`;
+        comfySelect.appendChild(opt);
+      });
+    } catch (e) {
+      logLine('Comfy server list error: ' + e);
+    }
+  }
+  loadComfyServers();
+
+  comfyPullBtn.addEventListener('click', async () => {
+    const name = comfySelect.value;
+    if (!name) return;
+    comfyPullBtn.disabled = true;
+    comfyStatus.textContent = `pulling from ${name}...`;
+    try {
+      const r = await fetch('/comfy/pull?server=' + encodeURIComponent(name), {
+        method: 'POST',
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ detail: r.statusText }));
+        comfyStatus.textContent = 'error: ' + (err.detail || r.statusText);
+        logLine('Comfy pull failed: ' + (err.detail || r.statusText));
+        return;
+      }
+      const j = await r.json();
+      lastSeenRefVersion = j.version || lastSeenRefVersion;
+      comfyStatus.textContent = `pulled ${j.filename} (v${j.version})`;
+      refreshPreview(j.version);
+      logLine(`Comfy pulled: ${j.filename} from ${name} (v${j.version})`);
+    } catch (e) {
+      comfyStatus.textContent = 'error: ' + e.message;
+      logLine('Comfy pull error: ' + e);
+    } finally {
+      comfyPullBtn.disabled = false;
+    }
+  });
+
   clearRefBtn.addEventListener('click', async () => {
     try {
       const r = await fetch('/reference', { method: 'DELETE' });
@@ -996,7 +1145,34 @@ def main() -> None:
         default=None,
         help="Path to TLS private key. Use together with --ssl-certfile.",
     )
+    parser.add_argument(
+        "--comfy-server",
+        action="append",
+        default=[],
+        metavar="NAME=URL",
+        help=(
+            "Register a ComfyUI server the client can pull reference images "
+            "from. Repeatable. Example: "
+            "--comfy-server A=http://79.169.112.61:12040"
+        ),
+    )
     args = parser.parse_args()
+
+    # Populate comfy_servers dict. Fall back to the two known production
+    # servers (A=12040, B=12041) if none were passed on the CLI.
+    raw_entries = args.comfy_server or [
+        "A=http://79.169.112.61:12040",
+        "B=http://79.169.112.61:12041",
+    ]
+    for entry in raw_entries:
+        name, _, url = entry.partition("=")
+        name = name.strip()
+        url = url.strip().rstrip("/")
+        if not name or not url:
+            log.warning("Ignoring bad --comfy-server entry: %r", entry)
+            continue
+        comfy_servers[name] = url
+    log.info("Configured comfy servers: %s", comfy_servers)
 
     log.info("Loading StreamProcessor from %s", args.config)
     sp = StreamProcessor(args.config)
