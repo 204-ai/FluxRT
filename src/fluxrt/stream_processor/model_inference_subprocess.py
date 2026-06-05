@@ -8,6 +8,21 @@ from multiprocessing import Process, Value, Manager
 from queue import Empty
 from PIL import Image
 
+# ── torch.compile / Dynamo tuning ─────────────────────────────────────────────
+# The spatial-cache transformer in transformer_flux2.py specializes Dynamo
+# graphs on (a) per-block KV cache indexing (single_block_keys[block_id] for 20
+# distinct block_id values) and (b) sparse_mlp_compute() shapes that change
+# with the per-frame active-token mask. The default recompile_limit (8) gives
+# up partway and falls back to eager mode for the remaining graphs, costing
+# ~10-25% throughput. Raising the limit lets every variant compile, then warm
+# up once and stay hot.
+try:
+    torch._dynamo.config.recompile_limit = 64
+    torch._dynamo.config.cache_size_limit = 256
+except AttributeError:
+    # Older torch builds without _dynamo.config — skip silently; nothing breaks.
+    pass
+
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.models import AutoencoderKLFlux2
 from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM, AutoConfig
