@@ -85,6 +85,12 @@ comfy_servers: dict[str, str] = {}
 # the per-frame postprocess is gated by `set_lip_transfer(bool)`.
 lip_active: bool = False
 
+# Mirror the pipeline state so /healthz and late-joining peers can see it.
+# Updated from any path that changes the underlying value (API, DataChannel).
+current_prompt: str = ""
+current_seed: int = 0
+current_steps: int = 0
+
 
 def broadcast_ctrl(msg: str) -> None:
     """Send a string message to every open control DataChannel."""
@@ -270,6 +276,15 @@ async def offer(request: Request):
             except Exception:
                 pass
 
+        # Send current pipeline parameter snapshot to a fresh peer.
+        try:
+            if current_prompt:
+                channel.send(f"state:prompt:{current_prompt}")
+            channel.send(f"state:seed:{current_seed}")
+            channel.send(f"state:steps:{current_steps}")
+        except Exception:
+            pass
+
         @channel.on("close")
         def _on_close():
             ctrl_channels.discard(channel)
@@ -279,24 +294,31 @@ async def offer(request: Request):
         def _on_msg(msg):
             if not isinstance(msg, str):
                 return
+            global current_prompt, current_seed, current_steps
             if msg.startswith("prompt:"):
                 new_prompt = msg[len("prompt:"):].strip()
                 if new_prompt:
                     log.info("Prompt update: %r", new_prompt)
+                    current_prompt = new_prompt
                     sp.set_prompt(new_prompt)
                     channel.send("ack:prompt")
+                    broadcast_ctrl(f"state:prompt:{new_prompt}")
             elif msg.startswith("seed:"):
                 try:
                     seed = int(msg[len("seed:"):])
+                    current_seed = seed
                     sp.set_seed(seed)
                     channel.send(f"ack:seed:{seed}")
+                    broadcast_ctrl(f"state:seed:{seed}")
                 except ValueError:
                     channel.send("err:seed")
             elif msg.startswith("steps:"):
                 try:
                     steps = int(msg[len("steps:"):])
+                    current_steps = steps
                     sp.set_steps(steps)
                     channel.send(f"ack:steps:{steps}")
+                    broadcast_ctrl(f"state:steps:{steps}")
                 except ValueError:
                     channel.send("err:steps")
 
@@ -334,6 +356,91 @@ def _lip_enabled() -> bool:
     if not sp:
         return False
     return bool(sp.config.get("lip_transfer", {}).get("enable", False))
+
+
+@app.post("/prompt")
+async def post_prompt(request: Request):
+    """Set the generation prompt.
+    Body: JSON {"prompt": "..."} OR raw text/plain.
+    Query: ?prompt=... (URL-encoded) as a third option."""
+    if not sp:
+        raise HTTPException(status_code=503, detail="StreamProcessor not ready")
+
+    prompt: str | None = None
+    q = request.query_params.get("prompt")
+    if q is not None:
+        prompt = q
+    else:
+        ctype = (request.headers.get("content-type") or "").lower()
+        if "application/json" in ctype:
+            try:
+                payload = await request.json()
+                prompt = payload.get("prompt") if isinstance(payload, dict) else None
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Bad JSON: {exc}")
+        else:
+            prompt = (await request.body()).decode("utf-8", errors="replace")
+
+    if not prompt or not prompt.strip():
+        raise HTTPException(status_code=400, detail="Empty prompt")
+
+    prompt = prompt.strip()
+    global current_prompt
+    current_prompt = prompt
+    sp.set_prompt(prompt)
+    log.info("Prompt set via API: %r", prompt)
+    broadcast_ctrl(f"state:prompt:{prompt}")
+    return JSONResponse({"ok": True, "prompt": prompt})
+
+
+@app.post("/seed")
+async def post_seed(request: Request):
+    raw = request.query_params.get("value")
+    if raw is None:
+        try:
+            body = await request.json()
+            raw = body.get("value") if isinstance(body, dict) else None
+        except Exception:
+            raw = None
+    if raw is None:
+        raise HTTPException(status_code=400, detail="Missing ?value= (int)")
+    try:
+        seed = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Not an int: {raw!r}")
+
+    global current_seed
+    current_seed = seed
+    sp.set_seed(seed)
+    log.info("Seed set via API: %d", seed)
+    broadcast_ctrl(f"state:seed:{seed}")
+    return JSONResponse({"ok": True, "seed": seed})
+
+
+@app.post("/steps")
+async def post_steps(request: Request):
+    raw = request.query_params.get("value")
+    if raw is None:
+        try:
+            body = await request.json()
+            raw = body.get("value") if isinstance(body, dict) else None
+        except Exception:
+            raw = None
+    if raw is None:
+        raise HTTPException(status_code=400, detail="Missing ?value= (int)")
+    try:
+        steps = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"Not an int: {raw!r}")
+    if steps < 1 or steps > 8:
+        raise HTTPException(status_code=400, detail="steps must be 1..8")
+
+    global current_steps
+    current_steps = steps
+    sp.set_steps(steps)
+    log.info("Steps set via API: %d", steps)
+    broadcast_ctrl(f"state:steps:{steps}")
+    return JSONResponse({"ok": True, "steps": steps})
 
 
 @app.post("/lip-transfer")
@@ -539,6 +646,9 @@ async def _health():
         "input_source": "peer" if peer_input_active.is_set() else "server",
         "lip_enabled": _lip_enabled(),
         "lip_active": lip_active,
+        "prompt": current_prompt,
+        "seed": current_seed,
+        "steps": current_steps,
     }
 
 
@@ -943,6 +1053,18 @@ CLIENT_HTML = """<!doctype html>
       if (lipXfer.checked !== on) lipXfer.checked = on;
       lipStatus.textContent = on ? 'lipsync: ON' : 'lipsync: OFF';
       logLine('Lip transfer ' + (on ? 'enabled' : 'disabled'));
+    } else if (msg.startsWith('state:prompt:')) {
+      const val = msg.slice('state:prompt:'.length);
+      if (document.activeElement !== promptIn && promptIn.value !== val) {
+        promptIn.value = val;
+        logLine('Prompt synced from server: ' + val.slice(0, 40) + (val.length > 40 ? '...' : ''));
+      }
+    } else if (msg.startsWith('state:seed:')) {
+      const val = msg.slice('state:seed:'.length);
+      if (document.activeElement !== seedIn) seedIn.value = val;
+    } else if (msg.startsWith('state:steps:')) {
+      const val = msg.slice('state:steps:'.length);
+      if (document.activeElement !== stepsIn) stepsIn.value = val;
     } else {
       logLine('server: ' + msg);
     }
@@ -1290,6 +1412,12 @@ def main() -> None:
     if args.int8:
         sp.enable_quantization()
     sp.start()
+
+    # Initialize parameter mirror from config + CLI overrides.
+    global current_prompt, current_seed, current_steps
+    current_prompt = args.initial_prompt or sp.config.get("default_prompt", "")
+    current_seed = int(sp.config.get("default_seed", 0))
+    current_steps = int(sp.config.get("default_steps", 2))
 
     if args.initial_prompt:
         sp.set_prompt(args.initial_prompt)
