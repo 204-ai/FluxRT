@@ -723,8 +723,6 @@ CLIENT_HTML = """<!doctype html>
     <label><input id="useCam" type="checkbox"> Use my camera as input</label>
     <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
     <label><input id="flipInput" type="checkbox" disabled> Mirror input</label>
-    <label><input id="handMarker" type="checkbox" disabled> Hand marker</label>
-    <span id="poseStatus" style="font-size:11px;color:#888;align-self:center;"></span>
     <select id="camSelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;flex:1 1 220px;" disabled>
       <option value="">— pick a camera —</option>
     </select>
@@ -734,6 +732,28 @@ CLIENT_HTML = """<!doctype html>
   <div class="controls" style="border-top:1px solid #2a2a2a;">
     <label><input id="lipXfer" type="checkbox" disabled> Lip transfer</label>
     <span id="lipStatus" style="font-size:12px;color:#888;align-self:center;">lipsync: unavailable</span>
+  </div>
+
+  <div class="controls" style="border-top:1px solid #2a2a2a;align-items:center;">
+    <label><input id="handMarker" type="checkbox" disabled> Hand marker</label>
+    <label>landmark
+      <select id="markerLandmark" style="padding:4px 6px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;">
+        <option value="15">Left wrist</option>
+        <option value="16">Right wrist</option>
+        <option value="19">Left index</option>
+        <option value="20">Right index</option>
+        <option value="0">Nose</option>
+        <option value="11">Left shoulder</option>
+        <option value="12">Right shoulder</option>
+      </select>
+    </label>
+    <label>color <input id="markerColor" type="color" value="#ff3c3c" style="width:42px;height:28px;padding:0;border:1px solid #333;background:#222;border-radius:4px;cursor:pointer;"></label>
+    <label>size <input id="markerSize" type="range" min="6" max="120" step="1" value="32" style="vertical-align:middle;"></label>
+    <span id="markerSizeLbl" style="font-size:11px;color:#888;min-width:28px;">32px</span>
+    <label><input id="trailToggle" type="checkbox"> Trail</label>
+    <label>length <input id="trailLen" type="range" min="4" max="80" step="1" value="20" style="vertical-align:middle;"></label>
+    <span id="trailLenLbl" style="font-size:11px;color:#888;min-width:28px;">20</span>
+    <span id="poseStatus" style="font-size:11px;color:#888;align-self:center;"></span>
   </div>
 
   <div class="ref" id="comfyRow">
@@ -776,14 +796,30 @@ CLIENT_HTML = """<!doctype html>
   const lipStatus = document.getElementById('lipStatus');
   const handMarker = document.getElementById('handMarker');
   const poseStatus = document.getElementById('poseStatus');
+  const markerLandmark = document.getElementById('markerLandmark');
+  const markerColor = document.getElementById('markerColor');
+  const markerSize = document.getElementById('markerSize');
+  const markerSizeLbl = document.getElementById('markerSizeLbl');
+  const trailToggle = document.getElementById('trailToggle');
+  const trailLen = document.getElementById('trailLen');
+  const trailLenLbl = document.getElementById('trailLenLbl');
 
   // Pose detection state. PoseLandmarker is imported dynamically the first
   // time the user enables the hand marker, so the bundle download (~2 MB
   // wasm + ~5 MB model) is avoided until needed.
   let poseLandmarker = null;
   let poseLoading = false;
-  const POSE_LM_LEFT_WRIST = 15;     // MediaPipe BlazePose landmark indices
-  const POSE_LM_RIGHT_WRIST = 16;
+  // Rolling buffer of recent landmark positions for the trail effect.
+  // Each entry is {x, y} in canvas pixel coords.
+  const trail = [];
+
+  // Parse "#rrggbb" → "r, g, b" for use in rgba() strings.
+  function hexToRgb(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return '255, 60, 60';
+    const n = parseInt(m[1], 16);
+    return `${(n >> 16) & 0xff}, ${(n >> 8) & 0xff}, ${n & 0xff}`;
+  }
 
   async function ensurePoseLandmarker() {
     if (poseLandmarker) return poseLandmarker;
@@ -878,36 +914,65 @@ CLIENT_HTML = """<!doctype html>
       }
 
       // Hand marker — detect pose on the freshly drawn canvas (which
-      // already reflects the mirror state), then composite a red circle
-      // into the same canvas so both the preview AND the WebRTC stream
-      // sent to FluxRT carry the marker.
+      // already reflects the mirror state) and composite a colored
+      // circle (and optional trail) into the same canvas so both the
+      // preview AND the WebRTC stream sent to FluxRT carry it.
       if (handMarker.checked && poseLandmarker) {
+        let cx = null, cy = null;
         try {
           const ts = performance.now();
           const result = poseLandmarker.detectForVideo(drawCanvas, ts);
           if (result && result.landmarks && result.landmarks[0]) {
-            // Picking landmark 15 (LEFT_WRIST) — when running detection
-            // against the on-screen canvas this naturally lands on
-            // whatever side the user perceives as their left hand,
-            // regardless of the mirror toggle.
-            const lm = result.landmarks[0][POSE_LM_LEFT_WRIST];
+            const idx = parseInt(markerLandmark.value, 10) | 0;
+            const lm = result.landmarks[0][idx];
             if (lm && (lm.visibility === undefined || lm.visibility > 0.5)) {
-              const cx = lm.x * W;
-              const cy = lm.y * H;
-              const r = Math.max(18, Math.min(W, H) * 0.04);
-              drawCtx.beginPath();
-              drawCtx.arc(cx, cy, r, 0, Math.PI * 2);
-              drawCtx.fillStyle = 'rgba(255, 60, 60, 0.85)';
-              drawCtx.fill();
-              drawCtx.lineWidth = 3;
-              drawCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-              drawCtx.stroke();
+              cx = lm.x * W;
+              cy = lm.y * H;
             }
           }
         } catch (e) {
           // Detection occasionally throws when the model is mid-init or
           // the canvas isn't ready yet — drop the frame and continue.
         }
+
+        const rgb = hexToRgb(markerColor.value);
+        const baseR = parseInt(markerSize.value, 10) || 32;
+        const maxTrail = trailToggle.checked ? (parseInt(trailLen.value, 10) || 20) : 0;
+
+        if (cx !== null) {
+          if (trailToggle.checked) {
+            trail.push({ x: cx, y: cy });
+            while (trail.length > maxTrail) trail.shift();
+          }
+        } else if (!trailToggle.checked) {
+          trail.length = 0;
+        }
+
+        // Trail dots fade older positions out and shrink them slightly.
+        if (trailToggle.checked && trail.length > 1) {
+          for (let i = 0; i < trail.length; i++) {
+            const p = trail[i];
+            const t = (i + 1) / trail.length;       // 0..1, newest = 1
+            const r = baseR * (0.35 + 0.65 * t);
+            drawCtx.beginPath();
+            drawCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            drawCtx.fillStyle = `rgba(${rgb}, ${0.15 + 0.55 * t})`;
+            drawCtx.fill();
+          }
+        }
+
+        // Solid head of the marker.
+        if (cx !== null) {
+          drawCtx.beginPath();
+          drawCtx.arc(cx, cy, baseR, 0, Math.PI * 2);
+          drawCtx.fillStyle = `rgba(${rgb}, 0.9)`;
+          drawCtx.fill();
+          drawCtx.lineWidth = Math.max(2, baseR * 0.1);
+          drawCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+          drawCtx.stroke();
+        }
+      } else if (trail.length) {
+        trail.length = 0;
       }
 
       drawRAF = requestAnimationFrame(drawFrame);
@@ -1245,8 +1310,21 @@ CLIENT_HTML = """<!doctype html>
       await ensurePoseLandmarker();
     } else {
       poseStatus.textContent = 'marker: OFF';
+      trail.length = 0;
     }
   });
+
+  markerSize.addEventListener('input', () => {
+    markerSizeLbl.textContent = markerSize.value + 'px';
+  });
+  trailLen.addEventListener('input', () => {
+    trailLenLbl.textContent = trailLen.value;
+  });
+  trailToggle.addEventListener('change', () => {
+    if (!trailToggle.checked) trail.length = 0;
+  });
+  // Switching to a different landmark drops the stale trail.
+  markerLandmark.addEventListener('change', () => { trail.length = 0; });
 
   useCam.addEventListener('change', async () => {
     camSelect.disabled = !useCam.checked;
