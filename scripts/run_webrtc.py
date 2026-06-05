@@ -12,13 +12,16 @@ Usage:
 Then open `http://<linux-lan-ip>:8765/` on any LAN client.
 
 Control:
-    - Prompt updates: typed in the browser input, sent over a DataChannel.
-    - Optional reference image upload could be added (not implemented here).
+    - Prompt / seed / steps updates: sent over a DataChannel.
+    - Reference image upload: HTTP POST /reference with raw image bytes.
+      Requires the active config to have `use_reference_image: true`
+      (e.g. `--config configs/config_with_reference.json`).
 """
 
 import argparse
 import asyncio
 import fractions
+import io
 import logging
 import threading
 import time
@@ -29,8 +32,9 @@ import cv2
 import numpy as np
 import uvicorn
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from PIL import Image
 
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
@@ -52,7 +56,14 @@ latest_rgb: Optional[np.ndarray] = None
 latest_lock = threading.Lock()
 producer_stop = threading.Event()
 
+# Cached reference image as PNG bytes for GET /reference preview.
+latest_reference_png: Optional[bytes] = None
+reference_lock = threading.Lock()
+
 pcs: set[RTCPeerConnection] = set()
+
+
+MAX_REFERENCE_BYTES = 10 * 1024 * 1024  # 10 MB cap for uploaded reference images.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -200,6 +211,84 @@ async def _shutdown():
         sp.stop()
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Reference image upload — requires `use_reference_image: true` in config.
+# Accepts raw image bytes (PNG / JPEG / WebP) as the request body.
+# Browser posts with `Content-Type: application/octet-stream` (or any).
+# ──────────────────────────────────────────────────────────────────────────────
+def _reference_enabled() -> bool:
+    return bool(sp and sp.config.get("use_reference_image", False))
+
+
+@app.post("/reference")
+async def post_reference(request: Request):
+    if not _reference_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Reference image conditioning is disabled. "
+                "Restart with --config configs/config_with_reference.json"
+            ),
+        )
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty body")
+    if len(body) > MAX_REFERENCE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large (>{MAX_REFERENCE_BYTES // (1024 * 1024)} MB)",
+        )
+
+    try:
+        img = Image.open(io.BytesIO(body)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Decode error: {exc}")
+
+    rgb = np.array(img)
+
+    # `set_reference_image` runs in the inference subprocess; it accepts
+    # uint8 RGB and resizes to `reference_image_resolution` internally.
+    sp.set_reference_image(rgb)
+
+    # Cache a PNG preview for GET /reference.
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    with reference_lock:
+        global latest_reference_png
+        latest_reference_png = buf.getvalue()
+
+    log.info("Reference image set: %dx%d (%d bytes uploaded)", *rgb.shape[1::-1], len(body))
+    return JSONResponse(
+        {
+            "ok": True,
+            "size": [int(rgb.shape[1]), int(rgb.shape[0])],
+            "bytes": len(body),
+        }
+    )
+
+
+@app.delete("/reference")
+async def delete_reference():
+    if not _reference_enabled():
+        raise HTTPException(status_code=400, detail="Reference image disabled")
+    sp.set_reference_image(None)
+    with reference_lock:
+        global latest_reference_png
+        latest_reference_png = None
+    log.info("Reference image cleared")
+    return JSONResponse({"ok": True, "cleared": True})
+
+
+@app.get("/reference")
+async def get_reference():
+    with reference_lock:
+        png = latest_reference_png
+    if png is None:
+        raise HTTPException(status_code=404, detail="No reference image set")
+    return Response(content=png, media_type="image/png")
+
+
 @app.get("/")
 async def _index():
     return HTMLResponse(CLIENT_HTML)
@@ -211,6 +300,8 @@ async def _health():
         "ready": bool(sp and sp.is_ready()),
         "peers": len(pcs),
         "resolution": resolution,
+        "reference_enabled": _reference_enabled(),
+        "reference_set": latest_reference_png is not None,
     }
 
 
@@ -241,6 +332,22 @@ CLIENT_HTML = """<!doctype html>
   button:disabled { background: #444; cursor: not-allowed; }
   .log { padding: 8px 14px; font-family: ui-monospace, monospace; font-size: 11px; color: #888; height: 6em; overflow-y: auto; background: #0a0a0a; }
   label { font-size: 12px; color: #aaa; display: flex; align-items: center; gap: 6px; }
+  .ref {
+    padding: 10px 14px; background: #1a1a1a; display: flex; align-items: center; gap: 10px;
+    border-top: 1px solid #2a2a2a;
+  }
+  .ref.disabled { opacity: 0.5; pointer-events: none; }
+  .ref .drop {
+    flex: 1 1 auto; min-height: 64px; padding: 10px 14px;
+    border: 2px dashed #444; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: #888; font-size: 12px; text-align: center; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .ref .drop.over { border-color: #2a6cd4; background: #142035; color: #ccc; }
+  .ref .preview { display: none; max-height: 80px; max-width: 120px; border-radius: 4px; border: 1px solid #333; }
+  .ref .preview.shown { display: block; }
+  .ref .meta { font-size: 11px; color: #888; min-width: 110px; }
 </style>
 </head>
 <body>
@@ -259,6 +366,14 @@ CLIENT_HTML = """<!doctype html>
     <input id="prompt" type="text" placeholder="Prompt — press Enter to apply">
     <label>seed <input id="seed" type="number" value="52"></label>
     <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
+  </div>
+
+  <div class="ref" id="refRow">
+    <div class="drop" id="drop">Drop image here or click to choose a reference</div>
+    <input type="file" id="file" accept="image/*" hidden>
+    <img class="preview" id="preview" alt="reference preview">
+    <div class="meta" id="refMeta">no reference</div>
+    <button id="clearRef">Clear</button>
   </div>
 
   <pre class="log" id="log"></pre>
@@ -380,6 +495,113 @@ CLIENT_HTML = """<!doctype html>
   stepsIn.addEventListener('change', () => sendCtrl('steps:' + stepsIn.value));
 
   window.addEventListener('beforeunload', stop);
+
+  // ── reference image upload ────────────────────────────────────────────────
+  const refRow = document.getElementById('refRow');
+  const drop = document.getElementById('drop');
+  const fileIn = document.getElementById('file');
+  const preview = document.getElementById('preview');
+  const refMeta = document.getElementById('refMeta');
+  const clearRefBtn = document.getElementById('clearRef');
+
+  async function probeHealth() {
+    try {
+      const r = await fetch('/healthz');
+      const j = await r.json();
+      if (!j.reference_enabled) {
+        refRow.classList.add('disabled');
+        refMeta.textContent = 'disabled in config';
+        drop.textContent = 'Reference disabled — start server with --config configs/config_with_reference.json';
+      } else if (j.reference_set) {
+        preview.src = '/reference?t=' + Date.now();
+        preview.classList.add('shown');
+        refMeta.textContent = 'reference active';
+      }
+    } catch (_) {}
+  }
+  probeHealth();
+
+  async function uploadReference(file) {
+    if (!file || !file.type.startsWith('image/')) {
+      logLine('Not an image file');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      logLine('File too large (>10 MB)');
+      return;
+    }
+    refMeta.textContent = 'uploading...';
+    try {
+      const r = await fetch('/reference', {
+        method: 'POST',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ detail: r.statusText }));
+        logLine('Reference upload failed: ' + (err.detail || r.statusText));
+        refMeta.textContent = 'upload failed';
+        return;
+      }
+      const j = await r.json();
+      logLine(`Reference set: ${j.size[0]}x${j.size[1]}, ${j.bytes} bytes`);
+      refMeta.textContent = `active ${j.size[0]}x${j.size[1]}`;
+      preview.src = URL.createObjectURL(file);
+      preview.classList.add('shown');
+    } catch (e) {
+      logLine('Reference upload error: ' + e);
+      refMeta.textContent = 'error';
+    }
+  }
+
+  drop.addEventListener('click', () => fileIn.click());
+  fileIn.addEventListener('change', () => {
+    if (fileIn.files.length) uploadReference(fileIn.files[0]);
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => {
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      drop.classList.add('over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(ev => {
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault(); e.stopPropagation();
+      drop.classList.remove('over');
+    });
+  });
+  drop.addEventListener('drop', (e) => {
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      uploadReference(e.dataTransfer.files[0]);
+    }
+  });
+
+  // Paste from clipboard (Cmd+V on macOS).
+  window.addEventListener('paste', (e) => {
+    if (!e.clipboardData) return;
+    for (const item of e.clipboardData.items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) uploadReference(file);
+        break;
+      }
+    }
+  });
+
+  clearRefBtn.addEventListener('click', async () => {
+    try {
+      const r = await fetch('/reference', { method: 'DELETE' });
+      if (r.ok) {
+        preview.classList.remove('shown');
+        preview.removeAttribute('src');
+        refMeta.textContent = 'no reference';
+        logLine('Reference cleared');
+      }
+    } catch (e) {
+      logLine('Clear error: ' + e);
+    }
+  });
 })();
 </script>
 </body>
