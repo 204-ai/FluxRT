@@ -20,6 +20,7 @@ Control:
 
 import argparse
 import asyncio
+import contextlib
 import fractions
 import io
 import logging
@@ -232,7 +233,42 @@ class FluxRTTrack(VideoStreamTrack):
 # ──────────────────────────────────────────────────────────────────────────────
 # FastAPI signaling app.
 # ──────────────────────────────────────────────────────────────────────────────
-app = FastAPI()
+_cleanup_done = threading.Event()
+
+
+async def _graceful_cleanup() -> None:
+    """Idempotent teardown: stop producer, close peers, stop the pipeline
+    (which now joins/terminates its subprocesses with timeouts). Safe to call
+    from the lifespan shutdown and from a signal handler."""
+    if _cleanup_done.is_set():
+        return
+    _cleanup_done.set()
+
+    log.info("Shutting down — stopping producer, peers, pipeline...")
+    producer_stop.set()
+
+    # Close all peer connections (best-effort, bounded).
+    for pc in list(pcs):
+        with contextlib.suppress(Exception):
+            await pc.close()
+    pcs.clear()
+
+    # sp.stop() does blocking joins; run it off the event loop so a wedged
+    # subprocess can't stall the loop while it escalates to terminate/kill.
+    if sp is not None:
+        loop = asyncio.get_running_loop()
+        with contextlib.suppress(Exception):
+            await loop.run_in_executor(None, sp.stop)
+    log.info("Shutdown complete.")
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    await _graceful_cleanup()
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 @app.post("/offer")
@@ -331,15 +367,6 @@ async def offer(request: Request):
     return JSONResponse(
         {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
     )
-
-
-@app.on_event("shutdown")
-async def _shutdown():
-    producer_stop.set()
-    await asyncio.gather(*(pc.close() for pc in list(pcs)))
-    pcs.clear()
-    if sp is not None:
-        sp.stop()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

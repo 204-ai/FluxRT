@@ -34,7 +34,14 @@ class OutputSchedulerSubprocess:
     def stop(self) -> None:
         self.running.value = False
         if self.process:
-            self.process.join()
+            self.process.join(timeout=5)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=3)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=2)
+            self.process = None
 
     def process_init(self) -> None:
         """

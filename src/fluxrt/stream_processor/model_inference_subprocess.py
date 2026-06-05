@@ -62,9 +62,9 @@ class ModelInferenceSubprocess:
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
 
-        manager = Manager()
-        self.command_queue = manager.Queue()
-        self.shared_state = manager.dict()
+        self._manager = Manager()
+        self.command_queue = self._manager.Queue()
+        self.shared_state = self._manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
 
     def enable_quantization(self):
@@ -270,7 +270,25 @@ class ModelInferenceSubprocess:
     def stop(self):
         self.running.value = False
         if self.process:
-            self.process.join()
+            # Graceful first: let process_main observe running=False and exit
+            # its loop. Escalate to terminate/kill if it is wedged in CUDA,
+            # torch.compile, or a blocking call so Ctrl+C never hangs.
+            self.process.join(timeout=5)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=3)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=2)
+            self.process = None
+        # Tear down the Manager process spawned in __init__; otherwise it
+        # lingers as an orphan after the main process exits.
+        if getattr(self, "_manager", None) is not None:
+            try:
+                self._manager.shutdown()
+            except Exception:
+                pass
+            self._manager = None
 
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
