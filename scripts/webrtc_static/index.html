@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FluxRT — WebRTC</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>FluxRT WebRTC</h1>
+    <span id="status">idle</span>
+    <span id="fpsBar">measuring…</span>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="output">Output</button>
+    <button class="tab-btn" data-tab="input">Input</button>
+  </nav>
+
+  <!-- ── OUTPUT TAB ──────────────────────────────────────────────────────── -->
+  <section class="tab-panel active" data-tab="output">
+    <div class="stage" id="stage">
+      <video id="inv" autoplay playsinline muted></video>
+      <video id="v" autoplay playsinline muted></video>
+    </div>
+
+    <div class="controls">
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+      <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
+    </div>
+
+    <div class="controls" style="align-items:flex-start;">
+      <textarea id="prompt" rows="1" placeholder="Prompt — Enter to apply, Shift+Enter for newline"></textarea>
+      <label>seed <input id="seed" type="number" value="52"></label>
+      <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
+    </div>
+
+    <div class="ref" id="comfyRow">
+      <label class="dim">Comfy server:</label>
+      <select id="comfySelect" style="min-width:120px;"><option value="">(loading...)</option></select>
+      <button id="comfyPull">Pull latest output → reference</button>
+      <span id="comfyStatus" class="dim"></span>
+    </div>
+
+    <div class="ref" id="refRow">
+      <div class="drop" id="drop">Drop image here or click to choose a reference</div>
+      <input type="file" id="file" accept="image/*" hidden>
+      <img class="preview" id="preview" alt="reference preview">
+      <div class="meta" id="refMeta">no reference</div>
+      <button id="clearRef">Clear</button>
+    </div>
+
+    <div class="controls">
+      <label><input id="lipXfer" type="checkbox" disabled> Lip transfer</label>
+      <span id="lipStatus" class="dim">lipsync: unavailable</span>
+    </div>
+  </section>
+
+  <!-- ── INPUT TAB ───────────────────────────────────────────────────────── -->
+  <section class="tab-panel" data-tab="input">
+    <div class="controls">
+      <label><input id="useCam" type="checkbox"> Use my camera as input</label>
+      <select id="camSelect" style="flex:1 1 220px;" disabled><option value="">— pick a camera —</option></select>
+      <label><input id="flipInput" type="checkbox" disabled> Mirror input</label>
+      <span id="inputStatus" class="dim">input: server</span>
+    </div>
+
+    <div class="section-label">Hand marker</div>
+    <div class="controls">
+      <label><input id="handMarker" type="checkbox" disabled> Enable</label>
+      <label>landmark
+        <select id="markerLandmark">
+          <option value="15">Left wrist</option>
+          <option value="16">Right wrist</option>
+          <option value="19">Left index</option>
+          <option value="20">Right index</option>
+          <option value="0">Nose</option>
+          <option value="11">Left shoulder</option>
+          <option value="12">Right shoulder</option>
+        </select>
+      </label>
+      <label>color <input id="markerColor" type="color" value="#ff3c3c"></label>
+      <label>size <input id="markerSize" type="range" min="6" max="120" step="1" value="32"></label>
+      <span id="markerSizeLbl" class="dim" style="min-width:28px;">32px</span>
+      <label><input id="trailToggle" type="checkbox"> Trail</label>
+      <label>length <input id="trailLen" type="range" min="4" max="80" step="1" value="20"></label>
+      <span id="trailLenLbl" class="dim" style="min-width:28px;">20</span>
+      <span id="poseStatus" class="dim"></span>
+    </div>
+  </section>
+
+  <pre class="log" id="log"></pre>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
