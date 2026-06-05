@@ -473,6 +473,14 @@ CLIENT_HTML = """<!doctype html>
     <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
   </div>
 
+  <div class="controls" style="border-top:1px solid #2a2a2a;">
+    <label><input id="useCam" type="checkbox"> Use my camera as input</label>
+    <select id="camSelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;flex:1 1 220px;" disabled>
+      <option value="">— pick a camera —</option>
+    </select>
+    <span id="inputStatus" style="font-size:12px;color:#888;align-self:center;">input: server</span>
+  </div>
+
   <div class="ref" id="refRow">
     <div class="drop" id="drop">Drop image here or click to choose a reference</div>
     <input type="file" id="file" accept="image/*" hidden>
@@ -493,8 +501,11 @@ CLIENT_HTML = """<!doctype html>
   const seedIn = document.getElementById('seed');
   const stepsIn = document.getElementById('steps');
   const logEl = document.getElementById('log');
+  const useCam = document.getElementById('useCam');
+  const camSelect = document.getElementById('camSelect');
+  const inputStatus = document.getElementById('inputStatus');
 
-  let pc = null, ch = null;
+  let pc = null, ch = null, localStream = null;
 
   function logLine(s) {
     const t = new Date().toLocaleTimeString();
@@ -535,7 +546,34 @@ CLIENT_HTML = """<!doctype html>
     ch.onmessage = (e) => onCtrlMessage(e.data);
     ch.onclose = () => logLine('Control channel closed');
 
-    pc.addTransceiver('video', { direction: 'recvonly' });
+    if (useCam.checked) {
+      try {
+        const constraints = {
+          audio: false,
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 },
+            ...(camSelect.value ? { deviceId: { exact: camSelect.value } } : {}),
+          },
+        };
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        const [vt] = localStream.getVideoTracks();
+        logLine('Local camera acquired: ' + vt.label);
+        pc.addTransceiver(vt, {
+          direction: 'sendrecv',
+          streams: [localStream],
+        });
+      } catch (e) {
+        logLine('Camera access failed: ' + e.message);
+        setStatus('camera blocked', 'err');
+        startBtn.disabled = false;
+        useCam.checked = false;
+        pc.addTransceiver('video', { direction: 'recvonly' });
+      }
+    } else {
+      pc.addTransceiver('video', { direction: 'recvonly' });
+    }
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -573,6 +611,10 @@ CLIENT_HTML = """<!doctype html>
   function stop() {
     if (ch) { try { ch.close(); } catch (_) {} ch = null; }
     if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+    if (localStream) {
+      localStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+      localStream = null;
+    }
     v.srcObject = null;
     setStatus('idle', '');
     startBtn.disabled = false;
@@ -643,6 +685,14 @@ CLIENT_HTML = """<!doctype html>
         clearPreview();
         logLine(`Reference cleared by another client (v${v})`);
       }
+    } else if (msg === 'input:peer') {
+      inputStatus.textContent = useCam.checked
+        ? 'input: peer (you)'
+        : 'input: peer (other client)';
+      logLine('Pipeline input now from a peer');
+    } else if (msg === 'input:server') {
+      inputStatus.textContent = 'input: server';
+      logLine('Pipeline input now from server camera');
     } else {
       logLine('server: ' + msg);
     }
@@ -660,9 +710,62 @@ CLIENT_HTML = """<!doctype html>
         lastSeenRefVersion = j.reference_version || 0;
         refreshPreview(j.reference_version);
       }
+      if (j.input_source === 'peer') {
+        inputStatus.textContent = 'input: peer (other client)';
+      } else {
+        inputStatus.textContent = 'input: server';
+      }
     } catch (_) {}
   }
   probeHealth();
+
+  // ── camera enumeration (requires getUserMedia permission to surface labels)
+  async function refreshCameras() {
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const cams = devs.filter(d => d.kind === 'videoinput');
+      camSelect.innerHTML = '';
+      if (cams.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '(no cameras detected — grant permission)';
+        camSelect.appendChild(opt);
+        return;
+      }
+      const def = document.createElement('option');
+      def.value = ''; def.textContent = 'Default camera';
+      camSelect.appendChild(def);
+      cams.forEach((c, i) => {
+        const opt = document.createElement('option');
+        opt.value = c.deviceId;
+        opt.textContent = c.label || `Camera ${i + 1}`;
+        camSelect.appendChild(opt);
+      });
+    } catch (e) {
+      logLine('Camera enumeration error: ' + e.message);
+    }
+  }
+
+  useCam.addEventListener('change', async () => {
+    camSelect.disabled = !useCam.checked;
+    if (useCam.checked) {
+      // First call to enumerate after granting permission gives real labels.
+      try {
+        const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        tmp.getTracks().forEach(t => t.stop());
+      } catch (e) {
+        logLine('Camera permission denied: ' + e.message);
+        useCam.checked = false;
+        camSelect.disabled = true;
+        return;
+      }
+      await refreshCameras();
+    }
+  });
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', () => {
+      if (useCam.checked) refreshCameras();
+    });
+  }
 
   async function uploadReference(file) {
     if (!file || !file.type.startsWith('image/')) {
