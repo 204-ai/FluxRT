@@ -32,6 +32,7 @@ import cv2
 import numpy as np
 import uvicorn
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc.mediastreams import MediaStreamError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from PIL import Image
@@ -66,6 +67,12 @@ pcs: set[RTCPeerConnection] = set()
 ctrl_channels: set = set()
 ref_version: int = 0
 
+# Pipeline input ownership — first peer with sendrecv video wins; others ignored.
+# When a peer owns the input, the local camera producer thread pauses its writes.
+input_owner_pc: Optional[RTCPeerConnection] = None
+input_owner_lock = threading.Lock()
+peer_input_active = threading.Event()
+
 MAX_REFERENCE_BYTES = 10 * 1024 * 1024  # 10 MB cap for uploaded reference images.
 
 
@@ -80,11 +87,25 @@ def broadcast_ctrl(msg: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Producer — webcam frames → pipeline → latest_rgb.
+# Shared frame push — runs the BGR input through the pipeline and updates
+# `latest_rgb` for any active video track to send out. Used by both the local
+# camera producer thread and per-peer track consumers.
+# ──────────────────────────────────────────────────────────────────────────────
+def push_input_frame(frame_bgr: np.ndarray) -> None:
+    global latest_rgb
+    h, w = resolution["height"], resolution["width"]
+    cropped = crop_maximal_rectangle(frame_bgr, h, w)
+    input_tensor.copy_from(cropped)
+    out_bgr = output_tensor.to_numpy()
+    rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    with latest_lock:
+        latest_rgb = rgb
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Producer — local webcam frames. Pauses while a peer owns the input.
 # ──────────────────────────────────────────────────────────────────────────────
 def producer_loop(camera_index: int) -> None:
-    global latest_rgb
-
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         log.error("Camera %d failed to open", camera_index)
@@ -96,26 +117,64 @@ def producer_loop(camera_index: int) -> None:
             cap.release()
             return
         time.sleep(0.1)
-    log.info("StreamProcessor ready, producing frames.")
+    log.info("StreamProcessor ready, producing frames from local camera.")
 
     while not producer_stop.is_set():
+        if peer_input_active.is_set():
+            # A peer is driving input — skip local camera frames.
+            time.sleep(0.05)
+            continue
+
         ret, frame = cap.read()
         if not ret:
             log.warning("Camera read failed, retrying...")
             time.sleep(0.05)
             continue
 
-        resized = crop_maximal_rectangle(frame, resolution["height"], resolution["width"])
-        input_tensor.copy_from(resized)
-
-        out_bgr = output_tensor.to_numpy()
-        rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
-
-        with latest_lock:
-            latest_rgb = rgb
+        push_input_frame(frame)
 
     cap.release()
     log.info("Producer stopped.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-peer input consumer — pulls VideoFrames from a remote track and feeds
+# them into the pipeline. First peer to deliver a track wins ownership;
+# subsequent peers are ignored. Ownership is released on peer disconnect.
+# ──────────────────────────────────────────────────────────────────────────────
+async def consume_peer_input(track, pc: RTCPeerConnection) -> None:
+    global input_owner_pc
+
+    with input_owner_lock:
+        if input_owner_pc is not None:
+            log.info("Peer input already taken — ignoring extra track")
+            return
+        input_owner_pc = pc
+        peer_input_active.set()
+    log.info("Peer %x now drives input", id(pc))
+    broadcast_ctrl("input:peer")
+
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            try:
+                frame = await track.recv()
+            except MediaStreamError:
+                break
+            except Exception as exc:
+                log.warning("Peer track recv error: %s", exc)
+                break
+
+            bgr = frame.to_ndarray(format="bgr24")
+            # Pipeline write/read is blocking — offload from event loop.
+            await loop.run_in_executor(None, push_input_frame, bgr)
+    finally:
+        with input_owner_lock:
+            if input_owner_pc is pc:
+                input_owner_pc = None
+                peer_input_active.clear()
+                log.info("Peer %x released input", id(pc))
+                broadcast_ctrl("input:server")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -174,6 +233,12 @@ async def offer(request: Request):
         if pc.connectionState in ("failed", "closed", "disconnected"):
             await pc.close()
             pcs.discard(pc)
+
+    @pc.on("track")
+    def _on_track(track):
+        log.info("Inbound track from peer: kind=%s id=%s", track.kind, track.id)
+        if track.kind == "video":
+            asyncio.ensure_future(consume_peer_input(track, pc))
 
     @pc.on("datachannel")
     def _on_dc(channel):
@@ -341,6 +406,7 @@ async def _health():
         "reference_enabled": _reference_enabled(),
         "reference_set": latest_reference_png is not None,
         "reference_version": ref_version,
+        "input_source": "peer" if peer_input_active.is_set() else "server",
     }
 
 
@@ -700,6 +766,14 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--initial-prompt", default=None)
+    parser.add_argument(
+        "--no-server-camera",
+        action="store_true",
+        help=(
+            "Do not open the local OpenCV camera. Pipeline input then comes "
+            "from the first WebRTC peer that sends a video track."
+        ),
+    )
     args = parser.parse_args()
 
     log.info("Loading StreamProcessor from %s", args.config)
@@ -716,10 +790,16 @@ def main() -> None:
     resolution = sp.get_resolution()
     log.info("Resolution: %dx%d", resolution["width"], resolution["height"])
 
-    producer_thread = threading.Thread(
-        target=producer_loop, args=(args.camera,), daemon=True
-    )
-    producer_thread.start()
+    if args.no_server_camera:
+        log.info("--no-server-camera: skipping local camera; waiting for peer input.")
+        # Mark the peer-input slot as needing a peer immediately so the
+        # producer (if anything else ever started it) would yield.
+        peer_input_active.set()
+    else:
+        producer_thread = threading.Thread(
+            target=producer_loop, args=(args.camera,), daemon=True
+        )
+        producer_thread.start()
 
     log.info("Open http://<this-host>:%d/ in a LAN browser", args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
