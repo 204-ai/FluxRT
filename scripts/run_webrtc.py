@@ -62,8 +62,21 @@ reference_lock = threading.Lock()
 
 pcs: set[RTCPeerConnection] = set()
 
+# Open control DataChannels for cross-client broadcast (e.g. reference image sync).
+ctrl_channels: set = set()
+ref_version: int = 0
 
 MAX_REFERENCE_BYTES = 10 * 1024 * 1024  # 10 MB cap for uploaded reference images.
+
+
+def broadcast_ctrl(msg: str) -> None:
+    """Send a string message to every open control DataChannel."""
+    for ch in list(ctrl_channels):
+        try:
+            ch.send(msg)
+        except Exception as exc:
+            log.debug("broadcast send failed, dropping channel: %s", exc)
+            ctrl_channels.discard(ch)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -165,6 +178,20 @@ async def offer(request: Request):
     @pc.on("datachannel")
     def _on_dc(channel):
         log.info("DataChannel opened: %s", channel.label)
+        ctrl_channels.add(channel)
+
+        # Send the current reference version to a fresh peer so it can
+        # decide whether to refresh its preview.
+        if latest_reference_png is not None:
+            try:
+                channel.send(f"ref:set:{ref_version}")
+            except Exception:
+                pass
+
+        @channel.on("close")
+        def _on_close():
+            ctrl_channels.discard(channel)
+            log.info("DataChannel closed: %s", channel.label)
 
         @channel.on("message")
         def _on_msg(msg):
@@ -254,16 +281,24 @@ async def post_reference(request: Request):
     # Cache a PNG preview for GET /reference.
     buf = io.BytesIO()
     img.save(buf, format="PNG")
+    global latest_reference_png, ref_version
     with reference_lock:
-        global latest_reference_png
         latest_reference_png = buf.getvalue()
+        ref_version += 1
+        version = ref_version
 
-    log.info("Reference image set: %dx%d (%d bytes uploaded)", *rgb.shape[1::-1], len(body))
+    log.info(
+        "Reference image set: %dx%d (%d bytes uploaded, v%d)",
+        *rgb.shape[1::-1], len(body), version,
+    )
+    broadcast_ctrl(f"ref:set:{version}")
+
     return JSONResponse(
         {
             "ok": True,
             "size": [int(rgb.shape[1]), int(rgb.shape[0])],
             "bytes": len(body),
+            "version": version,
         }
     )
 
@@ -273,11 +308,14 @@ async def delete_reference():
     if not _reference_enabled():
         raise HTTPException(status_code=400, detail="Reference image disabled")
     sp.set_reference_image(None)
+    global latest_reference_png, ref_version
     with reference_lock:
-        global latest_reference_png
         latest_reference_png = None
-    log.info("Reference image cleared")
-    return JSONResponse({"ok": True, "cleared": True})
+        ref_version += 1
+        version = ref_version
+    log.info("Reference image cleared (v%d)", version)
+    broadcast_ctrl(f"ref:clear:{version}")
+    return JSONResponse({"ok": True, "cleared": True, "version": version})
 
 
 @app.get("/reference")
@@ -302,6 +340,7 @@ async def _health():
         "resolution": resolution,
         "reference_enabled": _reference_enabled(),
         "reference_set": latest_reference_png is not None,
+        "reference_version": ref_version,
     }
 
 
@@ -427,7 +466,7 @@ CLIENT_HTML = """<!doctype html>
 
     ch = pc.createDataChannel('ctrl');
     ch.onopen = () => logLine('Control channel open');
-    ch.onmessage = (e) => logLine('server: ' + e.data);
+    ch.onmessage = (e) => onCtrlMessage(e.data);
     ch.onclose = () => logLine('Control channel closed');
 
     pc.addTransceiver('video', { direction: 'recvonly' });
@@ -504,6 +543,45 @@ CLIENT_HTML = """<!doctype html>
   const refMeta = document.getElementById('refMeta');
   const clearRefBtn = document.getElementById('clearRef');
 
+  // Server's reference version we last observed/uploaded. Used to skip
+  // refresh when the broadcast we received is for our own POST.
+  let lastSeenRefVersion = 0;
+
+  function refreshPreview(versionLabel) {
+    preview.src = '/reference?t=' + Date.now();
+    preview.classList.add('shown');
+    refMeta.textContent = versionLabel
+      ? `reference v${versionLabel}`
+      : 'reference active';
+  }
+
+  function clearPreview() {
+    preview.classList.remove('shown');
+    preview.removeAttribute('src');
+    refMeta.textContent = 'no reference';
+  }
+
+  function onCtrlMessage(msg) {
+    if (typeof msg !== 'string') return;
+    if (msg.startsWith('ref:set:')) {
+      const v = parseInt(msg.slice('ref:set:'.length), 10);
+      if (!isNaN(v) && v > lastSeenRefVersion) {
+        lastSeenRefVersion = v;
+        refreshPreview(v);
+        logLine(`Reference updated by another client (v${v})`);
+      }
+    } else if (msg.startsWith('ref:clear')) {
+      const v = parseInt(msg.split(':')[2] || '0', 10);
+      if (!isNaN(v) && v > lastSeenRefVersion) {
+        lastSeenRefVersion = v;
+        clearPreview();
+        logLine(`Reference cleared by another client (v${v})`);
+      }
+    } else {
+      logLine('server: ' + msg);
+    }
+  }
+
   async function probeHealth() {
     try {
       const r = await fetch('/healthz');
@@ -513,9 +591,8 @@ CLIENT_HTML = """<!doctype html>
         refMeta.textContent = 'disabled in config';
         drop.textContent = 'Reference disabled — start server with --config configs/config_with_reference.json';
       } else if (j.reference_set) {
-        preview.src = '/reference?t=' + Date.now();
-        preview.classList.add('shown');
-        refMeta.textContent = 'reference active';
+        lastSeenRefVersion = j.reference_version || 0;
+        refreshPreview(j.reference_version);
       }
     } catch (_) {}
   }
@@ -544,8 +621,9 @@ CLIENT_HTML = """<!doctype html>
         return;
       }
       const j = await r.json();
-      logLine(`Reference set: ${j.size[0]}x${j.size[1]}, ${j.bytes} bytes`);
-      refMeta.textContent = `active ${j.size[0]}x${j.size[1]}`;
+      logLine(`Reference set: ${j.size[0]}x${j.size[1]}, ${j.bytes} bytes (v${j.version})`);
+      lastSeenRefVersion = j.version || lastSeenRefVersion;
+      refMeta.textContent = `active ${j.size[0]}x${j.size[1]} (v${j.version})`;
       preview.src = URL.createObjectURL(file);
       preview.classList.add('shown');
     } catch (e) {
@@ -593,10 +671,10 @@ CLIENT_HTML = """<!doctype html>
     try {
       const r = await fetch('/reference', { method: 'DELETE' });
       if (r.ok) {
-        preview.classList.remove('shown');
-        preview.removeAttribute('src');
-        refMeta.textContent = 'no reference';
-        logLine('Reference cleared');
+        const j = await r.json().catch(() => ({}));
+        if (j.version) lastSeenRefVersion = j.version;
+        clearPreview();
+        logLine('Reference cleared' + (j.version ? ` (v${j.version})` : ''));
       }
     } catch (e) {
       logLine('Clear error: ' + e);
