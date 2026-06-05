@@ -14,12 +14,12 @@
   </header>
 
   <nav class="tabs">
-    <button class="tab-btn" data-tab="input">Input</button>
-    <button class="tab-btn active" data-tab="output">Output</button>
+    <button class="tab-btn active" data-tab="input">Input</button>
+    <button class="tab-btn" data-tab="output">Output</button>
   </nav>
 
   <!-- ── OUTPUT TAB ──────────────────────────────────────────────────────── -->
-  <section class="tab-panel active" data-tab="output">
+  <section class="tab-panel" data-tab="output">
     <div class="stage" id="stage">
       <video id="inv" autoplay playsinline muted></video>
       <video id="v" autoplay playsinline muted></video>
@@ -58,7 +58,7 @@
   </section>
 
   <!-- ── INPUT TAB ───────────────────────────────────────────────────────── -->
-  <section class="tab-panel" data-tab="input">
+  <section class="tab-panel active" data-tab="input">
     <div class="controls">
       <label><input id="useCam" type="checkbox"> Use my camera as input</label>
       <select id="camSelect" style="flex:1 1 220px;" disabled><option value="">— pick a camera —</option></select>
