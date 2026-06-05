@@ -1659,6 +1659,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--initial-prompt", default=None)
     parser.add_argument(
+        "--interp",
+        type=int,
+        default=None,
+        metavar="EXP",
+        help=(
+            "Override interpolation_exp from config. RIFE emits 2^EXP output "
+            "frames per generated frame (0=off, 1=2x, 2=4x, 3=8x). Boot-time "
+            "only — sizes the shared frame buffer, cannot change at runtime."
+        ),
+    )
+    parser.add_argument(
         "--no-server-camera",
         action="store_true",
         help=(
@@ -1706,8 +1717,34 @@ def main() -> None:
         comfy_servers[name] = url
     log.info("Configured comfy servers: %s", comfy_servers)
 
-    log.info("Loading StreamProcessor from %s", args.config)
-    sp = StreamProcessor(args.config)
+    config_path = args.config
+
+    # --interp overrides interpolation_exp. StreamProcessor sizes the shared
+    # frame buffer from this value in __init__, so it must be baked into the
+    # config the constructor reads. Write a patched temp config and pass that.
+    if args.interp is not None:
+        if args.interp < 0 or args.interp > 4:
+            parser.error("--interp must be in 0..4")
+        import json as _json
+        import tempfile
+
+        with open(args.config) as f:
+            cfg = _json.load(f)
+        prev = cfg.get("interpolation_exp")
+        cfg["interpolation_exp"] = args.interp
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", prefix="fluxrt_cfg_", delete=False
+        )
+        _json.dump(cfg, tmp)
+        tmp.close()
+        config_path = tmp.name
+        log.info(
+            "interpolation_exp override: %s -> %d (2^%d = %d output frames/frame)",
+            prev, args.interp, args.interp, 2 ** args.interp,
+        )
+
+    log.info("Loading StreamProcessor from %s", config_path)
+    sp = StreamProcessor(config_path)
 
     # Lip transfer only loads under int8 — bf16 + LivePortrait exceeds the
     # 4090's 24 GB. Mutate the in-memory config before sp.start() so the
