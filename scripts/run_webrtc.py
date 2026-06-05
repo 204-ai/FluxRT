@@ -1270,6 +1270,23 @@ def main() -> None:
 
     log.info("Loading StreamProcessor from %s", args.config)
     sp = StreamProcessor(args.config)
+
+    # Lip transfer only loads under int8 — bf16 + LivePortrait exceeds the
+    # 4090's 24 GB. Mutate the in-memory config before sp.start() so the
+    # inference subprocess never instantiates the postprocessor.
+    # ModelInferenceSubprocess holds the same dict reference and the spawn
+    # pickle happens during sp.start(), so this propagates correctly.
+    lp_cfg = sp.config.get("lip_transfer")
+    if lp_cfg and lp_cfg.get("enable"):
+        if args.int8:
+            log.info("Lip transfer: enabled (int8 mode)")
+        else:
+            log.warning(
+                "Lip transfer disabled: bf16 mode + LivePortrait would exceed "
+                "24 GB VRAM. Re-run with --int8 to enable lipsync."
+            )
+            lp_cfg["enable"] = False
+
     if args.int8:
         sp.enable_quantization()
     sp.start()
