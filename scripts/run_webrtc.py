@@ -432,7 +432,6 @@ CLIENT_HTML = """<!doctype html>
   .stage.split video { max-width: 50%; }
   .stage video#inv { display: none; }
   .stage.split video#inv { display: block; }
-  .stage video.flip { transform: scaleX(-1); }
   .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; }
   input[type=text] { flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
   input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
@@ -516,11 +515,21 @@ CLIENT_HTML = """<!doctype html>
   const stage = document.getElementById('stage');
   const inv = document.getElementById('inv');
 
-  let pc = null, ch = null, localStream = null;
+  let pc = null, ch = null;
+  // Camera pipeline: raw getUserMedia stream → hidden <video> → canvas (optional flip)
+  // → captureStream. The canvas stream feeds both the WebRTC sender and the
+  // local preview, so the preview always shows what the pipeline receives.
+  let rawStream = null;       // from getUserMedia
+  let canvasStream = null;    // from canvas.captureStream() — sent to peer
+  let hiddenVideo = null;
+  let drawCanvas = null;
+  let drawCtx = null;
+  let drawRAF = 0;
+  let mirror = false;         // toggled by flipInput
 
   function applyInputPreview() {
-    if (showInput.checked && localStream) {
-      inv.srcObject = localStream;
+    if (showInput.checked && canvasStream) {
+      inv.srcObject = canvasStream;
       stage.classList.add('split');
     } else {
       inv.srcObject = null;
@@ -529,7 +538,61 @@ CLIENT_HTML = """<!doctype html>
   }
 
   function applyFlip() {
-    inv.classList.toggle('flip', flipInput.checked);
+    mirror = flipInput.checked;   // draw loop will pick it up next frame
+  }
+
+  async function buildCameraPipeline(constraints) {
+    rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+    const [vt] = rawStream.getVideoTracks();
+    const settings = vt.getSettings();
+    const W = settings.width || 1280;
+    const H = settings.height || 720;
+
+    hiddenVideo = document.createElement('video');
+    hiddenVideo.srcObject = rawStream;
+    hiddenVideo.muted = true;
+    hiddenVideo.playsInline = true;
+    await hiddenVideo.play();
+
+    drawCanvas = document.createElement('canvas');
+    drawCanvas.width = W;
+    drawCanvas.height = H;
+    drawCtx = drawCanvas.getContext('2d');
+
+    function drawFrame() {
+      if (!hiddenVideo || !drawCtx) return;
+      if (mirror) {
+        drawCtx.save();
+        drawCtx.scale(-1, 1);
+        drawCtx.drawImage(hiddenVideo, -W, 0, W, H);
+        drawCtx.restore();
+      } else {
+        drawCtx.drawImage(hiddenVideo, 0, 0, W, H);
+      }
+      drawRAF = requestAnimationFrame(drawFrame);
+    }
+    drawRAF = requestAnimationFrame(drawFrame);
+
+    canvasStream = drawCanvas.captureStream(30);
+    return canvasStream;
+  }
+
+  function tearDownCameraPipeline() {
+    if (drawRAF) { cancelAnimationFrame(drawRAF); drawRAF = 0; }
+    if (rawStream) {
+      rawStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+      rawStream = null;
+    }
+    if (canvasStream) {
+      canvasStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
+      canvasStream = null;
+    }
+    if (hiddenVideo) {
+      try { hiddenVideo.srcObject = null; } catch (_) {}
+      hiddenVideo = null;
+    }
+    drawCanvas = null;
+    drawCtx = null;
   }
 
   function logLine(s) {
@@ -582,22 +645,26 @@ CLIENT_HTML = """<!doctype html>
             ...(camSelect.value ? { deviceId: { exact: camSelect.value } } : {}),
           },
         };
-        localStream = await navigator.mediaDevices.getUserMedia(constraints);
-        const [vt] = localStream.getVideoTracks();
-        logLine('Local camera acquired: ' + vt.label);
+        mirror = flipInput.checked;
+        const stream = await buildCameraPipeline(constraints);
+        const [vt] = stream.getVideoTracks();
+        const rawLabel = rawStream && rawStream.getVideoTracks()[0]
+          ? rawStream.getVideoTracks()[0].label
+          : 'camera';
+        logLine('Local camera acquired: ' + rawLabel);
         pc.addTransceiver(vt, {
           direction: 'sendrecv',
-          streams: [localStream],
+          streams: [stream],
         });
         showInput.disabled = false;
         flipInput.disabled = false;
         applyInputPreview();
-        applyFlip();
       } catch (e) {
         logLine('Camera access failed: ' + e.message);
         setStatus('camera blocked', 'err');
         startBtn.disabled = false;
         useCam.checked = false;
+        tearDownCameraPipeline();
         pc.addTransceiver('video', { direction: 'recvonly' });
       }
     } else {
@@ -640,12 +707,8 @@ CLIENT_HTML = """<!doctype html>
   function stop() {
     if (ch) { try { ch.close(); } catch (_) {} ch = null; }
     if (pc) { try { pc.close(); } catch (_) {} pc = null; }
-    if (localStream) {
-      localStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} });
-      localStream = null;
-    }
+    tearDownCameraPipeline();
     inv.srcObject = null;
-    inv.classList.remove('flip');
     stage.classList.remove('split');
     showInput.disabled = true;
     flipInput.disabled = true;
