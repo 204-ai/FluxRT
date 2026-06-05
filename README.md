@@ -299,6 +299,34 @@ This script also supports CLI
 python scripts/process_local_video.py --input input.mp4 --output out.mp4 --prompt "Turn this into oil on canvas art"
 ```
 
+### WebRTC Browser Streaming
+
+Streams the FluxRT output over WebRTC to any modern browser on the LAN.
+Includes a minimal HTML/JS client served at `/`, with a prompt control channel.
+
+Install the WebRTC extras once:
+
+```bash
+pip install -r requirements_webrtc.txt
+```
+
+Then start the server:
+
+```bash
+python scripts/run_webrtc.py
+```
+
+Optional flags:
+* `--int8` — enable int8 quantization
+* `--config` — pick a different config file
+* `--port` — change the listening port (default `8765`)
+* `--camera` — choose the OpenCV camera index
+* `--initial-prompt` — set a prompt before the first client connects
+
+Open `http://<server-lan-ip>:8765/` on any LAN browser, click **Start**, and
+type prompts directly in the page. Glass-to-glass latency on a LAN is typically
+under 200 ms.
+
 ### Run Performance Benchmark
 
 This will show throughput (FPS) with various dynamic area values, end-to-end latency and reserved GPU memory.
