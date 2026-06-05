@@ -723,6 +723,8 @@ CLIENT_HTML = """<!doctype html>
     <label><input id="useCam" type="checkbox"> Use my camera as input</label>
     <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
     <label><input id="flipInput" type="checkbox" disabled> Mirror input</label>
+    <label><input id="handMarker" type="checkbox" disabled> Hand marker</label>
+    <span id="poseStatus" style="font-size:11px;color:#888;align-self:center;"></span>
     <select id="camSelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;flex:1 1 220px;" disabled>
       <option value="">— pick a camera —</option>
     </select>
@@ -772,6 +774,53 @@ CLIENT_HTML = """<!doctype html>
   const inv = document.getElementById('inv');
   const lipXfer = document.getElementById('lipXfer');
   const lipStatus = document.getElementById('lipStatus');
+  const handMarker = document.getElementById('handMarker');
+  const poseStatus = document.getElementById('poseStatus');
+
+  // Pose detection state. PoseLandmarker is imported dynamically the first
+  // time the user enables the hand marker, so the bundle download (~2 MB
+  // wasm + ~5 MB model) is avoided until needed.
+  let poseLandmarker = null;
+  let poseLoading = false;
+  const POSE_LM_LEFT_WRIST = 15;     // MediaPipe BlazePose landmark indices
+  const POSE_LM_RIGHT_WRIST = 16;
+
+  async function ensurePoseLandmarker() {
+    if (poseLandmarker) return poseLandmarker;
+    if (poseLoading) return null;
+    poseLoading = true;
+    poseStatus.textContent = 'loading pose model...';
+    try {
+      const vision = await import(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs'
+      );
+      const filesetResolver = await vision.FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+      );
+      poseLandmarker = await vision.PoseLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath:
+            'https://storage.googleapis.com/mediapipe-models/pose_landmarker/' +
+            'pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      poseStatus.textContent = 'marker: ready';
+      logLine('Pose landmarker loaded');
+    } catch (e) {
+      poseStatus.textContent = 'pose load error';
+      logLine('Pose landmarker error: ' + e);
+      handMarker.checked = false;
+    } finally {
+      poseLoading = false;
+    }
+    return poseLandmarker;
+  }
 
   let pc = null, ch = null;
   // Camera pipeline: raw getUserMedia stream → hidden <video> → canvas (optional flip)
@@ -827,6 +876,40 @@ CLIENT_HTML = """<!doctype html>
       } else {
         drawCtx.drawImage(hiddenVideo, 0, 0, W, H);
       }
+
+      // Hand marker — detect pose on the freshly drawn canvas (which
+      // already reflects the mirror state), then composite a red circle
+      // into the same canvas so both the preview AND the WebRTC stream
+      // sent to FluxRT carry the marker.
+      if (handMarker.checked && poseLandmarker) {
+        try {
+          const ts = performance.now();
+          const result = poseLandmarker.detectForVideo(drawCanvas, ts);
+          if (result && result.landmarks && result.landmarks[0]) {
+            // Picking landmark 15 (LEFT_WRIST) — when running detection
+            // against the on-screen canvas this naturally lands on
+            // whatever side the user perceives as their left hand,
+            // regardless of the mirror toggle.
+            const lm = result.landmarks[0][POSE_LM_LEFT_WRIST];
+            if (lm && (lm.visibility === undefined || lm.visibility > 0.5)) {
+              const cx = lm.x * W;
+              const cy = lm.y * H;
+              const r = Math.max(18, Math.min(W, H) * 0.04);
+              drawCtx.beginPath();
+              drawCtx.arc(cx, cy, r, 0, Math.PI * 2);
+              drawCtx.fillStyle = 'rgba(255, 60, 60, 0.85)';
+              drawCtx.fill();
+              drawCtx.lineWidth = 3;
+              drawCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+              drawCtx.stroke();
+            }
+          }
+        } catch (e) {
+          // Detection occasionally throws when the model is mid-init or
+          // the canvas isn't ready yet — drop the frame and continue.
+        }
+      }
+
       drawRAF = requestAnimationFrame(drawFrame);
     }
     drawRAF = requestAnimationFrame(drawFrame);
@@ -916,7 +999,9 @@ CLIENT_HTML = """<!doctype html>
         });
         showInput.disabled = false;
         flipInput.disabled = false;
+        handMarker.disabled = false;
         applyInputPreview();
+        if (handMarker.checked) ensurePoseLandmarker();
       } catch (e) {
         logLine('Camera access failed: ' + e.message);
         setStatus('camera blocked', 'err');
@@ -970,6 +1055,8 @@ CLIENT_HTML = """<!doctype html>
     stage.classList.remove('split');
     showInput.disabled = true;
     flipInput.disabled = true;
+    handMarker.disabled = true;
+    poseStatus.textContent = '';
     v.srcObject = null;
     setStatus('idle', '');
     startBtn.disabled = false;
@@ -1152,6 +1239,14 @@ CLIENT_HTML = """<!doctype html>
 
   showInput.addEventListener('change', applyInputPreview);
   flipInput.addEventListener('change', applyFlip);
+  handMarker.addEventListener('change', async () => {
+    if (handMarker.checked) {
+      poseStatus.textContent = 'marker: ON';
+      await ensurePoseLandmarker();
+    } else {
+      poseStatus.textContent = 'marker: OFF';
+    }
+  });
 
   useCam.addEventListener('change', async () => {
     camSelect.disabled = !useCam.checked;
@@ -1160,6 +1255,9 @@ CLIENT_HTML = """<!doctype html>
       showInput.disabled = true;
       flipInput.checked = false;
       flipInput.disabled = true;
+      handMarker.checked = false;
+      handMarker.disabled = true;
+      poseStatus.textContent = '';
       applyInputPreview();
       applyFlip();
     }
