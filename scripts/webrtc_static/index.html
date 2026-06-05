@@ -66,6 +66,18 @@
       <span id="inputStatus" class="dim">input: server</span>
     </div>
 
+    <div class="section-label">Input preview &amp; draw</div>
+    <div id="inputView">
+      <div class="dim" style="padding:24px;">Enable your camera to preview &amp; draw on the input.</div>
+    </div>
+    <div class="controls">
+      <label><input id="drawEnable" type="checkbox" disabled> Draw on input</label>
+      <label>color <input id="drawColor" type="color" value="#ffffff" disabled></label>
+      <label>size <input id="drawSize" type="range" min="1" max="60" step="1" value="6" disabled></label>
+      <span id="drawSizeLbl" class="dim" style="min-width:28px;">6px</span>
+      <button id="drawClear" disabled>Clear drawing</button>
+    </div>
+
     <div class="section-label">Hand marker</div>
     <div class="controls">
       <label><input id="handMarker" type="checkbox" disabled> Enable</label>

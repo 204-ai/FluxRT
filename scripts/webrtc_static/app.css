@@ -63,3 +63,12 @@ input[type=color] { width: 42px; height: 28px; padding: 0; border: 1px solid #33
 .ref .meta { font-size: 11px; color: #888; min-width: 110px; }
 
 .section-label { padding: 8px 14px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
+
+#inputView {
+  margin: 8px 14px; background: #0a0a0a; border: 1px solid #222; border-radius: 4px;
+  min-height: 80px; display: flex; align-items: center; justify-content: center; overflow: hidden;
+}
+#inputView canvas {
+  display: block; width: 100%; max-width: 720px; background: #000;
+  touch-action: none; cursor: crosshair;
+}

@@ -42,6 +42,13 @@ const camSelect = $('camSelect');
 const flipInput = $('flipInput');
 const inputStatus = $('inputStatus');
 
+const inputView = $('inputView');
+const drawEnable = $('drawEnable');
+const drawColor = $('drawColor');
+const drawSize = $('drawSize');
+const drawSizeLbl = $('drawSizeLbl');
+const drawClear = $('drawClear');
+
 const handMarker = $('handMarker');
 const markerLandmark = $('markerLandmark');
 const markerColor = $('markerColor');
@@ -96,6 +103,56 @@ function applyInputPreview() {
 }
 showInput.addEventListener('change', applyInputPreview);
 
+// ── input pipeline (camera + preview + draw), independent of WebRTC ─────────
+async function startInputPipeline() {
+  const { canvas, label } = await input.start(camSelect.value || null);
+  logLine('Camera pipeline started: ' + label);
+  inputView.innerHTML = '';
+  inputView.appendChild(canvas);
+  bindDrawing(canvas);
+  drawEnable.disabled = false;
+  drawColor.disabled = false;
+  drawSize.disabled = false;
+  drawClear.disabled = false;
+  showInput.disabled = false;
+  applyInputPreview();
+}
+
+function stopInputPipeline() {
+  input.stop();
+  inputView.innerHTML =
+    '<div class="dim" style="padding:24px;">Enable your camera to preview &amp; draw on the input.</div>';
+  drawEnable.disabled = true;
+  drawColor.disabled = true;
+  drawSize.disabled = true;
+  drawClear.disabled = true;
+  showInput.checked = false;
+  showInput.disabled = true;
+  applyInputPreview();
+}
+
+function bindDrawing(canvas) {
+  canvas.onpointerdown = (e) => {
+    if (!drawEnable.checked) return;
+    canvas.setPointerCapture(e.pointerId);
+    input.beginStroke(e.clientX, e.clientY);
+  };
+  canvas.onpointermove = (e) => {
+    if (!drawEnable.checked) return;
+    input.moveStroke(e.clientX, e.clientY);
+  };
+  canvas.onpointerup = () => input.endStroke();
+  canvas.onpointercancel = () => input.endStroke();
+  canvas.onpointerleave = () => input.endStroke();
+}
+
+drawColor.addEventListener('input', () => input.setDrawColor(drawColor.value));
+drawSize.addEventListener('input', () => {
+  drawSizeLbl.textContent = drawSize.value + 'px';
+  input.setDrawSize(drawSize.value);
+});
+drawClear.addEventListener('click', () => input.clearDrawing());
+
 // ── WebRTC ──────────────────────────────────────────────────────────────────
 async function start() {
   startBtn.disabled = true;
@@ -123,18 +180,14 @@ async function start() {
 
   if (useCam.checked) {
     try {
-      const { label } = await input.start(camSelect.value || null);
-      logLine('Local camera acquired: ' + label);
+      if (!input.active) await startInputPipeline();
       const [vt] = input.outputStream.getVideoTracks();
       pc.addTransceiver(vt, { direction: 'sendrecv', streams: [input.outputStream] });
-      showInput.disabled = false;
-      applyInputPreview();
     } catch (e) {
       logLine('Camera access failed: ' + e.message);
       setStatus('camera blocked', 'err');
       startBtn.disabled = false;
       useCam.checked = false;
-      input.stop();
       pc.addTransceiver('video', { direction: 'recvonly' });
     }
   } else {
@@ -171,10 +224,10 @@ async function start() {
 function stop() {
   if (ch) { try { ch.close(); } catch (_) {} ch = null; }
   if (pc) { try { pc.close(); } catch (_) {} pc = null; }
-  input.stop();
+  // Leave the camera pipeline running — it's bound to the Input-tab toggle,
+  // not the connection, so preview + drawing survive a disconnect/reconnect.
   inv.srcObject = null;
   stage.classList.remove('split');
-  showInput.disabled = true;
   v.srcObject = null;
   // Reset recv-fps accumulators so the next session's first sample isn't a
   // bogus delta against the previous connection's framesReceived.
@@ -442,14 +495,12 @@ useCam.addEventListener('change', async () => {
   flipInput.disabled = !useCam.checked;
   handMarker.disabled = !useCam.checked;
   if (!useCam.checked) {
-    showInput.checked = false;
-    showInput.disabled = true;
     flipInput.checked = false;
     handMarker.checked = false;
     poseStatus.textContent = '';
     input.setMirror(false);
     input.setMarkerEnabled(false);
-    applyInputPreview();
+    stopInputPipeline();
     return;
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -475,6 +526,27 @@ useCam.addEventListener('change', async () => {
   flipInput.checked = true;
   input.setMirror(true);
   await refreshCameras();
+  // Start the live preview/draw pipeline immediately (before WebRTC connect).
+  try {
+    await startInputPipeline();
+  } catch (e) {
+    logLine('Camera start failed: ' + e.message);
+    useCam.checked = false;
+    camSelect.disabled = true;
+    flipInput.disabled = true;
+    handMarker.disabled = true;
+  }
+});
+
+// Switching camera mid-session restarts the pipeline on the new device.
+camSelect.addEventListener('change', async () => {
+  if (!useCam.checked || !input.active) return;
+  input.stop();
+  try {
+    await startInputPipeline();
+  } catch (e) {
+    logLine('Camera switch failed: ' + e.message);
+  }
 });
 
 flipInput.addEventListener('change', () => input.setMirror(flipInput.checked));

@@ -56,6 +56,13 @@ export class InputProcessor {
     this.trail = []; // rolling buffer of {x, y} canvas-space points
     this.poseLandmarker = null;
     this.poseLoading = false;
+
+    // Persistent freehand drawing layer composited on top of every frame.
+    this.drawCanvas = null;
+    this.drawCtx = null;
+    this.draw = { color: '#ffffff', size: 6 };
+    this._drawing = false;
+    this._last = null;
   }
 
   // ── pose model (lazy) ───────────────────────────────────────────────────────
@@ -114,6 +121,12 @@ export class InputProcessor {
     this.canvas.height = H;
     this.ctx = this.canvas.getContext('2d');
 
+    // Persistent drawing layer at the same resolution; survives frames.
+    this.drawCanvas = document.createElement('canvas');
+    this.drawCanvas.width = W;
+    this.drawCanvas.height = H;
+    this.drawCtx = this.drawCanvas.getContext('2d');
+
     const draw = () => {
       this._drawFrame(W, H);
       this.raf = requestAnimationFrame(draw);
@@ -122,7 +135,7 @@ export class InputProcessor {
 
     this.canvasStream = this.canvas.captureStream(30);
     if (this.opts.marker) this.ensurePose();
-    return { stream: this.canvasStream, label: vt.label || 'camera' };
+    return { stream: this.canvasStream, label: vt.label || 'camera', canvas: this.canvas };
   }
 
   stop() {
@@ -154,6 +167,10 @@ export class InputProcessor {
     }
     this.canvas = null;
     this.ctx = null;
+    this.drawCanvas = null;
+    this.drawCtx = null;
+    this._drawing = false;
+    this._last = null;
     this.trail.length = 0;
   }
 
@@ -209,58 +226,107 @@ export class InputProcessor {
     }
 
     // 2. hand marker
-    if (!o.marker || !this.poseLandmarker) {
-      if (this.trail.length) this.trail.length = 0;
-      return;
-    }
+    if (o.marker && this.poseLandmarker) {
+      let cx = null,
+        cy = null;
+      try {
+        const res = this.poseLandmarker.detectForVideo(this.canvas, performance.now());
+        const lms = res && res.landmarks && res.landmarks[0];
+        if (lms) {
+          const lm = lms[o.landmark];
+          if (lm && (lm.visibility === undefined || lm.visibility > 0.5)) {
+            cx = lm.x * W;
+            cy = lm.y * H;
+          }
+        }
+      } catch (_) {
+        // model mid-init / canvas not ready — skip this frame
+      }
 
-    let cx = null,
-      cy = null;
-    try {
-      const res = this.poseLandmarker.detectForVideo(this.canvas, performance.now());
-      const lms = res && res.landmarks && res.landmarks[0];
-      if (lms) {
-        const lm = lms[o.landmark];
-        if (lm && (lm.visibility === undefined || lm.visibility > 0.5)) {
-          cx = lm.x * W;
-          cy = lm.y * H;
+      const rgb = hexToRgb(o.color);
+      const baseR = o.size;
+      const maxTrail = o.trail ? o.trailLen : 0;
+
+      if (cx !== null && o.trail) {
+        this.trail.push({ x: cx, y: cy });
+        while (this.trail.length > maxTrail) this.trail.shift();
+      } else if (!o.trail) {
+        this.trail.length = 0;
+      }
+
+      if (o.trail && this.trail.length > 1) {
+        for (let i = 0; i < this.trail.length; i++) {
+          const p = this.trail[i];
+          const t = (i + 1) / this.trail.length; // newest = 1
+          const r = baseR * (0.35 + 0.65 * t);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${rgb}, ${0.15 + 0.55 * t})`;
+          ctx.fill();
         }
       }
-    } catch (_) {
-      // model mid-init / canvas not ready — skip this frame
-    }
 
-    const rgb = hexToRgb(o.color);
-    const baseR = o.size;
-    const maxTrail = o.trail ? o.trailLen : 0;
-
-    if (cx !== null && o.trail) {
-      this.trail.push({ x: cx, y: cy });
-      while (this.trail.length > maxTrail) this.trail.shift();
-    } else if (!o.trail) {
+      if (cx !== null) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${rgb}, 0.9)`;
+        ctx.fill();
+        ctx.lineWidth = Math.max(2, baseR * 0.1);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+        ctx.stroke();
+      }
+    } else if (this.trail.length) {
       this.trail.length = 0;
     }
 
-    if (o.trail && this.trail.length > 1) {
-      for (let i = 0; i < this.trail.length; i++) {
-        const p = this.trail[i];
-        const t = (i + 1) / this.trail.length; // newest = 1
-        const r = baseR * (0.35 + 0.65 * t);
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${rgb}, ${0.15 + 0.55 * t})`;
-        ctx.fill();
-      }
-    }
+    // 3. freehand drawing layer (always topmost)
+    if (this.drawCanvas) ctx.drawImage(this.drawCanvas, 0, 0, W, H);
+  }
 
-    if (cx !== null) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${rgb}, 0.9)`;
-      ctx.fill();
-      ctx.lineWidth = Math.max(2, baseR * 0.1);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-      ctx.stroke();
-    }
+  // ── freehand drawing ────────────────────────────────────────────────────────
+  _toCanvas(clientX, clientY) {
+    const r = this.canvas.getBoundingClientRect();
+    return {
+      x: ((clientX - r.left) / r.width) * this.canvas.width,
+      y: ((clientY - r.top) / r.height) * this.canvas.height,
+    };
+  }
+  beginStroke(clientX, clientY) {
+    if (!this.drawCtx) return;
+    this._drawing = true;
+    const p = this._toCanvas(clientX, clientY);
+    this._last = p;
+    const c = this.drawCtx;
+    c.beginPath();
+    c.fillStyle = this.draw.color;
+    c.arc(p.x, p.y, this.draw.size / 2, 0, Math.PI * 2);
+    c.fill();
+  }
+  moveStroke(clientX, clientY) {
+    if (!this._drawing || !this.drawCtx) return;
+    const p = this._toCanvas(clientX, clientY);
+    const c = this.drawCtx;
+    c.strokeStyle = this.draw.color;
+    c.lineWidth = this.draw.size;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.beginPath();
+    c.moveTo(this._last.x, this._last.y);
+    c.lineTo(p.x, p.y);
+    c.stroke();
+    this._last = p;
+  }
+  endStroke() {
+    this._drawing = false;
+    this._last = null;
+  }
+  clearDrawing() {
+    if (this.drawCtx) this.drawCtx.clearRect(0, 0, this.drawCanvas.width, this.drawCanvas.height);
+  }
+  setDrawColor(c) {
+    this.draw.color = c;
+  }
+  setDrawSize(n) {
+    this.draw.size = parseInt(n, 10) || 6;
   }
 }
