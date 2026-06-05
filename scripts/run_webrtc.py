@@ -432,6 +432,7 @@ CLIENT_HTML = """<!doctype html>
   .stage.split video { max-width: 50%; }
   .stage video#inv { display: none; }
   .stage.split video#inv { display: block; }
+  .stage video.flip { transform: scaleX(-1); }
   .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; }
   input[type=text] { flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
   input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
@@ -480,6 +481,7 @@ CLIENT_HTML = """<!doctype html>
   <div class="controls" style="border-top:1px solid #2a2a2a;">
     <label><input id="useCam" type="checkbox"> Use my camera as input</label>
     <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
+    <label><input id="flipInput" type="checkbox" disabled> Mirror input</label>
     <select id="camSelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;flex:1 1 220px;" disabled>
       <option value="">— pick a camera —</option>
     </select>
@@ -508,6 +510,7 @@ CLIENT_HTML = """<!doctype html>
   const logEl = document.getElementById('log');
   const useCam = document.getElementById('useCam');
   const showInput = document.getElementById('showInput');
+  const flipInput = document.getElementById('flipInput');
   const camSelect = document.getElementById('camSelect');
   const inputStatus = document.getElementById('inputStatus');
   const stage = document.getElementById('stage');
@@ -523,6 +526,10 @@ CLIENT_HTML = """<!doctype html>
       inv.srcObject = null;
       stage.classList.remove('split');
     }
+  }
+
+  function applyFlip() {
+    inv.classList.toggle('flip', flipInput.checked);
   }
 
   function logLine(s) {
@@ -583,7 +590,9 @@ CLIENT_HTML = """<!doctype html>
           streams: [localStream],
         });
         showInput.disabled = false;
+        flipInput.disabled = false;
         applyInputPreview();
+        applyFlip();
       } catch (e) {
         logLine('Camera access failed: ' + e.message);
         setStatus('camera blocked', 'err');
@@ -636,8 +645,10 @@ CLIENT_HTML = """<!doctype html>
       localStream = null;
     }
     inv.srcObject = null;
+    inv.classList.remove('flip');
     stage.classList.remove('split');
     showInput.disabled = true;
+    flipInput.disabled = true;
     v.srcObject = null;
     setStatus('idle', '');
     startBtn.disabled = false;
@@ -769,13 +780,17 @@ CLIENT_HTML = """<!doctype html>
   }
 
   showInput.addEventListener('change', applyInputPreview);
+  flipInput.addEventListener('change', applyFlip);
 
   useCam.addEventListener('change', async () => {
     camSelect.disabled = !useCam.checked;
     if (!useCam.checked) {
       showInput.checked = false;
       showInput.disabled = true;
+      flipInput.checked = false;
+      flipInput.disabled = true;
       applyInputPreview();
+      applyFlip();
     }
     if (useCam.checked) {
       // First call to enumerate after granting permission gives real labels.
