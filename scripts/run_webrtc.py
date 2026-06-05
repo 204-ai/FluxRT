@@ -654,16 +654,26 @@ async def _health():
 
 
 def _perf_metrics() -> dict:
-    """Pipeline FPS snapshot for /healthz polling."""
+    """Pipeline FPS + VRAM snapshot for /healthz polling."""
     if not sp:
-        return {"fps_pipeline": 0.0, "fps_interpolated": 0.0, "proc_time_ms": 0.0}
+        return {
+            "fps_pipeline": 0.0,
+            "fps_interpolated": 0.0,
+            "proc_time_ms": 0.0,
+            "vram_mb": 0,
+        }
     pt = sp.get_last_processing_time() or 0.0
     base = (1.0 / pt) if pt > 0 else 0.0
     exp = int(sp.config.get("interpolation_exp", 0))
+    try:
+        vram_mb = int(sp.get_reserved_memory())
+    except Exception:
+        vram_mb = 0
     return {
         "fps_pipeline": round(base, 2),
         "fps_interpolated": round(base * (2 ** exp), 2),
         "proc_time_ms": round(pt * 1000.0, 2),
+        "vram_mb": vram_mb,
     }
 
 
@@ -690,9 +700,10 @@ CLIENT_HTML = """<!doctype html>
     background: rgba(0,0,0,0.6); color: #eee;
     font: 11px/1.35 ui-monospace, monospace;
     padding: 6px 10px; border-radius: 6px;
-    pointer-events: none; white-space: pre;
+    cursor: pointer; white-space: pre; user-select: none;
     border: 1px solid rgba(255,255,255,0.08);
   }
+  #fpsOverlay.collapsed { padding: 4px 8px; opacity: 0.55; }
   .stage video { flex: 1 1 0; min-width: 0; max-width: 100%; background: #000; display: block; }
   .stage.split video { max-width: 50%; }
   .stage video#inv { display: none; }
@@ -740,7 +751,7 @@ CLIENT_HTML = """<!doctype html>
   <div class="stage" id="stage">
     <video id="inv" autoplay playsinline muted></video>
     <video id="v" autoplay playsinline muted></video>
-    <div id="fpsOverlay">pipe — / recv — / proc —</div>
+    <div id="fpsOverlay" title="click to collapse">measuring…</div>
   </div>
 
   <div class="controls" style="align-items:flex-start;">
@@ -1204,22 +1215,44 @@ CLIENT_HTML = """<!doctype html>
 
   window.addEventListener('beforeunload', stop);
 
-  // ── FPS overlay ───────────────────────────────────────────────────────────
+  // ── FPS / VRAM overlay ────────────────────────────────────────────────────
   const fpsOverlay = document.getElementById('fpsOverlay');
   let lastRecvFps = '—';
   let lastReceivedFrames = null;
   let lastReceivedT = null;
+  let overlayCollapsed = false;
+
+  // Click to collapse to a compact line; click again to expand.
+  fpsOverlay.addEventListener('click', () => {
+    overlayCollapsed = !overlayCollapsed;
+    fpsOverlay.classList.toggle('collapsed', overlayCollapsed);
+    renderOverlay();
+  });
+
+  let perf = { pipe: '—', interp: '—', proc: '—', vram: '—', recv: '—' };
+
+  function renderOverlay() {
+    if (overlayCollapsed) {
+      fpsOverlay.textContent = `${perf.recv} fps`;
+      return;
+    }
+    fpsOverlay.textContent =
+      `pipe ${perf.pipe} (${perf.interp} x interp)\n` +
+      `recv ${perf.recv}\n` +
+      `proc ${perf.proc}\n` +
+      `vram ${perf.vram}`;
+  }
 
   async function pollPerf() {
-    // Server pipeline FPS via /healthz
-    let pipeFps = '—', procMs = '—', interp = '—';
+    // Server pipeline FPS + VRAM via /healthz
     try {
       const r = await fetch('/healthz', { cache: 'no-store' });
       if (r.ok) {
         const j = await r.json();
-        if (j.fps_pipeline) pipeFps = j.fps_pipeline.toFixed(1);
-        if (j.fps_interpolated) interp = j.fps_interpolated.toFixed(1);
-        if (j.proc_time_ms) procMs = j.proc_time_ms.toFixed(0) + 'ms';
+        perf.pipe = j.fps_pipeline ? j.fps_pipeline.toFixed(1) : '—';
+        perf.interp = j.fps_interpolated ? j.fps_interpolated.toFixed(1) : '—';
+        perf.proc = j.proc_time_ms ? j.proc_time_ms.toFixed(0) + 'ms' : '—';
+        perf.vram = j.vram_mb ? (j.vram_mb / 1024).toFixed(1) + 'GB' : '—';
       }
     } catch (_) {}
 
@@ -1235,7 +1268,6 @@ CLIENT_HTML = """<!doctype html>
               typeof rep.framesReceived === 'number' &&
               typeof rep.timestamp === 'number'
             ) {
-              // Fallback: derive from framesReceived delta.
               if (lastReceivedFrames !== null && rep.timestamp > lastReceivedT) {
                 const dt = (rep.timestamp - lastReceivedT) / 1000;
                 if (dt > 0) {
@@ -1248,14 +1280,12 @@ CLIENT_HTML = """<!doctype html>
           }
         });
       } catch (_) {}
+      perf.recv = lastRecvFps;
     } else {
-      lastRecvFps = '—';
+      perf.recv = '—';
     }
 
-    fpsOverlay.textContent =
-      `pipe ${pipeFps} (${interp} x interp)\n` +
-      `recv ${lastRecvFps}\n` +
-      `proc ${procMs}`;
+    renderOverlay();
   }
   setInterval(pollPerf, 1000);
   pollPerf();
