@@ -721,19 +721,19 @@ CLIENT_HTML = """<!doctype html>
   #status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #333; }
   #status.live { background: #1f7a3a; }
   #status.err { background: #7a1f1f; }
-  .stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
-  #fpsOverlay {
-    position: absolute; top: 18px; right: 18px;
-    background: rgba(0,0,0,0.6); color: #eee;
-    font: 11px/1.35 ui-monospace, monospace;
-    padding: 6px 10px; border-radius: 6px;
-    cursor: pointer; white-space: pre; user-select: none;
-    border: 1px solid rgba(255,255,255,0.08);
+  #fpsBar {
+    margin-left: auto;
+    font: 11px/1.2 ui-monospace, monospace;
+    color: #9aa;
+    white-space: nowrap;
   }
-  #fpsOverlay.collapsed { padding: 4px 8px; opacity: 0.55; }
-  .stage video { flex: 1 1 0; min-width: 0; max-width: 100%; background: #000; display: block; }
-  .stage.split video { max-width: 50%; }
-  .stage video#inv { display: none; }
+  .stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
+  .stage video { flex: 1 1 0; min-width: 0; background: #000; display: block; }
+  /* Single output (no input preview) renders at 70% width — 30% smaller. */
+  .stage video#v { max-width: 70%; }
+  .stage video#inv { display: none; max-width: 70%; }
+  /* Split view: input | output, each capped at half. */
+  .stage.split video#v, .stage.split video#inv { max-width: 50%; }
   .stage.split video#inv { display: block; }
   .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; }
   input[type=text] { flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
@@ -773,12 +773,12 @@ CLIENT_HTML = """<!doctype html>
   <header>
     <h1>FluxRT WebRTC</h1>
     <span id="status">idle</span>
+    <span id="fpsBar">measuring…</span>
   </header>
 
   <div class="stage" id="stage">
     <video id="inv" autoplay playsinline muted></video>
     <video id="v" autoplay playsinline muted></video>
-    <div id="fpsOverlay" title="click to collapse">measuring…</div>
   </div>
 
   <div class="controls" style="align-items:flex-start;">
@@ -1242,31 +1242,19 @@ CLIENT_HTML = """<!doctype html>
 
   window.addEventListener('beforeunload', stop);
 
-  // ── FPS / VRAM overlay ────────────────────────────────────────────────────
-  const fpsOverlay = document.getElementById('fpsOverlay');
+  // ── FPS / VRAM stats (navbar) ─────────────────────────────────────────────
+  const fpsBar = document.getElementById('fpsBar');
   let lastRecvFps = '—';
   let lastReceivedFrames = null;
   let lastReceivedT = null;
-  let overlayCollapsed = false;
-
-  // Click to collapse to a compact line; click again to expand.
-  fpsOverlay.addEventListener('click', () => {
-    overlayCollapsed = !overlayCollapsed;
-    fpsOverlay.classList.toggle('collapsed', overlayCollapsed);
-    renderOverlay();
-  });
 
   let perf = { pipe: '—', interp: '—', proc: '—', vram: '—', recv: '—' };
 
   function renderOverlay() {
-    if (overlayCollapsed) {
-      fpsOverlay.textContent = `${perf.recv} fps`;
-      return;
-    }
-    fpsOverlay.textContent =
-      `pipe ${perf.pipe} (${perf.interp} x interp)\n` +
-      `recv ${perf.recv}\n` +
-      `proc ${perf.proc}\n` +
+    fpsBar.textContent =
+      `pipe ${perf.pipe} (×interp ${perf.interp})  ·  ` +
+      `recv ${perf.recv}  ·  ` +
+      `proc ${perf.proc}  ·  ` +
       `vram ${perf.vram}`;
   }
 
