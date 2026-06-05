@@ -176,6 +176,11 @@ function stop() {
   stage.classList.remove('split');
   showInput.disabled = true;
   v.srcObject = null;
+  // Reset recv-fps accumulators so the next session's first sample isn't a
+  // bogus delta against the previous connection's framesReceived.
+  lastRecvFps = '—';
+  lastFrames = null;
+  lastT = null;
   setStatus('idle', '');
   startBtn.disabled = false;
   stopBtn.disabled = true;

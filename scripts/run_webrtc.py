@@ -65,6 +65,12 @@ latest_rgb: Optional[np.ndarray] = None
 latest_lock = threading.Lock()
 producer_stop = threading.Event()
 
+# Serializes the actual pipeline drive (shared-tensor write + read). Both the
+# local producer thread and per-peer executor calls go through push_input_frame;
+# without this they can race during the camera->peer ownership handoff and drive
+# the pipeline from two threads at once.
+pipeline_lock = threading.Lock()
+
 # Cached reference image as PNG bytes for GET /reference preview.
 latest_reference_png: Optional[bytes] = None
 reference_lock = threading.Lock()
@@ -80,6 +86,11 @@ ref_version: int = 0
 input_owner_pc: Optional[RTCPeerConnection] = None
 input_owner_lock = threading.Lock()
 peer_input_active = threading.Event()
+
+# Strong refs to peer-input consumer tasks. asyncio only holds weak refs to
+# tasks, so without this a consumer can be GC'd mid-run; if its `finally`
+# never executes, peer_input_active stays set and the producer never resumes.
+peer_input_tasks: set = set()
 
 MAX_REFERENCE_BYTES = 10 * 1024 * 1024  # 10 MB cap for uploaded reference images.
 
@@ -118,8 +129,11 @@ def push_input_frame(frame_bgr: np.ndarray) -> None:
     global latest_rgb
     h, w = resolution["height"], resolution["width"]
     cropped = crop_maximal_rectangle(frame_bgr, h, w)
-    input_tensor.copy_from(cropped)
-    out_bgr = output_tensor.to_numpy()
+    # Hold pipeline_lock across write+read so the producer thread and a peer's
+    # executor call can't interleave shared-tensor access during handoff.
+    with pipeline_lock:
+        input_tensor.copy_from(cropped)
+        out_bgr = output_tensor.to_numpy()
     rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
     with latest_lock:
         latest_rgb = rgb
@@ -297,7 +311,9 @@ async def offer(request: Request):
     def _on_track(track):
         log.info("Inbound track from peer: kind=%s id=%s", track.kind, track.id)
         if track.kind == "video":
-            asyncio.ensure_future(consume_peer_input(track, pc))
+            task = asyncio.ensure_future(consume_peer_input(track, pc))
+            peer_input_tasks.add(task)
+            task.add_done_callback(peer_input_tasks.discard)
 
     @pc.on("datachannel")
     def _on_dc(channel):
@@ -792,6 +808,7 @@ def main() -> None:
     if args.interp is not None:
         if args.interp < 0 or args.interp > 4:
             parser.error("--interp must be in 0..4")
+        import atexit
         import json as _json
         import tempfile
 
@@ -805,6 +822,8 @@ def main() -> None:
         _json.dump(cfg, tmp)
         tmp.close()
         config_path = tmp.name
+        # Don't leave the patched temp config behind in /tmp on exit.
+        atexit.register(lambda p=config_path: os.path.exists(p) and os.unlink(p))
         log.info(
             "interpolation_exp override: %s -> %d (2^%d = %d output frames/frame)",
             prev, args.interp, args.interp, 2 ** args.interp,
