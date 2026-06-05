@@ -80,6 +80,11 @@ MAX_REFERENCE_BYTES = 10 * 1024 * 1024  # 10 MB cap for uploaded reference image
 # Maps display name → base URL (no trailing slash).
 comfy_servers: dict[str, str] = {}
 
+# Lip transfer (LivePortrait postprocessor) runtime state. The pipeline
+# always loads the model when `lip_transfer.enable` is true in config, but
+# the per-frame postprocess is gated by `set_lip_transfer(bool)`.
+lip_active: bool = False
+
 
 def broadcast_ctrl(msg: str) -> None:
     """Send a string message to every open control DataChannel."""
@@ -258,6 +263,13 @@ async def offer(request: Request):
             except Exception:
                 pass
 
+        # Sync lip transfer state on connect.
+        if _lip_enabled():
+            try:
+                channel.send("lip:on" if lip_active else "lip:off")
+            except Exception:
+                pass
+
         @channel.on("close")
         def _on_close():
             ctrl_channels.discard(channel)
@@ -315,6 +327,42 @@ async def _shutdown():
 # ──────────────────────────────────────────────────────────────────────────────
 def _reference_enabled() -> bool:
     return bool(sp and sp.config.get("use_reference_image", False))
+
+
+def _lip_enabled() -> bool:
+    """Whether lip transfer is configured + the LivePortrait model loaded."""
+    if not sp:
+        return False
+    return bool(sp.config.get("lip_transfer", {}).get("enable", False))
+
+
+@app.post("/lip-transfer")
+async def post_lip_transfer(request: Request):
+    """Toggle LivePortrait lip transfer on/off.
+    Query: ?on=true|false (also accepts 1/0, yes/no)."""
+    if not _lip_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Lip transfer not enabled in config. Restart with a config "
+                "containing lip_transfer.enable = true and the LivePortrait "
+                "directory present."
+            ),
+        )
+    raw = request.query_params.get("on", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        on = True
+    elif raw in ("0", "false", "no", "off"):
+        on = False
+    else:
+        raise HTTPException(status_code=400, detail="?on= must be true/false")
+
+    global lip_active
+    lip_active = on
+    sp.set_lip_transfer(on)
+    log.info("Lip transfer: %s", "on" if on else "off")
+    broadcast_ctrl("lip:on" if on else "lip:off")
+    return JSONResponse({"ok": True, "lip_active": on})
 
 
 def _apply_reference_bytes(body: bytes, source_label: str) -> dict:
@@ -489,6 +537,8 @@ async def _health():
         "reference_set": latest_reference_png is not None,
         "reference_version": ref_version,
         "input_source": "peer" if peer_input_active.is_set() else "server",
+        "lip_enabled": _lip_enabled(),
+        "lip_active": lip_active,
     }
 
 
@@ -569,6 +619,11 @@ CLIENT_HTML = """<!doctype html>
     <span id="inputStatus" style="font-size:12px;color:#888;align-self:center;">input: server</span>
   </div>
 
+  <div class="controls" style="border-top:1px solid #2a2a2a;">
+    <label><input id="lipXfer" type="checkbox" disabled> Lip transfer</label>
+    <span id="lipStatus" style="font-size:12px;color:#888;align-self:center;">lipsync: unavailable</span>
+  </div>
+
   <div class="ref" id="comfyRow">
     <label style="font-size:12px;color:#aaa;">Comfy server:</label>
     <select id="comfySelect" style="padding:6px 8px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;min-width:120px;">
@@ -605,6 +660,8 @@ CLIENT_HTML = """<!doctype html>
   const inputStatus = document.getElementById('inputStatus');
   const stage = document.getElementById('stage');
   const inv = document.getElementById('inv');
+  const lipXfer = document.getElementById('lipXfer');
+  const lipStatus = document.getElementById('lipStatus');
 
   let pc = null, ch = null;
   // Camera pipeline: raw getUserMedia stream → hidden <video> → canvas (optional flip)
@@ -881,6 +938,11 @@ CLIENT_HTML = """<!doctype html>
     } else if (msg === 'input:server') {
       inputStatus.textContent = 'input: server';
       logLine('Pipeline input now from server camera');
+    } else if (msg === 'lip:on' || msg === 'lip:off') {
+      const on = (msg === 'lip:on');
+      if (lipXfer.checked !== on) lipXfer.checked = on;
+      lipStatus.textContent = on ? 'lipsync: ON' : 'lipsync: OFF';
+      logLine('Lip transfer ' + (on ? 'enabled' : 'disabled'));
     } else {
       logLine('server: ' + msg);
     }
@@ -904,9 +966,41 @@ CLIENT_HTML = """<!doctype html>
       } else {
         inputStatus.textContent = 'input: server';
       }
+      if (j.lip_enabled) {
+        lipXfer.disabled = false;
+        lipXfer.checked = !!j.lip_active;
+        lipStatus.textContent = j.lip_active ? 'lipsync: ON' : 'lipsync: OFF';
+      } else {
+        lipXfer.disabled = true;
+        lipXfer.checked = false;
+        lipStatus.textContent = 'lipsync: unavailable (add lip_transfer to config)';
+      }
     } catch (_) {}
   }
   probeHealth();
+
+  lipXfer.addEventListener('change', async () => {
+    const on = lipXfer.checked;
+    lipXfer.disabled = true;
+    try {
+      const r = await fetch('/lip-transfer?on=' + (on ? 'true' : 'false'), {
+        method: 'POST',
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ detail: r.statusText }));
+        logLine('Lip transfer toggle failed: ' + (err.detail || r.statusText));
+        lipXfer.checked = !on;     // revert
+        return;
+      }
+      const j = await r.json();
+      lipStatus.textContent = j.lip_active ? 'lipsync: ON' : 'lipsync: OFF';
+    } catch (e) {
+      logLine('Lip transfer error: ' + e);
+      lipXfer.checked = !on;
+    } finally {
+      lipXfer.disabled = false;
+    }
+  });
 
   // ── camera enumeration (requires getUserMedia permission to surface labels)
   async function refreshCameras() {
