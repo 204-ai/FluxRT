@@ -284,8 +284,8 @@ QScrollBar::sub-line:horizontal {{
 # ── cross-thread signals ───────────────────────────────────────────────────────
 class _Signals(QObject):
     launch_capture = Signal(
-        object, int, str
-    )  # (cv2.VideoCapture | None, cam_idx, spout_name)
+        object, int, str, str
+    )  # (cv2.VideoCapture | None, cam_idx, spout_name, video_path)
     sp_error = Signal(str)
     camera_error = Signal()
     vcam_error = Signal(str)
@@ -330,6 +330,7 @@ class MainWindow(QMainWindow):
         self._spout_sender_stop = threading.Event()
 
         self._ref_full_path: str | None = None
+        self._video_path: str | None = None
 
         self._sig = _Signals()
         self._build_ui()
@@ -424,6 +425,29 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(spout_row, row, 1, 1, 2)
         self._spout_lbl.setVisible(_SPOUT_AVAILABLE)
         spout_row.setVisible(_SPOUT_AVAILABLE)
+        row += 1
+
+        # Video file input row (overrides camera when set)
+        ctrl_layout.addWidget(
+            QLabel("Video File:"),
+            row,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+        video_row = self._ctrl_row()
+        video_row_l = video_row.layout()
+        self._video_path_lbl = QLabel("(none — using camera)")
+        self._video_path_lbl.setObjectName("dim")
+        self._video_path_lbl.setMinimumWidth(260)
+        video_row_l.addWidget(self._video_path_lbl)
+        browse_video_btn = QPushButton("Browse")
+        browse_video_btn.clicked.connect(self._browse_video)
+        video_row_l.addWidget(browse_video_btn)
+        clear_video_btn = QPushButton("Clear")
+        clear_video_btn.clicked.connect(self._clear_video)
+        video_row_l.addWidget(clear_video_btn)
+        video_row_l.addStretch()
+        ctrl_layout.addWidget(video_row, row, 1, 1, 2)
         row += 1
 
         # Prompt row
@@ -626,6 +650,26 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log(f"Reference image load error: {exc}")
 
+    # ── video file input ───────────────────────────────────────────────────────
+
+    def _browse_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select video file",
+            "",
+            "Videos (*.mp4 *.mov *.avi *.mkv *.webm);;All files (*.*)",
+        )
+        if not path:
+            return
+        self._video_path = path
+        self._video_path_lbl.setText(os.path.basename(path))
+        log(f"Video file selected: {path}")
+
+    def _clear_video(self) -> None:
+        self._video_path = None
+        self._video_path_lbl.setText("(none — using camera)")
+        log("Video file cleared — camera will be used")
+
     def _toggle_lip(self) -> None:
         self._lip_active = not self._lip_active
         self._lip_btn.setText(
@@ -645,10 +689,21 @@ class MainWindow(QMainWindow):
 
     def _begin_start(self) -> None:
         spout_name = self._spout_input_edit.text().strip() if _SPOUT_AVAILABLE else ""
+        video_path = self._video_path or ""
 
         if spout_name:
             # Spout input path — no camera needed
             cap, cam_idx = None, -1
+            self._cam_err_lbl.setText("")
+        elif video_path:
+            # Video file path — open VideoCapture on file
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                cap.release()
+                log(f"Start aborted: cannot open video {video_path}")
+                self.statusBar().showMessage(f"Cannot open video: {video_path}")
+                return
+            cam_idx = -1
             self._cam_err_lbl.setText("")
         else:
             # Camera path
@@ -674,14 +729,19 @@ class MainWindow(QMainWindow):
             prompt = self._prompt_edit.toPlainText()
             threading.Thread(
                 target=self._init_sp_thread,
-                args=(cap, cam_idx, prompt, spout_name),
+                args=(cap, cam_idx, prompt, spout_name, video_path),
                 daemon=True,
             ).start()
         else:
-            self._on_launch_capture(cap, cam_idx, spout_name)
+            self._on_launch_capture(cap, cam_idx, spout_name, video_path)
 
     def _init_sp_thread(
-        self, cap, cam_idx: int, prompt: str, spout_name: str = ""
+        self,
+        cap,
+        cam_idx: int,
+        prompt: str,
+        spout_name: str = "",
+        video_path: str = "",
     ) -> None:
         try:
             sp = StreamProcessor(self.config_path)
@@ -698,15 +758,17 @@ class MainWindow(QMainWindow):
                 self._apply_reference(self._ref_full_path)
             if self._lip_active:
                 sp.set_lip_transfer(True)
-            self._sig.launch_capture.emit(cap, cam_idx, spout_name)
+            self._sig.launch_capture.emit(cap, cam_idx, spout_name, video_path)
         except Exception as exc:
             log(f"StreamProcessor init error: {exc}")
             if cap is not None:
                 cap.release()
             self._sig.sp_error.emit(str(exc))
 
-    @Slot(object, int, str)
-    def _on_launch_capture(self, cap, cam_idx: int, spout_name: str = "") -> None:
+    @Slot(object, int, str, str)
+    def _on_launch_capture(
+        self, cap, cam_idx: int, spout_name: str = "", video_path: str = ""
+    ) -> None:
         self._sp_loading = False
         self._capture_stop.clear()
         self._running = True
@@ -715,6 +777,13 @@ class MainWindow(QMainWindow):
                 target=self._spout_input_loop, args=(spout_name,), daemon=True
             )
             status_msg = f"Running — Spout input: {spout_name}"
+        elif video_path:
+            self._capture_thread = threading.Thread(
+                target=self._video_capture_loop,
+                args=(cap, video_path),
+                daemon=True,
+            )
+            status_msg = f"Running — video file: {os.path.basename(video_path)}"
         else:
             self._capture_thread = threading.Thread(
                 target=self._capture_loop, args=(cap,), daemon=True
@@ -777,6 +846,51 @@ class MainWindow(QMainWindow):
                     self._latest_input = input_rgb
                     self._latest_output = output_rgb
                     self._latest_output_bgr = output_bgr
+        finally:
+            cap.release()
+
+    def _video_capture_loop(self, cap, video_path: str) -> None:
+        """
+        Reads from a video file, paces at the file's native FPS (default 30),
+        loops back to the start on EOF so the stream runs continuously.
+        """
+        h = self._resolution["height"]
+        w = self._resolution["width"]
+
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        if src_fps <= 0.0 or src_fps > 240.0:
+            src_fps = 30.0
+        frame_interval = 1.0 / src_fps
+        log(f"Video playback at {src_fps:.2f} fps — {video_path}")
+
+        next_t = time.time()
+        try:
+            while not self._capture_stop.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    # End of file — rewind and continue.
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    next_t = time.time()
+                    continue
+
+                cropped = crop_maximal_rectangle(frame, h, w)
+                with _sp_lock:
+                    self._input_tensor.copy_from(cropped)
+                    output_bgr = self._output_tensor.to_numpy()
+                input_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+                output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
+                with self._frame_lock:
+                    self._latest_input = input_rgb
+                    self._latest_output = output_rgb
+                    self._latest_output_bgr = output_bgr
+
+                next_t += frame_interval
+                sleep_for = next_t - time.time()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    # Pipeline slower than source FPS — reset clock to avoid drift.
+                    next_t = time.time()
         finally:
             cap.release()
 
