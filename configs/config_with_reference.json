@@ -19,5 +19,9 @@
         "height" : 256,
         "width" : 256
     },
+    "lip_transfer": {
+        "enable": true,
+        "models_dir": "LivePortrait/liveportrait"
+    },
     "logging": false
 }
