@@ -28,13 +28,20 @@
     <div class="controls">
       <button id="start">Start</button>
       <button id="stop" disabled>Stop</button>
+      <label>seed <input id="seed" type="number" value="52"></label>
+      <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
       <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
     </div>
 
     <div class="controls" style="align-items:flex-start;">
       <textarea id="prompt" rows="1" placeholder="Prompt — Enter to apply, Shift+Enter for newline"></textarea>
-      <label>seed <input id="seed" type="number" value="52"></label>
-      <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
+      <div class="ref" id="refRow" style="flex:0 1 340px; padding:0; border:0; background:transparent;">
+        <div class="drop" id="drop" style="min-height:54px;">Drop / click reference</div>
+        <input type="file" id="file" accept="image/*" hidden>
+        <img class="preview" id="preview" alt="reference preview">
+        <div class="meta" id="refMeta">no reference</div>
+        <button id="clearRef">Clear</button>
+      </div>
     </div>
 
     <div class="ref" id="comfyRow">
@@ -42,14 +49,6 @@
       <select id="comfySelect" style="min-width:120px;"><option value="">(loading...)</option></select>
       <button id="comfyPull">Pull latest output → reference</button>
       <span id="comfyStatus" class="dim"></span>
-    </div>
-
-    <div class="ref" id="refRow">
-      <div class="drop" id="drop">Drop image here or click to choose a reference</div>
-      <input type="file" id="file" accept="image/*" hidden>
-      <img class="preview" id="preview" alt="reference preview">
-      <div class="meta" id="refMeta">no reference</div>
-      <button id="clearRef">Clear</button>
     </div>
 
     <div class="controls">
