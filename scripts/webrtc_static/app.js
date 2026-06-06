@@ -453,6 +453,7 @@ const STYLES = [
 ];
 
 const featureState = {};
+let facialSel = null;
 let styleSel = null;
 let serverDefaultPrompt = '';
 
@@ -489,6 +490,7 @@ function randomizeFeatures() {
   const opts = FEATURES[k].opts;
   const featPick = opts[Math.floor(Math.random() * opts.length)];
   featureState[k] = featPick;
+  if (facialSel) facialSel.value = featPick;
 
   const stylePick = STYLES[Math.floor(Math.random() * STYLES.length)];
   featureState.style = stylePick;
@@ -499,6 +501,7 @@ function randomizeFeatures() {
 
 function resetFeatures() {
   [...FEATURE_ORDER, 'style'].forEach((k) => (featureState[k] = ''));
+  if (facialSel) facialSel.value = '';
   if (styleSel) styleSel.value = '';
   const text = serverDefaultPrompt || '';
   promptIn.value = text;
@@ -510,6 +513,7 @@ function resetFeatures() {
 
   // Single grouped facial-feature dropdown (optgroup per feature).
   const facial = document.createElement('select');
+  facialSel = facial;
   facial.className = 'feat';
   const fdef = document.createElement('option');
   fdef.value = '';
