@@ -442,22 +442,46 @@ const featureState = {};
 const featSelects = {};
 let serverDefaultPrompt = '';
 
-function applyFeatures() {
-  const parts = FEATURE_ORDER.map((k) => featureState[k]).filter(Boolean);
-  if (!parts.length) return;
-  const text = 'person with ' + parts.join(', ');
+// Comma-split a prompt, drop any segment equal to `phrase`, rejoin.
+function removePhrase(text, phrase) {
+  return text
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && s !== phrase)
+    .join(', ');
+}
+
+function sendPrompt(text) {
   promptIn.value = text;
   if (ch && ch.readyState === 'open') ch.send('prompt:' + text);
 }
 
+// Append the newly selected feature phrase to the existing prompt, replacing
+// this feature's previous phrase (if any). Leaves the rest of the prompt
+// untouched.
+function applyFeatureChange(key, newPhrase) {
+  let text = promptIn.value.trim();
+  const old = featureState[key] || '';
+  if (old) text = removePhrase(text, old);
+  if (newPhrase) text = text ? text + ', ' + newPhrase : newPhrase;
+  featureState[key] = newPhrase;
+  sendPrompt(text);
+}
+
 function randomizeFeatures() {
+  // Strip all current feature phrases, then append a fresh random one each.
+  let text = promptIn.value.trim();
+  FEATURE_ORDER.forEach((k) => {
+    if (featureState[k]) text = removePhrase(text, featureState[k]);
+  });
   FEATURE_ORDER.forEach((k) => {
     const opts = FEATURES[k].opts;
     const pick = opts[Math.floor(Math.random() * opts.length)];
     featureState[k] = pick;
     if (featSelects[k]) featSelects[k].value = pick;
+    text = text ? text + ', ' + pick : pick;
   });
-  applyFeatures();
+  sendPrompt(text);
 }
 
 function resetFeatures() {
@@ -486,10 +510,7 @@ function resetFeatures() {
       o.textContent = p;
       sel.appendChild(o);
     });
-    sel.addEventListener('change', () => {
-      featureState[k] = sel.value;
-      applyFeatures();
-    });
+    sel.addEventListener('change', () => applyFeatureChange(k, sel.value));
     featSelects[k] = sel;
     bar.appendChild(sel);
   });
