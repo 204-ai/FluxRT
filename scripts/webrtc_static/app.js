@@ -438,8 +438,22 @@ const FEATURES = {
   },
 };
 
+// Visual styles — a single 'style' slot.
+const STYLES = [
+  'in the style of Studio Ghibli watercolor',
+  'in the style of Stanley Kubrick, symmetrical cinematic composition',
+  'in the style of cyberpunk neon noir',
+  'in the style of Wes Anderson pastel symmetry',
+  'in the style of Salvador Dalí surrealism',
+  'in the style of 1980s synthwave',
+  'in the style of Tim Burton gothic animation',
+  'in the style of a Renaissance oil painting',
+  'in the style of vaporwave',
+  'in the style of claymation stop-motion',
+];
+
 const featureState = {};
-const featSelects = {};
+let styleSel = null;
 let serverDefaultPrompt = '';
 
 // Comma-split a prompt, drop any segment equal to `phrase`, rejoin.
@@ -456,9 +470,8 @@ function sendPrompt(text) {
   if (ch && ch.readyState === 'open') ch.send('prompt:' + text);
 }
 
-// Append the newly selected feature phrase to the existing prompt, replacing
-// this feature's previous phrase (if any). Leaves the rest of the prompt
-// untouched.
+// Append the newly selected phrase to the existing prompt, replacing this
+// slot's previous phrase (if any). Leaves the rest of the prompt untouched.
 function applyFeatureChange(key, newPhrase) {
   let text = promptIn.value.trim();
   const old = featureState[key] || '';
@@ -469,26 +482,27 @@ function applyFeatureChange(key, newPhrase) {
 }
 
 function randomizeFeatures() {
-  // Strip all current feature phrases, then append a fresh random one each.
+  // Strip current facial + style phrases, then append a fresh random set.
   let text = promptIn.value.trim();
-  FEATURE_ORDER.forEach((k) => {
+  [...FEATURE_ORDER, 'style'].forEach((k) => {
     if (featureState[k]) text = removePhrase(text, featureState[k]);
   });
   FEATURE_ORDER.forEach((k) => {
     const opts = FEATURES[k].opts;
     const pick = opts[Math.floor(Math.random() * opts.length)];
     featureState[k] = pick;
-    if (featSelects[k]) featSelects[k].value = pick;
     text = text ? text + ', ' + pick : pick;
   });
+  const stylePick = STYLES[Math.floor(Math.random() * STYLES.length)];
+  featureState.style = stylePick;
+  if (styleSel) styleSel.value = stylePick;
+  text = text + ', ' + stylePick;
   sendPrompt(text);
 }
 
 function resetFeatures() {
-  FEATURE_ORDER.forEach((k) => {
-    featureState[k] = '';
-    if (featSelects[k]) featSelects[k].value = '';
-  });
+  [...FEATURE_ORDER, 'style'].forEach((k) => (featureState[k] = ''));
+  if (styleSel) styleSel.value = '';
   const text = serverDefaultPrompt || '';
   promptIn.value = text;
   if (text && ch && ch.readyState === 'open') ch.send('prompt:' + text);
@@ -496,28 +510,54 @@ function resetFeatures() {
 
 (function buildFeatureBar() {
   const bar = $('featBar');
+
+  // Single grouped facial-feature dropdown (optgroup per feature).
+  const facial = document.createElement('select');
+  facial.className = 'feat';
+  const fdef = document.createElement('option');
+  fdef.value = '';
+  fdef.textContent = '🙂 Add facial feature…';
+  facial.appendChild(fdef);
   FEATURE_ORDER.forEach((k) => {
     const f = FEATURES[k];
-    const sel = document.createElement('select');
-    sel.className = 'feat';
-    const def = document.createElement('option');
-    def.value = '';
-    def.textContent = `${f.emoji} ${f.label}`;
-    sel.appendChild(def);
+    const g = document.createElement('optgroup');
+    g.label = `${f.emoji} ${f.label}`;
     f.opts.forEach((p) => {
       const o = document.createElement('option');
       o.value = p;
       o.textContent = p;
-      sel.appendChild(o);
+      o.dataset.feat = k;
+      g.appendChild(o);
     });
-    sel.addEventListener('change', () => applyFeatureChange(k, sel.value));
-    featSelects[k] = sel;
-    bar.appendChild(sel);
+    facial.appendChild(g);
   });
+  facial.addEventListener('change', () => {
+    const opt = facial.selectedOptions[0];
+    if (!opt || !opt.value) return;
+    applyFeatureChange(opt.dataset.feat, opt.value);
+    facial.value = ''; // reset to placeholder so another can be added
+  });
+  bar.appendChild(facial);
+
+  // Styles dropdown (single 'style' slot — keeps the selection visible).
+  styleSel = document.createElement('select');
+  styleSel.className = 'feat';
+  const sdef = document.createElement('option');
+  sdef.value = '';
+  sdef.textContent = '🎨 Style…';
+  styleSel.appendChild(sdef);
+  STYLES.forEach((p) => {
+    const o = document.createElement('option');
+    o.value = p;
+    o.textContent = p.replace(/^in the style of /, '');
+    styleSel.appendChild(o);
+  });
+  styleSel.addEventListener('change', () => applyFeatureChange('style', styleSel.value));
+  bar.appendChild(styleSel);
 
   const rand = document.createElement('button');
   rand.textContent = '🎲 Randomize';
-  rand.title = 'Random feature for every slot';
+  rand.title = 'Random facial features + style';
   rand.addEventListener('click', randomizeFeatures);
   bar.appendChild(rand);
 
