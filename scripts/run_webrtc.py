@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import fractions
 import io
+import json
 import logging
 import os
 import threading
@@ -44,6 +45,10 @@ from PIL import Image
 # Directory holding the static browser client (index.html, app.js, app.css,
 # input_processor.js). Served at /static, with / returning index.html.
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc_static")
+
+# ComfyUI API-format workflow templates patched + queued by /comfy/edit.
+WORKFLOWS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_workflows")
+QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
@@ -652,6 +657,108 @@ async def pull_comfy(request: Request):
     result["prompt_id"] = prompt_id
     result["node_id"] = node_id
     result["filename"] = image["filename"]
+    return JSONResponse(result)
+
+
+@app.post("/comfy/edit")
+async def comfy_edit(request: Request):
+    """Snap an image (raw bytes body), run it through the Qwen-Image-Edit
+    2509 workflow on the selected comfy server, wait for the result, and
+    install it as the reference image.
+    Query: ?server=NAME&prompt=... (prompt falls back to the live prompt)."""
+    if not _reference_enabled():
+        raise HTTPException(status_code=400, detail="Reference image disabled")
+
+    name = request.query_params.get("server", "")
+    if not name or name not in comfy_servers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown comfy server: {name!r}. Known: {list(comfy_servers.keys())}",
+        )
+    base = comfy_servers[name].rstrip("/")
+
+    prompt_text = request.query_params.get("prompt") or current_prompt or "enhance this person"
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty body")
+    if len(body) > MAX_REFERENCE_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large")
+
+    try:
+        with open(QWEN_EDIT_TEMPLATE, "r") as f:
+            wf = json.load(f)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Workflow template error: {exc}")
+
+    seed = int.from_bytes(os.urandom(4), "big")
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # 1. upload the snapped frame to the comfy input/ folder
+            files = {"image": ("fluxrt_snap.png", body, "image/png")}
+            ur = await client.post(
+                f"{base}/upload/image", files=files, data={"overwrite": "true"}
+            )
+            ur.raise_for_status()
+            up = ur.json()
+            uploaded_name = up["name"]
+
+            # 2. patch the workflow: input image, prompt, seed
+            wf["78"]["inputs"]["image"] = uploaded_name
+            wf["111"]["inputs"]["prompt"] = prompt_text
+            wf["3"]["inputs"]["seed"] = seed
+
+            # 3. queue it
+            pr = await client.post(f"{base}/prompt", json={"prompt": wf})
+            pr.raise_for_status()
+            prompt_id = pr.json()["prompt_id"]
+            log.info("Qwen edit queued on %s: prompt_id=%s seed=%d", name, prompt_id, seed)
+
+            # 4. poll history until the output image appears (~4-step, fast)
+            out_image = None
+            for _ in range(90):
+                await asyncio.sleep(1.0)
+                hr = await client.get(f"{base}/history/{prompt_id}")
+                if hr.status_code != 200:
+                    continue
+                hist = hr.json()
+                entry = hist.get(prompt_id)
+                if not entry:
+                    continue
+                for _node, out in (entry.get("outputs", {}) or {}).items():
+                    for img in out.get("images", []) or []:
+                        if img.get("type") == "output":
+                            out_image = img
+                            break
+                    if out_image:
+                        break
+                if out_image:
+                    break
+
+            if not out_image:
+                raise HTTPException(status_code=504, detail="Qwen edit timed out")
+
+            # 5. fetch the result
+            vr = await client.get(
+                f"{base}/view",
+                params={
+                    "filename": out_image["filename"],
+                    "type": out_image["type"],
+                    "subfolder": out_image.get("subfolder", ""),
+                },
+            )
+            vr.raise_for_status()
+            result_bytes = vr.content
+
+    except httpx.HTTPError as exc:
+        log.warning("Comfy edit HTTP error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Comfy server error: {exc}")
+
+    # 6. install the edited image as the reference
+    result = _apply_reference_bytes(result_bytes, f"qwen-edit:{name}:{out_image['filename']}")
+    result["prompt_id"] = prompt_id
+    result["filename"] = out_image["filename"]
     return JSONResponse(result)
 
 

@@ -32,6 +32,7 @@ const stepsIn = $('steps');
 
 const comfySelect = $('comfySelect');
 const comfyPullBtn = $('comfyPull');
+const comfyEditBtn = $('comfyEdit');
 const comfyStatus = $('comfyStatus');
 
 const drop = $('drop');
@@ -597,6 +598,44 @@ async function loadComfyServers() {
     logLine('Comfy server list error: ' + e);
   }
 }
+comfyEditBtn.addEventListener('click', async () => {
+  const name = comfySelect.value;
+  if (!name) {
+    comfyStatus.textContent = 'pick a comfy server first';
+    return;
+  }
+  if (!input.active || !input.canvasEl) {
+    comfyStatus.textContent = 'enable your camera (Input tab) first';
+    return;
+  }
+  comfyEditBtn.disabled = true;
+  comfyStatus.textContent = `snapping → Qwen edit on ${name}...`;
+  try {
+    const blob = await new Promise((res) => input.canvasEl.toBlob(res, 'image/png'));
+    const prompt = promptIn.value.trim();
+    const r = await fetch(
+      '/comfy/edit?server=' + encodeURIComponent(name) + '&prompt=' + encodeURIComponent(prompt),
+      { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob }
+    );
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      comfyStatus.textContent = 'edit error: ' + (err.detail || r.statusText);
+      logLine('Qwen edit failed: ' + (err.detail || r.statusText));
+      return;
+    }
+    const j = await r.json();
+    lastSeenRefVersion = j.version || lastSeenRefVersion;
+    comfyStatus.textContent = `qwen edit → reference (v${j.version})`;
+    refreshPreview(j.version);
+    logLine(`Qwen edit done: ${j.filename} (v${j.version})`);
+  } catch (e) {
+    comfyStatus.textContent = 'edit error: ' + e.message;
+    logLine('Qwen edit error: ' + e);
+  } finally {
+    comfyEditBtn.disabled = false;
+  }
+});
+
 comfyPullBtn.addEventListener('click', async () => {
   const name = comfySelect.value;
   if (!name) return;
