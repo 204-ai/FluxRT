@@ -482,21 +482,25 @@ function applyFeatureChange(key, newPhrase) {
 }
 
 function randomizeFeatures() {
-  // Strip current facial + style phrases, then append a fresh random set.
+  // Strip all current facial + style phrases, then append ONE random facial
+  // feature and ONE random style.
   let text = promptIn.value.trim();
   [...FEATURE_ORDER, 'style'].forEach((k) => {
     if (featureState[k]) text = removePhrase(text, featureState[k]);
+    featureState[k] = '';
   });
-  FEATURE_ORDER.forEach((k) => {
-    const opts = FEATURES[k].opts;
-    const pick = opts[Math.floor(Math.random() * opts.length)];
-    featureState[k] = pick;
-    text = text ? text + ', ' + pick : pick;
-  });
+
+  const k = FEATURE_ORDER[Math.floor(Math.random() * FEATURE_ORDER.length)];
+  const opts = FEATURES[k].opts;
+  const featPick = opts[Math.floor(Math.random() * opts.length)];
+  featureState[k] = featPick;
+  text = text ? text + ', ' + featPick : featPick;
+
   const stylePick = STYLES[Math.floor(Math.random() * STYLES.length)];
   featureState.style = stylePick;
   if (styleSel) styleSel.value = stylePick;
   text = text + ', ' + stylePick;
+
   sendPrompt(text);
 }
 
