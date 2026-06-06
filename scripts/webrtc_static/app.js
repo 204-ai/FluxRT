@@ -33,6 +33,7 @@ const stepsIn = $('steps');
 const comfySelect = $('comfySelect');
 const comfyPullBtn = $('comfyPull');
 const comfyEditBtn = $('comfyEdit');
+const comfySpin = $('comfySpin');
 const comfyStatus = $('comfyStatus');
 
 const drop = $('drop');
@@ -609,6 +610,7 @@ comfyEditBtn.addEventListener('click', async () => {
     return;
   }
   comfyEditBtn.disabled = true;
+  comfySpin.hidden = false;
   comfyStatus.textContent = `snapping → Qwen edit on ${name}...`;
   try {
     const blob = await new Promise((res) => input.canvasEl.toBlob(res, 'image/png'));
@@ -633,6 +635,7 @@ comfyEditBtn.addEventListener('click', async () => {
     logLine('Qwen edit error: ' + e);
   } finally {
     comfyEditBtn.disabled = false;
+    comfySpin.hidden = true;
   }
 });
 
@@ -640,6 +643,7 @@ comfyPullBtn.addEventListener('click', async () => {
   const name = comfySelect.value;
   if (!name) return;
   comfyPullBtn.disabled = true;
+  comfySpin.hidden = false;
   comfyStatus.textContent = `pulling from ${name}...`;
   try {
     const r = await fetch('/comfy/pull?server=' + encodeURIComponent(name), { method: 'POST' });
@@ -659,6 +663,7 @@ comfyPullBtn.addEventListener('click', async () => {
     logLine('Comfy pull error: ' + e);
   } finally {
     comfyPullBtn.disabled = false;
+    comfySpin.hidden = true;
   }
 });
 

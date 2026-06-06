@@ -45,6 +45,15 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 /* ── facial-feature builder bar ── */
 #featBar select.feat { max-width: 200px; }
 
+/* ── spinner ── */
+.spinner {
+  display: inline-block; width: 14px; height: 14px; vertical-align: middle;
+  border: 2px solid #444; border-top-color: #2a6cd4; border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+.spinner[hidden] { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ── control rows ── */
 .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; align-items: center; }
 .controls + .controls { border-top: 1px solid #2a2a2a; }
