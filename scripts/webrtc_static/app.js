@@ -662,6 +662,10 @@ comfyPullBtn.addEventListener('click', async () => {
     comfyStatus.textContent = `pulled ${j.filename} (v${j.version})`;
     refreshPreview(j.version);
     logLine(`Comfy pulled: ${j.filename} from ${name} (v${j.version})`);
+    // Drive the live pipeline to match the freshly pulled reference.
+    const refPrompt = 'make this person look like the reference image';
+    promptIn.value = refPrompt;
+    sendCtrl('prompt:' + refPrompt);
   } catch (e) {
     comfyStatus.textContent = 'error: ' + e.message;
     logLine('Comfy pull error: ' + e);
