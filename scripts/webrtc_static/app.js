@@ -434,6 +434,8 @@ const FEATURES = {
 };
 
 const featureState = {};
+const featSelects = {};
+let serverDefaultPrompt = '';
 
 function applyFeatures() {
   const parts = FEATURE_ORDER.map((k) => featureState[k]).filter(Boolean);
@@ -441,6 +443,26 @@ function applyFeatures() {
   const text = 'person with ' + parts.join(', ');
   promptIn.value = text;
   if (ch && ch.readyState === 'open') ch.send('prompt:' + text);
+}
+
+function randomizeFeatures() {
+  FEATURE_ORDER.forEach((k) => {
+    const opts = FEATURES[k].opts;
+    const pick = opts[Math.floor(Math.random() * opts.length)];
+    featureState[k] = pick;
+    if (featSelects[k]) featSelects[k].value = pick;
+  });
+  applyFeatures();
+}
+
+function resetFeatures() {
+  FEATURE_ORDER.forEach((k) => {
+    featureState[k] = '';
+    if (featSelects[k]) featSelects[k].value = '';
+  });
+  const text = serverDefaultPrompt || '';
+  promptIn.value = text;
+  if (text && ch && ch.readyState === 'open') ch.send('prompt:' + text);
 }
 
 (function buildFeatureBar() {
@@ -463,8 +485,21 @@ function applyFeatures() {
       featureState[k] = sel.value;
       applyFeatures();
     });
+    featSelects[k] = sel;
     bar.appendChild(sel);
   });
+
+  const rand = document.createElement('button');
+  rand.textContent = '🎲 Randomize';
+  rand.title = 'Random feature for every slot';
+  rand.addEventListener('click', randomizeFeatures);
+  bar.appendChild(rand);
+
+  const reset = document.createElement('button');
+  reset.textContent = '↺ Reset';
+  reset.title = 'Clear features, restore default prompt';
+  reset.addEventListener('click', resetFeatures);
+  bar.appendChild(reset);
 })();
 
 // ── reference image ─────────────────────────────────────────────────────────
@@ -737,6 +772,7 @@ async function probeHealth() {
       lastSeenRefVersion = j.reference_version || 0;
       refreshPreview(j.reference_version);
     }
+    if (j.prompt && !serverDefaultPrompt) serverDefaultPrompt = j.prompt;
     inputStatus.textContent = j.input_source === 'peer' ? 'input: peer (other client)' : 'input: server';
     if (j.lip_enabled) {
       lipXfer.disabled = false;
