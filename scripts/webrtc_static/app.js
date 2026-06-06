@@ -371,6 +371,102 @@ promptIn.addEventListener('keydown', (e) => {
 seedIn.addEventListener('change', () => sendCtrl('seed:' + seedIn.value));
 stepsIn.addEventListener('change', () => sendCtrl('steps:' + stepsIn.value));
 
+// ── facial-feature builder bar ──────────────────────────────────────────────
+// Each dropdown contributes one phrase; selecting any feature recomposes the
+// prompt from all active features and sends it.
+const FEATURE_ORDER = ['eyes', 'eyebrows', 'nose', 'ears', 'mouth'];
+const FEATURES = {
+  eyes: {
+    emoji: '👁️',
+    label: 'eyes',
+    opts: [
+      'giant googly eyes',
+      'glowing neon cyber eyes',
+      'heterochromia, one blue eye and one green eye',
+      'huge sparkling anime eyes',
+      'wise wrinkled squinting eyes',
+    ],
+  },
+  eyebrows: {
+    emoji: '🤨',
+    label: 'eyebrows',
+    opts: [
+      'huge bushy caterpillar eyebrows',
+      'thin dramatically arched eyebrows',
+      'thick connected unibrow',
+      'glowing painted neon eyebrows',
+      'completely shaved off eyebrows',
+    ],
+  },
+  nose: {
+    emoji: '👃',
+    label: 'nose',
+    opts: [
+      'big round red clown nose',
+      'long crooked witch nose',
+      'tiny upturned button nose',
+      'pig snout nose',
+      'golden nose ring through a wide nose',
+    ],
+  },
+  ears: {
+    emoji: '👂',
+    label: 'ears',
+    opts: [
+      'pointy elf ears',
+      'enormous floppy elephant ears',
+      'furry pointed wolf ears on top of the head',
+      'cybernetic robot ears with antennae',
+      'stretched gauged earlobes with big hoops',
+    ],
+  },
+  mouth: {
+    emoji: '👄',
+    label: 'mouth',
+    opts: [
+      'wide gold-tooth grin',
+      'huge toothy cartoon smile',
+      'bushy walrus mustache over the mouth',
+      'sharp vampire fangs',
+      'glowing neon lips',
+    ],
+  },
+};
+
+const featureState = {};
+
+function applyFeatures() {
+  const parts = FEATURE_ORDER.map((k) => featureState[k]).filter(Boolean);
+  if (!parts.length) return;
+  const text = 'person with ' + parts.join(', ');
+  promptIn.value = text;
+  if (ch && ch.readyState === 'open') ch.send('prompt:' + text);
+}
+
+(function buildFeatureBar() {
+  const bar = $('featBar');
+  FEATURE_ORDER.forEach((k) => {
+    const f = FEATURES[k];
+    const sel = document.createElement('select');
+    sel.className = 'feat';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = `${f.emoji} ${f.label}`;
+    sel.appendChild(def);
+    f.opts.forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p;
+      o.textContent = p;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+      featureState[k] = sel.value;
+      applyFeatures();
+    });
+    bar.appendChild(sel);
+  });
+})();
+
 // ── reference image ─────────────────────────────────────────────────────────
 function refreshPreview(versionLabel) {
   preview.src = '/reference?t=' + Date.now();
