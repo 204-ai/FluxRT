@@ -58,11 +58,14 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; align-items: center; }
 .controls + .controls { border-top: 1px solid #2a2a2a; }
 input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
-textarea#prompt {
-  flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee;
+textarea#prompt, textarea#negPrompt {
+  padding: 8px 10px; background: #222; color: #eee;
   border: 1px solid #333; border-radius: 4px; font: inherit; line-height: 1.4;
   resize: none; min-height: 36px; max-height: 240px; overflow-y: auto;
 }
+/* negative is half the positive's width */
+textarea#prompt { flex: 2 1 240px; }
+textarea#negPrompt { flex: 1 1 120px; }
 select { padding: 6px 8px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
 button { padding: 8px 14px; background: #2a6cd4; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
 button:hover { background: #3a7ce4; }

@@ -678,6 +678,7 @@ async def comfy_edit(request: Request):
     base = comfy_servers[name].rstrip("/")
 
     prompt_text = request.query_params.get("prompt") or current_prompt or "enhance this person"
+    negative_text = request.query_params.get("negative", "") or ""
 
     body = await request.body()
     if not body:
@@ -707,6 +708,7 @@ async def comfy_edit(request: Request):
             # 2. patch the workflow: input image, prompt, seed
             wf["78"]["inputs"]["image"] = uploaded_name
             wf["111"]["inputs"]["prompt"] = prompt_text
+            wf["110"]["inputs"]["prompt"] = negative_text  # negative (effective only if cfg>1)
             wf["3"]["inputs"]["seed"] = seed
 
             # 3. queue it
