@@ -27,7 +27,6 @@ const stopBtn = $('stop');
 const showInput = $('showInput');
 
 const promptIn = $('prompt');
-const negPromptIn = $('negPrompt');
 const seedIn = $('seed');
 const stepsIn = $('steps');
 
@@ -682,11 +681,8 @@ comfyEditBtn.addEventListener('click', async () => {
     const blob = await new Promise((res) => input.canvasEl.toBlob(res, 'image/png'));
     // Dedicated Qwen-edit prompt; falls back to the live pipeline prompt if blank.
     const prompt = comfyPrompt.value.trim() || promptIn.value.trim();
-    const negative = negPromptIn.value.trim();
     const r = await fetch(
-      '/comfy/edit?server=' + encodeURIComponent(name) +
-        '&prompt=' + encodeURIComponent(prompt) +
-        '&negative=' + encodeURIComponent(negative),
+      '/comfy/edit?server=' + encodeURIComponent(name) + '&prompt=' + encodeURIComponent(prompt),
       { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob }
     );
     if (!r.ok) {
