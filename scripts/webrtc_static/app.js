@@ -161,6 +161,8 @@ async function startInputPipeline() {
   drawSize.disabled = false;
   drawClear.disabled = false;
   showInput.disabled = false;
+  // Auto-enable the side-by-side input preview on the Output tab.
+  showInput.checked = true;
   placeInputCanvas();
 }
 
