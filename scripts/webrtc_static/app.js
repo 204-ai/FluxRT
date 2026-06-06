@@ -35,6 +35,7 @@ const comfyPullBtn = $('comfyPull');
 const comfyEditBtn = $('comfyEdit');
 const comfySpin = $('comfySpin');
 const comfyStatus = $('comfyStatus');
+const comfyPrompt = $('comfyPrompt');
 
 const drop = $('drop');
 const fileIn = $('file');
@@ -614,7 +615,8 @@ comfyEditBtn.addEventListener('click', async () => {
   comfyStatus.textContent = `snapping → Qwen edit on ${name}...`;
   try {
     const blob = await new Promise((res) => input.canvasEl.toBlob(res, 'image/png'));
-    const prompt = promptIn.value.trim();
+    // Dedicated Qwen-edit prompt; falls back to the live pipeline prompt if blank.
+    const prompt = comfyPrompt.value.trim() || promptIn.value.trim();
     const r = await fetch(
       '/comfy/edit?server=' + encodeURIComponent(name) + '&prompt=' + encodeURIComponent(prompt),
       { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob }
