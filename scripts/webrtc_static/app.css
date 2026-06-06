@@ -22,12 +22,25 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 
 /* ── stage (output tab) ── */
 .stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
-.stage video { flex: 1 1 0; min-width: 0; background: #000; display: block; }
+.stage video { min-width: 0; background: #000; display: block; }
 /* single output (no input preview) renders 30% smaller */
-.stage video#v { max-width: 70%; }
-.stage video#inv { display: none; max-width: 70%; }
-.stage.split video#v, .stage.split video#inv { max-width: 50%; }
-.stage.split video#inv { display: block; }
+.stage video#v { flex: 1 1 0; max-width: 70%; }
+.stage.split video#v { max-width: 50%; }
+#invSlot { flex: 1 1 0; min-width: 0; max-width: 50%; }
+#invSlot canvas { display: block; width: 100%; background: #000; touch-action: none; cursor: crosshair; }
+/* hide the input preview + its toolbar unless split */
+.stage:not(.split) #invSlot, .stage:not(.split) #inputToolbar { display: none; }
+
+/* ── input edit toolbar (GIMP-style, left of preview) ── */
+.tool-bar {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  background: #161616; border: 1px solid #2a2a2a; border-radius: 6px; align-self: flex-start;
+}
+.tool-bar .tool { width: 36px; height: 36px; padding: 0; font-size: 16px; background: #2a2a2a; }
+.tool-bar .tool:hover { background: #3a3a3a; }
+.tool-bar .tool.active { background: #2a6cd4; }
+.tool-bar input[type=color] { width: 36px; height: 28px; }
+.tool-bar input[type=range] { width: 72px; }
 
 /* ── control rows ── */
 .controls { padding: 10px 14px; display: flex; gap: 8px; flex-wrap: wrap; background: #1a1a1a; align-items: center; }

@@ -21,7 +21,15 @@
   <!-- ── OUTPUT TAB ──────────────────────────────────────────────────────── -->
   <section class="tab-panel" data-tab="output">
     <div class="stage" id="stage">
-      <video id="inv" autoplay playsinline muted></video>
+      <div id="inputToolbar" class="tool-bar">
+        <button id="tbBrush" class="tool" title="Brush">✏️</button>
+        <button id="tbErase" class="tool" title="Eraser">🧽</button>
+        <input id="tbColor" type="color" value="#ffffff" title="Color">
+        <input id="tbSize" type="range" min="1" max="60" step="1" value="6" title="Brush size">
+        <span id="tbSizeLbl" class="dim" style="text-align:center;">6</span>
+        <button id="tbClear" class="tool" title="Clear drawing">🗑️</button>
+      </div>
+      <div id="invSlot"></div>
       <video id="v" autoplay playsinline muted></video>
     </div>
 

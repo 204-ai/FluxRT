@@ -60,7 +60,7 @@ export class InputProcessor {
     // Persistent freehand drawing layer composited on top of every frame.
     this.drawCanvas = null;
     this.drawCtx = null;
-    this.draw = { color: '#ffffff', size: 6 };
+    this.draw = { color: '#ffffff', size: 6, erase: false };
     this._drawing = false;
     this._last = null;
   }
@@ -176,6 +176,10 @@ export class InputProcessor {
 
   get outputStream() {
     return this.canvasStream;
+  }
+
+  get canvasEl() {
+    return this.canvas;
   }
 
   get active() {
@@ -297,6 +301,7 @@ export class InputProcessor {
     const p = this._toCanvas(clientX, clientY);
     this._last = p;
     const c = this.drawCtx;
+    c.globalCompositeOperation = this.draw.erase ? 'destination-out' : 'source-over';
     c.beginPath();
     c.fillStyle = this.draw.color;
     c.arc(p.x, p.y, this.draw.size / 2, 0, Math.PI * 2);
@@ -306,6 +311,7 @@ export class InputProcessor {
     if (!this._drawing || !this.drawCtx) return;
     const p = this._toCanvas(clientX, clientY);
     const c = this.drawCtx;
+    c.globalCompositeOperation = this.draw.erase ? 'destination-out' : 'source-over';
     c.strokeStyle = this.draw.color;
     c.lineWidth = this.draw.size;
     c.lineCap = 'round';
@@ -328,5 +334,8 @@ export class InputProcessor {
   }
   setDrawSize(n) {
     this.draw.size = parseInt(n, 10) || 6;
+  }
+  setEraser(b) {
+    this.draw.erase = !!b;
   }
 }

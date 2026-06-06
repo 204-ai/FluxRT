@@ -9,8 +9,15 @@ const $ = (id) => document.getElementById(id);
 
 // ── elements ──────────────────────────────────────────────────────────────
 const v = $('v');
-const inv = $('inv');
+const invSlot = $('invSlot');
 const stage = $('stage');
+const inputToolbar = $('inputToolbar');
+const tbBrush = $('tbBrush');
+const tbErase = $('tbErase');
+const tbColor = $('tbColor');
+const tbSize = $('tbSize');
+const tbSizeLbl = $('tbSizeLbl');
+const tbClear = $('tbClear');
 const statusEl = $('status');
 const fpsBar = $('fpsBar');
 const logEl = $('log');
@@ -88,20 +95,56 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     document.querySelectorAll('.tab-panel').forEach((p) =>
       p.classList.toggle('active', p.dataset.tab === tab)
     );
+    placeInputCanvas();
   });
 });
 
-// ── input preview (side-by-side, output tab) ───────────────────────────────
-function applyInputPreview() {
-  if (showInput.checked && input.outputStream) {
-    inv.srcObject = input.outputStream;
+function outputTabActive() {
+  const p = document.querySelector('.tab-panel[data-tab="output"]');
+  return p && p.classList.contains('active');
+}
+
+// The single compositing canvas lives wherever it's visible: the Output-tab
+// stage (split view, with the edit toolbar) when "Show input preview" is on
+// and the Output tab is active; otherwise parked in the Input tab.
+function placeInputCanvas() {
+  const canvas = input.canvasEl;
+  if (!canvas) {
+    stage.classList.remove('split');
+    return;
+  }
+  if (outputTabActive() && showInput.checked) {
+    if (canvas.parentElement !== invSlot) invSlot.appendChild(canvas);
     stage.classList.add('split');
   } else {
-    inv.srcObject = null;
+    if (canvas.parentElement !== inputView) inputView.appendChild(canvas);
     stage.classList.remove('split');
   }
 }
-showInput.addEventListener('change', applyInputPreview);
+showInput.addEventListener('change', placeInputCanvas);
+
+// ── centralized draw state (shared by input-tab controls + stage toolbar) ───
+let drawMode = 'off'; // 'off' | 'brush' | 'eraser'
+
+function setDrawMode(mode) {
+  drawMode = mode;
+  input.setEraser(mode === 'eraser');
+  drawEnable.checked = mode !== 'off';
+  tbBrush.classList.toggle('active', mode === 'brush');
+  tbErase.classList.toggle('active', mode === 'eraser');
+}
+function setDrawColorAll(c) {
+  input.setDrawColor(c);
+  drawColor.value = c;
+  tbColor.value = c;
+}
+function setDrawSizeAll(n) {
+  input.setDrawSize(n);
+  drawSize.value = n;
+  drawSizeLbl.textContent = n + 'px';
+  tbSize.value = n;
+  tbSizeLbl.textContent = String(n);
+}
 
 // ── input pipeline (camera + preview + draw), independent of WebRTC ─────────
 async function startInputPipeline() {
@@ -115,7 +158,7 @@ async function startInputPipeline() {
   drawSize.disabled = false;
   drawClear.disabled = false;
   showInput.disabled = false;
-  applyInputPreview();
+  placeInputCanvas();
 }
 
 function stopInputPipeline() {
@@ -128,17 +171,18 @@ function stopInputPipeline() {
   drawClear.disabled = true;
   showInput.checked = false;
   showInput.disabled = true;
-  applyInputPreview();
+  setDrawMode('off');
+  stage.classList.remove('split');
 }
 
 function bindDrawing(canvas) {
   canvas.onpointerdown = (e) => {
-    if (!drawEnable.checked) return;
+    if (drawMode === 'off') return;
     canvas.setPointerCapture(e.pointerId);
     input.beginStroke(e.clientX, e.clientY);
   };
   canvas.onpointermove = (e) => {
-    if (!drawEnable.checked) return;
+    if (drawMode === 'off') return;
     input.moveStroke(e.clientX, e.clientY);
   };
   canvas.onpointerup = () => input.endStroke();
@@ -146,12 +190,18 @@ function bindDrawing(canvas) {
   canvas.onpointerleave = () => input.endStroke();
 }
 
-drawColor.addEventListener('input', () => input.setDrawColor(drawColor.value));
-drawSize.addEventListener('input', () => {
-  drawSizeLbl.textContent = drawSize.value + 'px';
-  input.setDrawSize(drawSize.value);
-});
+// Input-tab draw controls
+drawEnable.addEventListener('change', () => setDrawMode(drawEnable.checked ? 'brush' : 'off'));
+drawColor.addEventListener('input', () => setDrawColorAll(drawColor.value));
+drawSize.addEventListener('input', () => setDrawSizeAll(drawSize.value));
 drawClear.addEventListener('click', () => input.clearDrawing());
+
+// Stage edit toolbar (mirrors the same draw state)
+tbBrush.addEventListener('click', () => setDrawMode(drawMode === 'brush' ? 'off' : 'brush'));
+tbErase.addEventListener('click', () => setDrawMode(drawMode === 'eraser' ? 'off' : 'eraser'));
+tbColor.addEventListener('input', () => setDrawColorAll(tbColor.value));
+tbSize.addEventListener('input', () => setDrawSizeAll(tbSize.value));
+tbClear.addEventListener('click', () => input.clearDrawing());
 
 // ── WebRTC ──────────────────────────────────────────────────────────────────
 async function start() {
@@ -226,9 +276,8 @@ function stop() {
   if (pc) { try { pc.close(); } catch (_) {} pc = null; }
   // Leave the camera pipeline running — it's bound to the Input-tab toggle,
   // not the connection, so preview + drawing survive a disconnect/reconnect.
-  inv.srcObject = null;
-  stage.classList.remove('split');
   v.srcObject = null;
+  placeInputCanvas();
   // Reset recv-fps accumulators so the next session's first sample isn't a
   // bogus delta against the previous connection's framesReceived.
   lastRecvFps = '—';
