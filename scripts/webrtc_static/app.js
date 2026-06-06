@@ -482,26 +482,19 @@ function applyFeatureChange(key, newPhrase) {
 }
 
 function randomizeFeatures() {
-  // Strip all current facial + style phrases, then append ONE random facial
-  // feature and ONE random style.
-  let text = promptIn.value.trim();
-  [...FEATURE_ORDER, 'style'].forEach((k) => {
-    if (featureState[k]) text = removePhrase(text, featureState[k]);
-    featureState[k] = '';
-  });
+  // Overwrite the whole prompt with one random facial feature + one style.
+  [...FEATURE_ORDER, 'style'].forEach((k) => (featureState[k] = ''));
 
   const k = FEATURE_ORDER[Math.floor(Math.random() * FEATURE_ORDER.length)];
   const opts = FEATURES[k].opts;
   const featPick = opts[Math.floor(Math.random() * opts.length)];
   featureState[k] = featPick;
-  text = text ? text + ', ' + featPick : featPick;
 
   const stylePick = STYLES[Math.floor(Math.random() * STYLES.length)];
   featureState.style = stylePick;
   if (styleSel) styleSel.value = stylePick;
-  text = text + ', ' + stylePick;
 
-  sendPrompt(text);
+  sendPrompt(`person with ${featPick} ${stylePick}`);
 }
 
 function resetFeatures() {
