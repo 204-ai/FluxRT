@@ -5,7 +5,7 @@
 
 import { create } from 'zustand'
 import { inputVision, outputVision } from './runtime'
-import { composeFromAnalysis } from '../lib/senseCompose'
+import { composeFromAnalysis, type ComposeTheme } from '../lib/senseCompose'
 import { postPromptRest } from '../lib/api'
 import { usePromptStore } from './promptStore'
 import { useSessionStore } from './sessionStore'
@@ -21,6 +21,7 @@ interface SenseState {
 
   /** Drive the FLUX prompt from sensed features (sense_compose port). */
   composeEnabled: boolean
+  composeTheme: ComposeTheme
   composeMinGapSecs: number
   composeKey: string
   composePrompt: string
@@ -28,6 +29,7 @@ interface SenseState {
   setEnabled(on: boolean): Promise<void>
   setSource(source: SenseSource): Promise<void>
   setComposeEnabled(on: boolean): void
+  setComposeTheme(theme: ComposeTheme): void
   setComposeMinGap(secs: number): void
 }
 
@@ -52,7 +54,7 @@ let lastComposeSent = 0
 function maybeCompose(analysis: HumanAnalysis): void {
   const s = useSenseStore.getState()
   if (!s.composeEnabled) return
-  const { key, prompt } = composeFromAnalysis(analysis)
+  const { key, prompt } = composeFromAnalysis(analysis, s.composeTheme)
   const now = Date.now()
   if (key === lastComposeKey || now - lastComposeSent < s.composeMinGapSecs * 1000) {
     useSenseStore.setState({ composeKey: key })
@@ -109,6 +111,7 @@ export const useSenseStore = create<SenseState>((set, get) => ({
   analysis: null,
 
   composeEnabled: false,
+  composeTheme: 'natural',
   composeMinGapSecs: 5,
   composeKey: '',
   composePrompt: '',
@@ -119,6 +122,11 @@ export const useSenseStore = create<SenseState>((set, get) => ({
       lastComposeKey = ''
       set({ composeKey: '', composePrompt: '' })
     }
+  },
+
+  setComposeTheme(theme) {
+    set({ composeTheme: theme })
+    lastComposeKey = '' // theme switch should re-send immediately on next tick
   },
 
   setComposeMinGap(secs) {
