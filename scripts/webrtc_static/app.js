@@ -97,15 +97,17 @@ function setStatus(text, cls) {
 }
 
 // ── tabs ──────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach((b) =>
+    b.classList.toggle('active', b.dataset.tab === tab)
+  );
+  document.querySelectorAll('.tab-panel').forEach((p) =>
+    p.classList.toggle('active', p.dataset.tab === tab)
+  );
+  placeInputCanvas();
+}
 document.querySelectorAll('.tab-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const tab = btn.dataset.tab;
-    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
-    document.querySelectorAll('.tab-panel').forEach((p) =>
-      p.classList.toggle('active', p.dataset.tab === tab)
-    );
-    placeInputCanvas();
-  });
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
 function outputTabActive() {
@@ -915,6 +917,15 @@ async function probeHealth() {
     }
     if (j.prompt && !serverDefaultPrompt) serverDefaultPrompt = j.prompt;
     inputStatus.textContent = j.input_source === 'peer' ? 'input: peer (other client)' : 'input: server';
+    // Someone is already connected — this client is joining as a viewer, so
+    // jump to the Output tab and connect right away (recvonly, no camera
+    // permission needed; the <video> is muted+autoplay so playback starts
+    // without a user gesture).
+    if (j.peers > 0 && !pc) {
+      logLine(`${j.peers} client(s) already connected — auto-starting viewer`);
+      switchTab('output');
+      start();
+    }
     if (j.lip_enabled) {
       lipXfer.disabled = false;
       lipXfer.checked = !!j.lip_active;
