@@ -53,6 +53,8 @@ const rateTracking = $('rateTracking');
 const rateStability = $('rateStability');
 const savePromptBtn = $('savePromptBtn');
 const delPromptBtn = $('delPromptBtn');
+const loopDelay = $('loopDelay');
+const loopBtn = $('loopBtn');
 const savedStatus = $('savedStatus');
 
 const useCam = $('useCam');
@@ -655,14 +657,74 @@ async function loadSavedPrompts() {
   }
 }
 
-savedSelect.addEventListener('change', () => {
-  const e = savedPrompts[parseInt(savedSelect.value, 10)];
+function applySavedPrompt(i) {
+  const e = savedPrompts[i];
   if (!e) return;
   rateStyle.value = String(e.style || 0);
   rateTracking.value = String(e.tracking || 0);
   rateStability.value = String(e.stability || 0);
+  savedSelect.value = String(i);
   sendPrompt(e.prompt);
   logLine(`Saved prompt applied (${ratingLabel(e)})`);
+}
+
+savedSelect.addEventListener('change', () => {
+  const i = parseInt(savedSelect.value, 10);
+  if (isNaN(i)) return;
+  applySavedPrompt(i);
+  // A manual pick re-bases the autoloop so it continues from here.
+  loopIdx = i;
+});
+
+// ── autoloop — cycle saved prompts in list order with a delay ───────────────
+let loopTimer = null;
+let loopIdx = -1;
+
+function loopTick() {
+  if (!savedPrompts.length) return;
+  loopIdx = (loopIdx + 1) % savedPrompts.length;
+  applySavedPrompt(loopIdx);
+}
+
+function startLoop() {
+  const secs = Math.max(2, parseInt(loopDelay.value, 10) || 20);
+  loopDelay.value = secs;
+  loopTimer = setInterval(loopTick, secs * 1000);
+  loopBtn.textContent = '⏸ Stop';
+  loopBtn.classList.add('active');
+  logLine(`Autoloop started: ${savedPrompts.length} prompts, every ${secs}s`);
+  loopTick(); // apply the first one immediately
+}
+
+function stopLoop() {
+  clearInterval(loopTimer);
+  loopTimer = null;
+  loopBtn.textContent = '▶ Loop';
+  loopBtn.classList.remove('active');
+  logLine('Autoloop stopped');
+}
+
+loopBtn.addEventListener('click', () => {
+  if (loopTimer) {
+    stopLoop();
+    return;
+  }
+  if (!savedPrompts.length) {
+    savedStatus.textContent = 'no saved prompts to loop';
+    return;
+  }
+  startLoop();
+});
+
+// Changing the delay while looping restarts the timer with the new period.
+loopDelay.addEventListener('change', () => {
+  if (loopTimer) {
+    clearInterval(loopTimer);
+    const secs = Math.max(2, parseInt(loopDelay.value, 10) || 20);
+    loopDelay.value = secs;
+    loopTimer = setInterval(loopTick, secs * 1000);
+    logLine(`Autoloop delay: ${secs}s`);
+  }
 });
 
 savePromptBtn.addEventListener('click', async () => {
