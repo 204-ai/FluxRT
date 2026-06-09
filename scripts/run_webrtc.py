@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import fractions
 import io
+import itertools
 import json
 import logging
 import os
@@ -86,11 +87,18 @@ pcs: set[RTCPeerConnection] = set()
 ctrl_channels: set = set()
 ref_version: int = 0
 
-# Pipeline input ownership — first peer with sendrecv video wins; others ignored.
-# When a peer owns the input, the local camera producer thread pauses its writes.
+# Pipeline input ownership — the oldest-connected peer with a live video
+# track steers the input; every other peer just views the output. Waiting
+# peers keep draining their tracks (aiortc decodes inbound RTP regardless),
+# and the oldest waiter takes over when the current steerer disconnects.
+# When a peer owns the input, the local camera producer thread pauses.
 input_owner_pc: Optional[RTCPeerConnection] = None
 input_owner_lock = threading.Lock()
 peer_input_active = threading.Event()
+# seq -> pc for every peer with a live video track; min(seq) is next in line.
+input_waiters: dict[int, RTCPeerConnection] = {}
+# Connection order, assigned per /offer — defines who "first connected" is.
+_peer_seq = itertools.count()
 
 # Strong refs to peer-input consumer tasks. asyncio only holds weak refs to
 # tasks, so without this a consumer can be GC'd mid-run; if its `finally`
@@ -130,6 +138,13 @@ def safe_send(channel, msg: str) -> None:
     except Exception as exc:
         log.debug("ctrl send failed, dropping channel: %s", exc)
         ctrl_channels.discard(channel)
+
+
+def send_to_pc(pc: RTCPeerConnection, msg: str) -> None:
+    """Send a control message only to the channels of one peer connection.
+    Used for role messages (input:you) that must not reach other clients."""
+    for ch in list(getattr(pc, "_fluxrt_channels", ()) or ()):
+        safe_send(ch, msg)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,32 +203,64 @@ def producer_loop(camera_index: int) -> None:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-peer input consumer — pulls VideoFrames from a remote track and feeds
-# them into the pipeline. First peer to deliver a track wins ownership;
-# subsequent peers are ignored. Ownership is released on peer disconnect.
+# them into the pipeline. The oldest-connected peer (lowest seq) steers;
+# the rest drain their tracks in view-only mode and the oldest waiter takes
+# over when the steerer disconnects.
 # ──────────────────────────────────────────────────────────────────────────────
-async def consume_peer_input(track, pc: RTCPeerConnection) -> None:
+async def consume_peer_input(track, pc: RTCPeerConnection, seq: int) -> None:
     global input_owner_pc
 
+    def _try_claim() -> bool:
+        global input_owner_pc
+        with input_owner_lock:
+            if input_owner_pc is pc:
+                return True
+            if input_owner_pc is None and input_waiters and seq == min(input_waiters):
+                input_owner_pc = pc
+                peer_input_active.set()
+                return True
+            return False
+
     with input_owner_lock:
-        owner = input_owner_pc is None
-        if owner:
-            input_owner_pc = pc
-            peer_input_active.set()
+        input_waiters[seq] = pc
 
-    if not owner:
-        # Not the owner, but the track must still be drained: aiortc decodes
-        # inbound RTP into an unbounded per-track queue whether or not recv()
-        # is called, so an ignored track grows server memory for as long as
-        # the extra peer streams.
-        log.info("Peer input already taken — draining extra track")
-        with contextlib.suppress(MediaStreamError, Exception):
-            while True:
+    try:
+        # Wait for ownership. Frames must be drained meanwhile: aiortc
+        # decodes inbound RTP into an unbounded per-track queue whether or
+        # not recv() is called, so an idle view-only track grows memory.
+        was_waiting = False
+        while not _try_claim():
+            if not was_waiting:
+                was_waiting = True
+                log.info("Peer %x (seq %d) waiting — view-only", id(pc), seq)
+            try:
                 await track.recv()
-        return
+            except MediaStreamError:
+                return
+            except Exception as exc:
+                log.warning("Waiting peer track recv error: %s", exc)
+                return
 
-    log.info("Peer %x now drives input", id(pc))
-    broadcast_ctrl("input:peer")
+        log.info("Peer %x (seq %d) now drives input", id(pc), seq)
+        broadcast_ctrl("input:peer")
+        send_to_pc(pc, "input:you")
+        await _pump_owner_frames(track, pc)
+    finally:
+        with input_owner_lock:
+            input_waiters.pop(seq, None)
+            if input_owner_pc is pc:
+                input_owner_pc = None
+                log.info("Peer %x (seq %d) released input", id(pc), seq)
+            # If another waiter is in line it claims ownership on its next
+            # recv() and re-broadcasts input:peer; keep peer_input_active set
+            # so the server camera doesn't flicker in during the handoff.
+            if input_owner_pc is None and not input_waiters and peer_input_active.is_set():
+                peer_input_active.clear()
+                broadcast_ctrl("input:server")
+                log.info("No peer inputs left — server camera resumes")
 
+
+async def _pump_owner_frames(track, pc: RTCPeerConnection) -> None:
     loop = asyncio.get_running_loop()
 
     # Drain-to-latest: the reader task always overwrites `latest`, the
@@ -252,12 +299,6 @@ async def consume_peer_input(track, pc: RTCPeerConnection) -> None:
         reader.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reader
-        with input_owner_lock:
-            if input_owner_pc is pc:
-                input_owner_pc = None
-                peer_input_active.clear()
-                log.info("Peer %x released input", id(pc))
-                broadcast_ctrl("input:server")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -345,9 +386,13 @@ async def offer(request: Request):
 
     pc = RTCPeerConnection()
     pcs.add(pc)
+    # Connection order decides who steers the input (lowest live seq wins).
+    seq = next(_peer_seq)
     # Channels opened by this PC — pruned from the broadcast set when the
     # connection dies, since the channel "close" event may never fire then.
+    # Also reachable via the pc for targeted role messages (send_to_pc).
     pc_channels: set = set()
+    pc._fluxrt_channels = pc_channels
 
     @pc.on("connectionstatechange")
     async def _on_state():
@@ -362,7 +407,7 @@ async def offer(request: Request):
     def _on_track(track):
         log.info("Inbound track from peer: kind=%s id=%s", track.kind, track.id)
         if track.kind == "video":
-            task = asyncio.ensure_future(consume_peer_input(track, pc))
+            task = asyncio.ensure_future(consume_peer_input(track, pc, seq))
             peer_input_tasks.add(task)
             task.add_done_callback(peer_input_tasks.discard)
 
@@ -386,6 +431,15 @@ async def offer(request: Request):
             safe_send(channel, f"state:prompt:{current_prompt}")
         safe_send(channel, f"state:seed:{current_seed}")
         safe_send(channel, f"state:steps:{current_steps}")
+
+        # Input-source role sync. The DataChannel usually opens after the
+        # video track was claimed, so the targeted input:you from the claim
+        # can be missed — resend it here.
+        if peer_input_active.is_set():
+            safe_send(channel, "input:peer")
+            with input_owner_lock:
+                if input_owner_pc is pc:
+                    safe_send(channel, "input:you")
 
         @channel.on("close")
         def _on_close():
@@ -839,6 +893,7 @@ async def _health():
         "reference_set": latest_reference_png is not None,
         "reference_version": ref_version,
         "input_source": "peer" if peer_input_active.is_set() else "server",
+        "input_waiters": len(input_waiters),
         "lip_enabled": _lip_enabled(),
         "lip_active": lip_active,
         "prompt": current_prompt,

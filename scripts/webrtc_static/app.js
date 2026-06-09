@@ -73,6 +73,8 @@ const poseStatus = $('poseStatus');
 let pc = null;
 let ch = null;
 let lastSeenRefVersion = 0;
+// True when this client steers the pipeline input (server says input:you).
+let steering = false;
 
 const input = new InputProcessor({
   onStatus: (t) => (poseStatus.textContent = t),
@@ -288,6 +290,7 @@ async function start() {
 function stop() {
   if (ch) { try { ch.close(); } catch (_) {} ch = null; }
   if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+  steering = false;
   // Leave the camera pipeline running — it's bound to the Input-tab toggle,
   // not the connection, so preview + drawing survive a disconnect/reconnect.
   v.srcObject = null;
@@ -332,10 +335,18 @@ function onCtrlMessage(msg) {
       clearPreview();
       logLine(`Reference cleared by another client (v${ver})`);
     }
+  } else if (msg === 'input:you') {
+    // Targeted message — always follows the input:peer broadcast for the
+    // claiming client, so it lands last and wins.
+    steering = true;
+    inputStatus.textContent = 'input: you (steering)';
+    logLine('You are steering the pipeline input');
   } else if (msg === 'input:peer') {
-    inputStatus.textContent = useCam.checked ? 'input: peer (you)' : 'input: peer (other client)';
+    steering = false;
+    inputStatus.textContent = 'input: peer (other client)';
     logLine('Pipeline input now from a peer');
   } else if (msg === 'input:server') {
+    steering = false;
     inputStatus.textContent = 'input: server';
     logLine('Pipeline input now from server camera');
   } else if (msg === 'lip:on' || msg === 'lip:off') {
