@@ -114,6 +114,16 @@ export async function comfyEdit(
   return r.json()
 }
 
+/** REST prompt fallback — works without an open ctrl DataChannel. */
+export async function postPromptRest(text: string): Promise<void> {
+  const r = await fetch('/prompt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: text,
+  })
+  if (!r.ok) await jsonOrDetail(r)
+}
+
 export async function setLipTransfer(on: boolean): Promise<{ lip_active: boolean }> {
   const r = await fetch('/lip-transfer?on=' + (on ? 'true' : 'false'), { method: 'POST' })
   if (!r.ok) await jsonOrDetail(r)

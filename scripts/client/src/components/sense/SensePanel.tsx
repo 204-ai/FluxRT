@@ -41,7 +41,47 @@ export function SensePanel() {
         </label>
         <span className="dim">{status}</span>
       </div>
+      {enabled && <ComposeControls />}
       {enabled && <InfoPanel analysis={analysis} />}
     </section>
+  )
+}
+
+function ComposeControls() {
+  const composeEnabled = useSenseStore((s) => s.composeEnabled)
+  const composeMinGapSecs = useSenseStore((s) => s.composeMinGapSecs)
+  const composeKey = useSenseStore((s) => s.composeKey)
+  const composePrompt = useSenseStore((s) => s.composePrompt)
+  const setComposeEnabled = useSenseStore((s) => s.setComposeEnabled)
+  const setComposeMinGap = useSenseStore((s) => s.setComposeMinGap)
+
+  return (
+    <div className="controls">
+      <label title="Compose a FLUX prompt from smile/arousal/gaze/lean slots; send when the combination changes">
+        <input
+          type="checkbox"
+          checked={composeEnabled}
+          onChange={(e) => setComposeEnabled(e.target.checked)}
+        />{' '}
+        🎭 Drive prompt from sense
+      </label>
+      <label className="dim">
+        min gap{' '}
+        <input
+          type="number"
+          min={1}
+          style={{ width: 54 }}
+          value={composeMinGapSecs}
+          onChange={(e) => setComposeMinGap(+e.target.value)}
+        />{' '}
+        s
+      </label>
+      {composeEnabled && (
+        <span className="dim compose-readout">
+          {composeKey ? `slots: ${composeKey}` : 'waiting for detection…'}
+          {composePrompt ? ` → ${composePrompt.slice(0, 90)}…` : ''}
+        </span>
+      )}
+    </div>
   )
 }

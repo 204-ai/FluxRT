@@ -5,6 +5,10 @@
 
 import { create } from 'zustand'
 import { inputVision, outputVision } from './runtime'
+import { composeFromAnalysis } from '../lib/senseCompose'
+import { postPromptRest } from '../lib/api'
+import { usePromptStore } from './promptStore'
+import { useSessionStore } from './sessionStore'
 import type { HumanAnalysis, VisionResult } from '../vision/types'
 
 export type SenseSource = 'input' | 'output'
@@ -15,8 +19,16 @@ interface SenseState {
   status: string
   analysis: HumanAnalysis | null
 
+  /** Drive the FLUX prompt from sensed features (sense_compose port). */
+  composeEnabled: boolean
+  composeMinGapSecs: number
+  composeKey: string
+  composePrompt: string
+
   setEnabled(on: boolean): Promise<void>
   setSource(source: SenseSource): Promise<void>
+  setComposeEnabled(on: boolean): void
+  setComposeMinGap(secs: number): void
 }
 
 type ResultListener = (r: VisionResult) => void
@@ -31,12 +43,42 @@ let unsubResult: (() => void) | null = null
 let unsubStatus: (() => void) | null = null
 let lastUiUpdate = 0
 
+// Compose throttle: send only when the slot combination changes AND the
+// cooldown has elapsed (lastKey updates only on send, matching the original
+// console script — a change during cooldown fires on the next tick after it).
+let lastComposeKey = ''
+let lastComposeSent = 0
+
+function maybeCompose(analysis: HumanAnalysis): void {
+  const s = useSenseStore.getState()
+  if (!s.composeEnabled) return
+  const { key, prompt } = composeFromAnalysis(analysis)
+  const now = Date.now()
+  if (key === lastComposeKey || now - lastComposeSent < s.composeMinGapSecs * 1000) {
+    useSenseStore.setState({ composeKey: key })
+    return
+  }
+  lastComposeKey = key
+  lastComposeSent = now
+  useSenseStore.setState({ composeKey: key, composePrompt: prompt })
+  // Show in the prompt box + prefer the ctrl channel (syncs all clients);
+  // REST fallback drives the pipeline even with no WebRTC session.
+  usePromptStore.setState({ prompt })
+  const session = useSessionStore.getState()
+  const sent = session.sendCtrl({ kind: 'prompt', text: prompt })
+  if (!sent) {
+    postPromptRest(prompt).catch((e) => session.logLine('sense-compose REST error: ' + e))
+  }
+  session.logLine(`sense-compose: ${key}`)
+}
+
 function handleResult(r: VisionResult): void {
   resultListeners.forEach((l) => l(r))
   const now = performance.now()
   if (now - lastUiUpdate > 100) {
     lastUiUpdate = now
     useSenseStore.setState({ analysis: r.analysis })
+    maybeCompose(r.analysis)
   }
 }
 
@@ -65,6 +107,23 @@ export const useSenseStore = create<SenseState>((set, get) => ({
   source: 'input',
   status: '',
   analysis: null,
+
+  composeEnabled: false,
+  composeMinGapSecs: 5,
+  composeKey: '',
+  composePrompt: '',
+
+  setComposeEnabled(on) {
+    set({ composeEnabled: on })
+    if (!on) {
+      lastComposeKey = ''
+      set({ composeKey: '', composePrompt: '' })
+    }
+  },
+
+  setComposeMinGap(secs) {
+    set({ composeMinGapSecs: Math.max(1, secs || 5) })
+  },
 
   async setEnabled(on) {
     set({ enabled: on })
