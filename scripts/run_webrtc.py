@@ -118,11 +118,18 @@ current_steps: int = 0
 def broadcast_ctrl(msg: str) -> None:
     """Send a string message to every open control DataChannel."""
     for ch in list(ctrl_channels):
-        try:
-            ch.send(msg)
-        except Exception as exc:
-            log.debug("broadcast send failed, dropping channel: %s", exc)
-            ctrl_channels.discard(ch)
+        safe_send(ch, msg)
+
+
+def safe_send(channel, msg: str) -> None:
+    """Send on a DataChannel, dropping it from the broadcast set on failure.
+    aiortc raises if the channel closed between the event and the send; that
+    must not propagate out of an event callback."""
+    try:
+        channel.send(msg)
+    except Exception as exc:
+        log.debug("ctrl send failed, dropping channel: %s", exc)
+        ctrl_channels.discard(channel)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,29 +195,63 @@ async def consume_peer_input(track, pc: RTCPeerConnection) -> None:
     global input_owner_pc
 
     with input_owner_lock:
-        if input_owner_pc is not None:
-            log.info("Peer input already taken — ignoring extra track")
-            return
-        input_owner_pc = pc
-        peer_input_active.set()
+        owner = input_owner_pc is None
+        if owner:
+            input_owner_pc = pc
+            peer_input_active.set()
+
+    if not owner:
+        # Not the owner, but the track must still be drained: aiortc decodes
+        # inbound RTP into an unbounded per-track queue whether or not recv()
+        # is called, so an ignored track grows server memory for as long as
+        # the extra peer streams.
+        log.info("Peer input already taken — draining extra track")
+        with contextlib.suppress(MediaStreamError, Exception):
+            while True:
+                await track.recv()
+        return
+
     log.info("Peer %x now drives input", id(pc))
     broadcast_ctrl("input:peer")
 
     loop = asyncio.get_running_loop()
-    try:
-        while True:
-            try:
-                frame = await track.recv()
-            except MediaStreamError:
-                break
-            except Exception as exc:
-                log.warning("Peer track recv error: %s", exc)
-                break
 
+    # Drain-to-latest: the reader task always overwrites `latest`, the
+    # processing loop pushes only the newest frame. Without this, a pipeline
+    # slower than the peer's camera lets decoded frames accumulate in the
+    # track queue — round-trip lag grows without bound (and so does memory).
+    latest: list = [None]
+    new_frame = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def _reader():
+        try:
+            while True:
+                latest[0] = await track.recv()
+                new_frame.set()
+        except MediaStreamError:
+            pass
+        except Exception as exc:
+            log.warning("Peer track recv error: %s", exc)
+        finally:
+            stopped.set()
+            new_frame.set()  # wake the processing loop so it can exit
+
+    reader = asyncio.ensure_future(_reader())
+    try:
+        while not (stopped.is_set() and latest[0] is None):
+            await new_frame.wait()
+            new_frame.clear()
+            frame, latest[0] = latest[0], None
+            if frame is None:
+                continue
             bgr = frame.to_ndarray(format="bgr24")
             # Pipeline write/read is blocking — offload from event loop.
             await loop.run_in_executor(None, push_input_frame, bgr)
     finally:
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
         with input_owner_lock:
             if input_owner_pc is pc:
                 input_owner_pc = None
@@ -304,6 +345,9 @@ async def offer(request: Request):
 
     pc = RTCPeerConnection()
     pcs.add(pc)
+    # Channels opened by this PC — pruned from the broadcast set when the
+    # connection dies, since the channel "close" event may never fire then.
+    pc_channels: set = set()
 
     @pc.on("connectionstatechange")
     async def _on_state():
@@ -311,6 +355,8 @@ async def offer(request: Request):
         if pc.connectionState in ("failed", "closed", "disconnected"):
             await pc.close()
             pcs.discard(pc)
+            ctrl_channels.difference_update(pc_channels)
+            pc_channels.clear()
 
     @pc.on("track")
     def _on_track(track):
@@ -324,30 +370,22 @@ async def offer(request: Request):
     def _on_dc(channel):
         log.info("DataChannel opened: %s", channel.label)
         ctrl_channels.add(channel)
+        pc_channels.add(channel)
 
         # Send the current reference version to a fresh peer so it can
         # decide whether to refresh its preview.
         if latest_reference_png is not None:
-            try:
-                channel.send(f"ref:set:{ref_version}")
-            except Exception:
-                pass
+            safe_send(channel, f"ref:set:{ref_version}")
 
         # Sync lip transfer state on connect.
         if _lip_enabled():
-            try:
-                channel.send("lip:on" if lip_active else "lip:off")
-            except Exception:
-                pass
+            safe_send(channel, "lip:on" if lip_active else "lip:off")
 
         # Send current pipeline parameter snapshot to a fresh peer.
-        try:
-            if current_prompt:
-                channel.send(f"state:prompt:{current_prompt}")
-            channel.send(f"state:seed:{current_seed}")
-            channel.send(f"state:steps:{current_steps}")
-        except Exception:
-            pass
+        if current_prompt:
+            safe_send(channel, f"state:prompt:{current_prompt}")
+        safe_send(channel, f"state:seed:{current_seed}")
+        safe_send(channel, f"state:steps:{current_steps}")
 
         @channel.on("close")
         def _on_close():
@@ -365,26 +403,26 @@ async def offer(request: Request):
                     log.info("Prompt update: %r", new_prompt)
                     current_prompt = new_prompt
                     sp.set_prompt(new_prompt)
-                    channel.send("ack:prompt")
+                    safe_send(channel, "ack:prompt")
                     broadcast_ctrl(f"state:prompt:{new_prompt}")
             elif msg.startswith("seed:"):
                 try:
                     seed = int(msg[len("seed:"):])
                     current_seed = seed
                     sp.set_seed(seed)
-                    channel.send(f"ack:seed:{seed}")
+                    safe_send(channel, f"ack:seed:{seed}")
                     broadcast_ctrl(f"state:seed:{seed}")
                 except ValueError:
-                    channel.send("err:seed")
+                    safe_send(channel, "err:seed")
             elif msg.startswith("steps:"):
                 try:
                     steps = int(msg[len("steps:"):])
                     current_steps = steps
                     sp.set_steps(steps)
-                    channel.send(f"ack:steps:{steps}")
+                    safe_send(channel, f"ack:steps:{steps}")
                     broadcast_ctrl(f"state:steps:{steps}")
                 except ValueError:
-                    channel.send("err:steps")
+                    safe_send(channel, "err:steps")
 
     pc.addTrack(FluxRTTrack(fps=30))
 

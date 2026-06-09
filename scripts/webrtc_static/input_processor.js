@@ -165,6 +165,12 @@ export class InputProcessor {
       } catch (_) {}
       this.hiddenVideo = null;
     }
+    // Detach the canvas from wherever it's parked (inputView or invSlot) —
+    // a camera restart creates a new one and the dead canvas would otherwise
+    // linger in the DOM next to it.
+    if (this.canvas && this.canvas.parentElement) {
+      this.canvas.parentElement.removeChild(this.canvas);
+    }
     this.canvas = null;
     this.ctx = null;
     this.drawCanvas = null;

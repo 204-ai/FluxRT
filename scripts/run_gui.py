@@ -864,14 +864,23 @@ class MainWindow(QMainWindow):
         log(f"Video playback at {src_fps:.2f} fps — {video_path}")
 
         next_t = time.time()
+        read_failures = 0
         try:
             while not self._capture_stop.is_set():
                 ok, frame = cap.read()
                 if not ok:
-                    # End of file — rewind and continue.
+                    # End of file — rewind and continue. A file with no
+                    # decodable frames would otherwise spin this loop at
+                    # full speed forever, so back off and eventually bail.
+                    read_failures += 1
+                    if read_failures > 10:
+                        log(f"Video unreadable after rewind, stopping: {video_path}")
+                        break
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     next_t = time.time()
+                    time.sleep(0.05)
                     continue
+                read_failures = 0
 
                 cropped = crop_maximal_rectangle(frame, h, w)
                 with _sp_lock:

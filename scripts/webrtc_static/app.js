@@ -80,9 +80,13 @@ const input = new InputProcessor({
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+const MAX_LOG_LINES = 500;
+let logLines = [];
 function logLine(s) {
   const t = new Date().toLocaleTimeString();
-  logEl.textContent += `[${t}] ${s}\n`;
+  logLines.push(`[${t}] ${s}`);
+  if (logLines.length > MAX_LOG_LINES) logLines = logLines.slice(-MAX_LOG_LINES);
+  logEl.textContent = logLines.join('\n') + '\n';
   logEl.scrollTop = logEl.scrollHeight;
 }
 function setStatus(text, cls) {
@@ -251,14 +255,19 @@ async function start() {
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  // Wait for ICE gathering, but cap it at 2s: LAN host candidates arrive
+  // immediately, and a slow/unreachable STUN server must not stall connect.
   await new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') return resolve();
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') {
-        pc.removeEventListener('icegatheringstatechange', check);
-        resolve();
-      }
+    const finish = () => {
+      clearTimeout(timer);
+      pc.removeEventListener('icegatheringstatechange', check);
+      resolve();
     };
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') finish();
+    };
+    const timer = setTimeout(finish, 2000);
     pc.addEventListener('icegatheringstatechange', check);
   });
 
@@ -570,14 +579,21 @@ function resetFeatures() {
 })();
 
 // ── reference image ─────────────────────────────────────────────────────────
+// Revoke any previous blob: URL before replacing it — object URLs pin their
+// blob in memory until revoked, so repeated uploads otherwise leak.
+function setPreviewSrc(src) {
+  if (preview.src && preview.src.startsWith('blob:')) URL.revokeObjectURL(preview.src);
+  if (src) preview.src = src;
+  else preview.removeAttribute('src');
+}
 function refreshPreview(versionLabel) {
-  preview.src = '/reference?t=' + Date.now();
+  setPreviewSrc('/reference?t=' + Date.now());
   preview.classList.add('shown');
   refMeta.textContent = versionLabel ? `reference v${versionLabel}` : 'reference active';
 }
 function clearPreview() {
   preview.classList.remove('shown');
-  preview.removeAttribute('src');
+  setPreviewSrc(null);
   refMeta.textContent = 'no reference';
 }
 async function uploadReference(file) {
@@ -600,7 +616,7 @@ async function uploadReference(file) {
     lastSeenRefVersion = j.version || lastSeenRefVersion;
     logLine(`Reference set: ${j.size[0]}x${j.size[1]} (v${j.version})`);
     refMeta.textContent = `active ${j.size[0]}x${j.size[1]} (v${j.version})`;
-    preview.src = URL.createObjectURL(file);
+    setPreviewSrc(URL.createObjectURL(file));
     preview.classList.add('shown');
   } catch (e) {
     logLine('Reference upload error: ' + e);
