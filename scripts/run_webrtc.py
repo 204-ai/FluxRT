@@ -379,6 +379,18 @@ app = FastAPI(lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def _no_cache_client(request: Request, call_next):
+    """Force revalidation of the browser client. Without Cache-Control,
+    browsers heuristically cache /static/app.js and serve stale clients
+    after a server update (a LAN 304 roundtrip is free)."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.post("/offer")
 async def offer(request: Request):
     body = await request.json()

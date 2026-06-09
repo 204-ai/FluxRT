@@ -225,6 +225,10 @@ async function start() {
   pc.ontrack = (e) => {
     logLine('Track received');
     v.srcObject = e.streams[0];
+    // muted+autoplay normally suffices; surface it in the log if a browser
+    // still refuses, instead of failing silently with a black stage.
+    const p = v.play();
+    if (p && p.catch) p.catch((err) => logLine('Autoplay blocked: ' + err.message));
   };
   pc.oniceconnectionstatechange = () => {
     logLine('ICE: ' + pc.iceConnectionState);
@@ -924,7 +928,10 @@ async function probeHealth() {
     if (j.peers > 0 && !pc) {
       logLine(`${j.peers} client(s) already connected — auto-starting viewer`);
       switchTab('output');
-      start();
+      start().catch((e) => {
+        logLine('Auto-start failed: ' + (e && e.message ? e.message : e));
+        startBtn.disabled = false;
+      });
     }
     if (j.lip_enabled) {
       lipXfer.disabled = false;
