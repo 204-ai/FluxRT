@@ -54,6 +54,16 @@
 
     <div class="controls" id="featBar"></div>
 
+    <div class="ref" id="savedRow">
+      <select id="savedSelect" style="flex:1 1 300px;"><option value="">⭐ Saved prompts…</option></select>
+      <label class="dim" title="PROMPTING.md scale, 1–5">style <select id="rateStyle"></select></label>
+      <label class="dim" title="Does the output follow your movement?">tracking <select id="rateTracking"></select></label>
+      <label class="dim" title="Does the look hold steady frame to frame?">stability <select id="rateStability"></select></label>
+      <button id="savePromptBtn" title="Save the current prompt with these ratings">♥ Save</button>
+      <button id="delPromptBtn" title="Remove the current prompt from saved">🗑</button>
+      <span id="savedStatus" class="dim"></span>
+    </div>
+
     <div class="ref" id="comfyRow">
       <label class="dim">Comfy server:</label>
       <select id="comfySelect" style="min-width:120px;"><option value="">(loading...)</option></select>

@@ -47,6 +47,14 @@ const refRow = $('refRow');
 const lipXfer = $('lipXfer');
 const lipStatus = $('lipStatus');
 
+const savedSelect = $('savedSelect');
+const rateStyle = $('rateStyle');
+const rateTracking = $('rateTracking');
+const rateStability = $('rateStability');
+const savePromptBtn = $('savePromptBtn');
+const delPromptBtn = $('delPromptBtn');
+const savedStatus = $('savedStatus');
+
 const useCam = $('useCam');
 const camSelect = $('camSelect');
 const flipInput = $('flipInput');
@@ -372,6 +380,8 @@ function onCtrlMessage(msg) {
   } else if (msg.startsWith('state:steps:')) {
     const val = msg.slice('state:steps:'.length);
     if (document.activeElement !== stepsIn) stepsIn.value = val;
+  } else if (msg === 'prompts:changed') {
+    loadSavedPrompts();
   } else {
     logLine('server: ' + msg);
   }
@@ -594,6 +604,110 @@ function resetFeatures() {
   reset.addEventListener('click', resetFeatures);
   bar.appendChild(reset);
 })();
+
+// ── saved prompts (♥ + ratings, PROMPTING.md scale) ─────────────────────────
+// Each entry: {prompt, style, tracking, stability} — 1-5 per axis, 0 unrated.
+let savedPrompts = [];
+
+[rateStyle, rateTracking, rateStability].forEach((sel) => {
+  const dash = document.createElement('option');
+  dash.value = '0';
+  dash.textContent = '–';
+  sel.appendChild(dash);
+  for (let i = 1; i <= 5; i++) {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = String(i);
+    sel.appendChild(o);
+  }
+});
+
+function ratingLabel(e) {
+  const f = (n) => (n ? String(n) : '–');
+  return `${f(e.style)}/${f(e.tracking)}/${f(e.stability)}`;
+}
+
+async function loadSavedPrompts() {
+  try {
+    const r = await fetch('/prompts');
+    const j = await r.json();
+    savedPrompts = j.prompts || [];
+    // Best first.
+    savedPrompts.sort(
+      (a, b) =>
+        (b.style || 0) + (b.tracking || 0) + (b.stability || 0) -
+        ((a.style || 0) + (a.tracking || 0) + (a.stability || 0))
+    );
+    savedSelect.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = `⭐ Saved prompts (${savedPrompts.length})…`;
+    savedSelect.appendChild(def);
+    savedPrompts.forEach((e, i) => {
+      const o = document.createElement('option');
+      o.value = String(i);
+      const text = e.prompt.length > 90 ? e.prompt.slice(0, 90) + '…' : e.prompt;
+      o.textContent = `${ratingLabel(e)}  ${text}`;
+      savedSelect.appendChild(o);
+    });
+  } catch (e) {
+    logLine('Saved prompts load error: ' + e);
+  }
+}
+
+savedSelect.addEventListener('change', () => {
+  const e = savedPrompts[parseInt(savedSelect.value, 10)];
+  if (!e) return;
+  rateStyle.value = String(e.style || 0);
+  rateTracking.value = String(e.tracking || 0);
+  rateStability.value = String(e.stability || 0);
+  sendPrompt(e.prompt);
+  logLine(`Saved prompt applied (${ratingLabel(e)})`);
+});
+
+savePromptBtn.addEventListener('click', async () => {
+  const prompt = promptIn.value.trim();
+  if (!prompt) {
+    savedStatus.textContent = 'prompt box is empty';
+    return;
+  }
+  try {
+    const r = await fetch('/prompts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        style: +rateStyle.value,
+        tracking: +rateTracking.value,
+        stability: +rateStability.value,
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: r.statusText }));
+      savedStatus.textContent = 'save failed: ' + (err.detail || r.statusText);
+      return;
+    }
+    savedStatus.textContent = 'saved ♥';
+    loadSavedPrompts();
+  } catch (e) {
+    savedStatus.textContent = 'save error: ' + e.message;
+  }
+});
+
+delPromptBtn.addEventListener('click', async () => {
+  const prompt = promptIn.value.trim();
+  if (!prompt) {
+    savedStatus.textContent = 'prompt box is empty';
+    return;
+  }
+  try {
+    const r = await fetch('/prompts?prompt=' + encodeURIComponent(prompt), { method: 'DELETE' });
+    savedStatus.textContent = r.ok ? 'deleted' : 'not in saved list';
+    if (r.ok) loadSavedPrompts();
+  } catch (e) {
+    savedStatus.textContent = 'delete error: ' + e.message;
+  }
+});
 
 // ── reference image ─────────────────────────────────────────────────────────
 // Revoke any previous blob: URL before replacing it — object URLs pin their
@@ -946,6 +1060,7 @@ async function probeHealth() {
 }
 probeHealth();
 loadComfyServers();
+loadSavedPrompts();
 
 // ── stats readout (navbar) ──────────────────────────────────────────────────
 let lastRecvFps = '—';

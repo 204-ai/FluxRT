@@ -122,6 +122,43 @@ current_prompt: str = ""
 current_seed: int = 0
 current_steps: int = 0
 
+# Liked prompts, persisted as JSON (no DB). Each entry carries the PROMPTING.md
+# live-testing scores: style / tracking / stability, 1-5, 0 = unrated.
+SAVED_PROMPTS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "saved_prompts.json"
+)
+saved_prompts: list = []
+saved_prompts_lock = threading.Lock()
+
+
+def _load_saved_prompts() -> None:
+    global saved_prompts
+    try:
+        with open(SAVED_PROMPTS_PATH) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            saved_prompts = [e for e in data if isinstance(e, dict) and e.get("prompt")]
+    except FileNotFoundError:
+        saved_prompts = []
+    except Exception as exc:
+        log.warning("Could not load %s: %s", SAVED_PROMPTS_PATH, exc)
+        saved_prompts = []
+
+
+def _write_saved_prompts() -> None:
+    """Atomic write — call with saved_prompts_lock held."""
+    tmp = SAVED_PROMPTS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(saved_prompts, f, indent=2)
+    os.replace(tmp, SAVED_PROMPTS_PATH)
+
+
+def _clamp_rating(v) -> int:
+    try:
+        return max(0, min(5, int(v)))
+    except (TypeError, ValueError):
+        return 0
+
 
 def broadcast_ctrl(msg: str) -> None:
     """Send a string message to every open control DataChannel."""
@@ -890,6 +927,71 @@ async def get_reference():
     return Response(content=png, media_type="image/png")
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Saved prompts — like/rate prompts, shared across clients, JSON-file backed.
+# Ratings follow the PROMPTING.md scale: style / tracking / stability, 1-5.
+# ──────────────────────────────────────────────────────────────────────────────
+@app.get("/prompts")
+async def list_saved_prompts():
+    with saved_prompts_lock:
+        return {"prompts": list(saved_prompts)}
+
+
+@app.post("/prompts")
+async def save_saved_prompt(request: Request):
+    """Upsert a prompt. Body: JSON {"prompt": "...", "style": 0-5,
+    "tracking": 0-5, "stability": 0-5} — ratings optional, 0 = unrated."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Bad JSON: {exc}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Empty prompt")
+
+    entry = {
+        "prompt": prompt,
+        "style": _clamp_rating(payload.get("style")),
+        "tracking": _clamp_rating(payload.get("tracking")),
+        "stability": _clamp_rating(payload.get("stability")),
+    }
+    with saved_prompts_lock:
+        for e in saved_prompts:
+            if e["prompt"] == prompt:
+                e.update(entry)
+                break
+        else:
+            saved_prompts.append(entry)
+        _write_saved_prompts()
+        count = len(saved_prompts)
+
+    log.info("Prompt saved (%d/%d/%d): %r",
+             entry["style"], entry["tracking"], entry["stability"], prompt)
+    broadcast_ctrl("prompts:changed")
+    return JSONResponse({"ok": True, "count": count, "entry": entry})
+
+
+@app.delete("/prompts")
+async def delete_saved_prompt(request: Request):
+    prompt = (request.query_params.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Missing ?prompt=")
+    with saved_prompts_lock:
+        before = len(saved_prompts)
+        saved_prompts[:] = [e for e in saved_prompts if e["prompt"] != prompt]
+        removed = before - len(saved_prompts)
+        if removed:
+            _write_saved_prompts()
+    if not removed:
+        raise HTTPException(status_code=404, detail="Prompt not in saved list")
+    log.info("Prompt deleted: %r", prompt)
+    broadcast_ctrl("prompts:changed")
+    return JSONResponse({"ok": True, "count": before - removed})
+
+
 @app.get("/")
 async def _index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
@@ -1040,6 +1142,9 @@ def main() -> None:
             "interpolation_exp override: %s -> %d (2^%d = %d output frames/frame)",
             prev, args.interp, args.interp, 2 ** args.interp,
         )
+
+    _load_saved_prompts()
+    log.info("Loaded %d saved prompts from %s", len(saved_prompts), SAVED_PROMPTS_PATH)
 
     log.info("Loading StreamProcessor from %s", config_path)
     sp = StreamProcessor(config_path)
