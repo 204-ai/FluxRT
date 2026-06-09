@@ -26,6 +26,30 @@ export const DEFAULT_ENGINE_PATHS = {
   poseModel: '/mediapipe/models/pose_landmarker_lite.task',
 }
 
+/**
+ * MediaPipe's wasm loader uses importScripts(), which module workers don't
+ * support — the glue then loads module-scoped and the global ModuleFactory
+ * check fails ("ModuleFactory not set.", google-ai-edge/mediapipe#5257).
+ * Preload the glue with indirect eval so its `var ModuleFactory` lands on
+ * the worker global scope. Tries the SIMD build first (all current browsers
+ * with wasm support have SIMD), falls back to nosimd.
+ */
+async function preloadWasmGlue(wasmBase: string): Promise<void> {
+  const g = globalThis as Record<string, unknown>
+  if (g.ModuleFactory) return
+  for (const name of ['vision_wasm_internal.js', 'vision_wasm_nosimd_internal.js']) {
+    try {
+      const res = await fetch(`${wasmBase}/${name}`)
+      if (!res.ok) continue
+      const src = await res.text()
+      ;(0, eval)(src) // indirect eval: global scope, sets self.ModuleFactory
+      if (g.ModuleFactory) return
+    } catch {
+      /* try next variant */
+    }
+  }
+}
+
 export class VisionEngine {
   private face: FaceLandmarker | null = null
   private pose: PoseLandmarker | null = null
@@ -35,6 +59,7 @@ export class VisionEngine {
 
   async init(cfg: EngineConfig, onStatus: (msg: string) => void): Promise<void> {
     onStatus('loading vision runtime…')
+    await preloadWasmGlue(cfg.wasmBase)
     const fileset = await FilesetResolver.forVisionTasks(cfg.wasmBase)
 
     if (cfg.face) {
