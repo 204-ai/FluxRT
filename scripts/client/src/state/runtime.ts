@@ -3,6 +3,7 @@
 // Stores drive them; components only read store state and call actions.
 
 import { Rail } from '../pipeline/rail'
+import { VideoFileSource } from '../pipeline/videoFileSource'
 import { VisionClient } from '../pipeline/visionClient'
 import type { VisionResult } from '../vision/types'
 
@@ -16,6 +17,9 @@ export function rtLog(msg: string): void {
 }
 
 export const rail = new Rail({ onLog: (m) => rtLog(m) })
+
+/** File-backed <video> input layer — outlives rail restarts. */
+export const videoSource = new VideoFileSource()
 
 export type VisionConsumer = 'marker' | 'sense'
 

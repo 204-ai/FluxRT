@@ -1,8 +1,17 @@
 // WebCodecs/insertable-streams backend. Compositing runs in pipeline.worker;
-// this side owns the worker, the MSTP/MSTG pair, and a <video> preview
-// element fed by the generator's output stream.
+// this side owns the worker, the MSTP/MSTG pairs (camera + optional video
+// file layer), and a <video> preview element fed by the generator's output
+// stream. The video-file layer is captured via HTMLMediaElement.captureStream
+// — Chrome-only, but so is this backend.
 
-import type { EffectInit, RailBackend, RailStartOptions, TapCallback } from '../core/types'
+import type {
+  CompositeOptions,
+  EffectInit,
+  RailBackend,
+  RailStartOptions,
+  SourceSet,
+  TapCallback,
+} from '../core/types'
 
 export class StreamsBackend implements RailBackend {
   readonly kind = 'streams' as const
@@ -11,6 +20,7 @@ export class StreamsBackend implements RailBackend {
 
   private worker: Worker | null = null
   private generator: MediaStreamTrackGenerator<VideoFrame> | null = null
+  private capturedStream: MediaStream | null = null
   private tapCb: TapCallback | null = null
   private onLog: (m: string) => void
 
@@ -22,9 +32,21 @@ export class StreamsBackend implements RailBackend {
     this.previewEl.autoplay = true
   }
 
-  async start(opts: RailStartOptions, raw: MediaStream): Promise<void> {
-    const [track] = raw.getVideoTracks()
-    const processor = new MediaStreamTrackProcessor({ track })
+  async start(opts: RailStartOptions, sources: SourceSet): Promise<void> {
+    let cameraReadable: ReadableStream<VideoFrame> | null = null
+    if (sources.cameraStream) {
+      const [track] = sources.cameraStream.getVideoTracks()
+      cameraReadable = new MediaStreamTrackProcessor({ track }).readable
+    }
+
+    let videoReadable: ReadableStream<VideoFrame> | null = null
+    if (sources.videoEl) {
+      // Don't touch the element itself — playback state belongs to its owner.
+      this.capturedStream = sources.videoEl.captureStream()
+      const [track] = this.capturedStream.getVideoTracks()
+      videoReadable = new MediaStreamTrackProcessor({ track }).readable
+    }
+
     this.generator = new MediaStreamTrackGenerator<VideoFrame>({ kind: 'video' })
     this.outputStream = new MediaStream([this.generator])
     this.previewEl.srcObject = this.outputStream
@@ -44,17 +66,22 @@ export class StreamsBackend implements RailBackend {
         this.onLog('pipeline worker error: ' + m.message)
       }
     }
+    const transfer: Transferable[] = [this.generator.writable as unknown as Transferable]
+    if (cameraReadable) transfer.push(cameraReadable)
+    if (videoReadable) transfer.push(videoReadable)
     this.worker.postMessage(
       {
         type: 'init',
-        readable: processor.readable,
+        camera: cameraReadable,
+        video: videoReadable,
         writable: this.generator.writable,
         width: opts.width,
         height: opts.height,
         mirrored: opts.mirrored,
+        composite: opts.composite,
         effects: opts.effects satisfies EffectInit[],
       },
-      [processor.readable, this.generator.writable as unknown as Transferable],
+      transfer,
     )
   }
 
@@ -66,12 +93,24 @@ export class StreamsBackend implements RailBackend {
     this.worker = null
     this.generator?.stop()
     this.generator = null
+    this.capturedStream?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    this.capturedStream = null
     this.previewEl.srcObject = null
     this.tapCb = null
   }
 
   setMirror(on: boolean): void {
     this.worker?.postMessage({ type: 'mirror', on })
+  }
+
+  setComposite(patch: Partial<CompositeOptions>): void {
+    this.worker?.postMessage({ type: 'composite', patch })
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {

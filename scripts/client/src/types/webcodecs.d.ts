@@ -19,3 +19,9 @@ declare class MediaStreamTrackGenerator<T = VideoFrame> extends MediaStreamTrack
   constructor(init: MediaStreamTrackGeneratorInit)
   readonly writable: WritableStream<T>
 }
+
+// Chrome/Firefox; not in lib.dom (Safari has no HTMLMediaElement.captureStream).
+// Only called from the streams backend, which is Chrome/Edge-gated.
+interface HTMLMediaElement {
+  captureStream(): MediaStream
+}

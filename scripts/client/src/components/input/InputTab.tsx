@@ -1,9 +1,12 @@
-// Input tab: camera enable/picker/mirror, input preview + draw, hand marker.
+// Input tab: sources (camera + video file), compositing, input preview +
+// draw, hand marker.
 
 import { useEffect } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { CanvasHost } from './CanvasHost'
+import { CompositeSection } from './CompositeSection'
+import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 
 const LANDMARKS: Array<[number, string]> = [
@@ -40,12 +43,14 @@ export function InputTab({ active }: { active: boolean }) {
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
-      <div className="controls">
+      <div className="section-label">Sources</div>
+      <div className="controls source-row">
+        <span className={'source-badge' + (p.camEnabled ? ' on' : '')}>camera</span>
         <label>
           <input
             type="checkbox"
             checked={p.camEnabled}
-            onChange={(e) => (e.target.checked ? void p.enableCam() : p.disableCam())}
+            onChange={(e) => (e.target.checked ? void p.enableCam() : void p.disableCam())}
           />{' '}
           Use my camera as input
         </label>
@@ -77,12 +82,15 @@ export function InputTab({ active }: { active: boolean }) {
         </label>
         <span className="dim">{roleLabel}</span>
       </div>
+      <VideoSourceSection />
+
+      <CompositeSection />
 
       <div className="section-label">Input preview &amp; draw</div>
       <div id="inputView" className="overlay-anchor">
         {!p.active && (
           <div className="dim" style={{ padding: 24 }}>
-            Enable your camera to preview &amp; draw on the input.
+            Enable your camera or load a video to preview &amp; draw on the input.
           </div>
         )}
         <CanvasHost holds={p.active && !showInStage} />
@@ -133,7 +141,7 @@ export function InputTab({ active }: { active: boolean }) {
           <input
             type="checkbox"
             checked={p.markerEnabled}
-            disabled={!p.camEnabled}
+            disabled={!p.active}
             onChange={(e) => void p.setMarkerEnabled(e.target.checked)}
           />{' '}
           Enable

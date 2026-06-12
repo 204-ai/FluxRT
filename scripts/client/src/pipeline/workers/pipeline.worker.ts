@@ -1,27 +1,34 @@
 // Pipeline worker — WebCodecs streams backend compositing loop.
-// Receives the MSTP readable + MSTG writable (transferred), composites each
-// VideoFrame onto an OffscreenCanvas through the effect chain, writes the
-// result out. Keeps running when the tab is backgrounded (no rAF throttle).
+// Receives up to two MSTP readables (camera + video file layers, transferred)
+// plus the MSTG writable, composites each pass onto an OffscreenCanvas through
+// the effect chain, writes the result out. Keeps running when the tab is
+// backgrounded (no rAF throttle).
 //
-// VideoFrame ownership: the eager-read valve holds at most one pending frame
-// and closes superseded ones; the input frame is closed right after drawing
-// (and after the analyzer-tap bitmap is created). Unclosed frames silently
+// VideoFrame ownership: each layer has an eager-read valve holding at most one
+// pending frame, closing superseded ones. The base frame (camera when present,
+// else video) drives the loop and is closed right after drawing (and after the
+// analyzer-tap bitmap is created). The overlay's newest frame is RETAINED
+// across passes — a paused/slower video must keep compositing under a 30fps
+// camera — and closed only on supersede or shutdown. Unclosed frames silently
 // stall the camera — the open-frame counter guards against regressions.
 
 import { Compositor } from '../core/compositor'
-import type { EffectInit } from '../core/types'
+import type { CompositeOptions, EffectInit } from '../core/types'
 
 type InMsg =
   | {
       type: 'init'
-      readable: ReadableStream<VideoFrame>
+      camera: ReadableStream<VideoFrame> | null
+      video: ReadableStream<VideoFrame> | null
       writable: WritableStream<VideoFrame>
       width: number
       height: number
       mirrored: boolean
+      composite: CompositeOptions
       effects: EffectInit[]
     }
   | { type: 'mirror'; on: boolean }
+  | { type: 'composite'; patch: Partial<CompositeOptions> }
   | { type: 'effect-config'; name: string; patch: Record<string, unknown> }
   | { type: 'effect-msg'; name: string; data: unknown }
   | { type: 'bus'; key: string; value: unknown }
@@ -39,8 +46,42 @@ function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
 }
 
+/** Eager-read valve: always consume, keep only the newest frame. */
+function startValve(readable: ReadableStream<VideoFrame>) {
+  const valve = {
+    reader: readable.getReader(),
+    pending: null as VideoFrame | null,
+    take(): VideoFrame | null {
+      const f = valve.pending
+      valve.pending = null
+      return f
+    },
+  }
+  void (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await valve.reader.read()
+        if (done || !running) {
+          value?.close()
+          break
+        }
+        openFrames++
+        if (valve.pending) {
+          valve.pending.close()
+          openFrames--
+        }
+        valve.pending = value
+        wake?.()
+      }
+    } catch {
+      /* reader cancelled on stop */
+    }
+  })()
+  return valve
+}
+
 async function run(msg: Extract<InMsg, { type: 'init' }>) {
-  const { readable, writable, width, height } = msg
+  const { camera, video, writable, width, height } = msg
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
   if (!ctx) {
@@ -49,53 +90,49 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   }
   compositor = new Compositor(ctx, width, height)
   compositor.mirrored = msg.mirrored
+  compositor.setComposite(msg.composite)
   compositor.setEffects(msg.effects)
 
-  const reader = readable.getReader()
   const writer = writable.getWriter()
   running = true
 
-  // Eager-read valve: always consume, keep only the newest frame.
-  let pending: VideoFrame | null = null
-  void (async () => {
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done || !running) {
-          value?.close()
-          break
-        }
-        openFrames++
-        if (pending) {
-          pending.close()
-          openFrames--
-        }
-        pending = value
-        wake?.()
-      }
-    } catch {
-      /* reader cancelled on stop */
-    }
-  })()
+  // Base layer drives the loop cadence and the vision tap.
+  const baseIsCamera = camera !== null
+  const base = startValve(baseIsCamera ? camera! : video!)
+  const overlay = camera && video ? startValve(video) : null
+  // Steady-state holds one extra open frame for the retained overlay.
+  const leakThreshold = 4 + (overlay ? 1 : 0)
+  let retainedOverlay: VideoFrame | null = null
 
   try {
     while (running) {
-      if (!pending) {
+      if (!base.pending) {
         await new Promise<void>((res) => {
           wake = res
-          if (pending || !running) res() // re-check after registering: avoids lost wakeup
+          if (base.pending || !running) res() // re-check after registering: avoids lost wakeup
         })
         wake = null
         continue
       }
-      // explicit type: TS can't track narrowing across the reader closure
-      const frame: VideoFrame = pending
-      pending = null
+      const frame: VideoFrame = base.take()!
+
+      if (overlay) {
+        const fresh = overlay.take()
+        if (fresh) {
+          if (retainedOverlay) {
+            retainedOverlay.close()
+            openFrames--
+          }
+          retainedOverlay = fresh
+        }
+      }
 
       const tsMs = frame.timestamp / 1000
-      compositor.drawFrame(frame, tsMs)
+      const cameraFrame = baseIsCamera ? frame : null
+      const videoFrame = baseIsCamera ? retainedOverlay : frame
+      compositor.drawComposite(cameraFrame, videoFrame, tsMs)
 
-      // Analyzer tap: sample the SOURCE frame (pre-composite) at cadence.
+      // Analyzer tap: sample the BASE source frame (pre-composite) at cadence.
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
         try {
@@ -115,20 +152,25 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         out.close()
         break
       }
-      if (openFrames > 4) post({ type: 'leak', open: openFrames })
+      if (openFrames > leakThreshold) post({ type: 'leak', open: openFrames })
     }
   } finally {
-    try {
-      reader.cancel()
-    } catch {
-      /* already done */
+    for (const v of [base, overlay]) {
+      if (!v) continue
+      try {
+        v.reader.cancel()
+      } catch {
+        /* already done */
+      }
+      ;(v.pending as VideoFrame | null)?.close()
+      v.pending = null
     }
+    retainedOverlay?.close()
     try {
       await writer.close()
     } catch {
       /* already closed */
     }
-    ;(pending as VideoFrame | null)?.close()
     compositor?.disposeEffects()
     post({ type: 'stopped' })
   }
@@ -142,6 +184,9 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       break
     case 'mirror':
       if (compositor) compositor.mirrored = m.on
+      break
+    case 'composite':
+      compositor?.setComposite(m.patch)
       break
     case 'effect-config':
       compositor?.configureEffect(m.name, m.patch)

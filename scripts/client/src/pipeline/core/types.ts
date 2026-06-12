@@ -35,12 +35,32 @@ export interface CanvasEffect<Cfg = Record<string, unknown>> {
 
 export type RailBackendKind = 'streams' | 'canvas'
 
+export type BlendMode = 'normal' | 'screen' | 'multiply' | 'difference'
+export type LayerOrder = 'camera-over' | 'video-over'
+
+export interface CompositeOptions {
+  order: LayerOrder
+  /** Opacity of the top layer, 0..1. */
+  opacity: number
+  blend: BlendMode
+}
+
+/**
+ * Input layers for a rail session. At least one must be non-null. The camera
+ * layer (when present) is the base: it sets canvas dims, drives the frame
+ * cadence, and is the vision-tap source.
+ */
+export interface SourceSet {
+  cameraStream: MediaStream | null
+  videoEl: HTMLVideoElement | null
+}
+
 export interface RailStartOptions {
-  deviceId: string | null
   width: number
   height: number
   fps: number
   mirrored: boolean
+  composite: CompositeOptions
   effects: EffectInit[]
 }
 
@@ -57,9 +77,10 @@ export interface RailBackend {
   /** Element to mount as the live preview (canvas or <video>). */
   readonly previewEl: HTMLCanvasElement | HTMLVideoElement
   readonly outputStream: MediaStream
-  start(opts: RailStartOptions, raw: MediaStream): Promise<void>
+  start(opts: RailStartOptions, sources: SourceSet): Promise<void>
   stop(): void
   setMirror(on: boolean): void
+  setComposite(patch: Partial<CompositeOptions>): void
   configureEffect(name: string, patch: Record<string, unknown>): void
   effectMessage(name: string, data: unknown): void
   busPush(key: string, value: unknown): void

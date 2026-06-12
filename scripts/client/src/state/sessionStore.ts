@@ -17,6 +17,7 @@ export type SessionStatus =
   | 'live'
   | 'disconnected'
   | 'camera blocked'
+  | 'input blocked'
   | 'offer rejected'
 
 export type InputRole = 'you' | 'peer' | 'server'
@@ -123,7 +124,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     ch.onmessage = (e) => dispatchCtrl(e.data)
 
     const pipeline = usePipelineStore.getState()
-    if (pipeline.camEnabled) {
+    if (pipeline.camEnabled || pipeline.videoLoaded) {
       try {
         if (!rail.active) await pipeline.startPipeline()
         const stream = rail.outputStream
@@ -131,9 +132,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         if (!vt || !stream) throw new Error('no output track')
         pc.addTransceiver(vt, { direction: 'sendrecv', streams: [stream] })
       } catch (e) {
-        logLine('Camera access failed: ' + (e instanceof Error ? e.message : e))
-        set({ status: 'camera blocked', statusCls: 'err', starting: false })
-        usePipelineStore.setState({ camEnabled: false })
+        logLine('Input source failed: ' + (e instanceof Error ? e.message : e))
+        set({ status: 'input blocked', statusCls: 'err', starting: false })
+        if (pipeline.camEnabled && !pipeline.videoLoaded) {
+          usePipelineStore.setState({ camEnabled: false })
+        }
         pc.addTransceiver('video', { direction: 'recvonly' })
       }
     } else {

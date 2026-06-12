@@ -1,16 +1,39 @@
-// Rail — the one video pipeline: camera source → effect chain → output
-// stream (WebRTC + preview). Owns getUserMedia and the backend; exposes a
-// stable API the UI/stores drive. Framework-agnostic (no React).
+// Rail — the one video pipeline: sources (camera and/or video file) → effect
+// chain → output stream (WebRTC + preview). Owns getUserMedia and the
+// backend; exposes a stable API the UI/stores drive. Framework-agnostic
+// (no React).
 
 import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
-import type { RailBackend, RailBackendKind, TapCallback } from './core/types'
+import type { CompositeOptions, RailBackend, RailBackendKind, TapCallback } from './core/types'
 import type { DrawLayerConfig } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
 export interface RailEvents {
   onLog?: (msg: string) => void
+}
+
+export interface RailSources {
+  deviceId: string | null
+  camera: boolean
+  videoEl: HTMLVideoElement | null
+}
+
+/** Longest output edge when the video file is the sole source. */
+const MAX_VIDEO_EDGE = 1280
+
+function videoDims(el: HTMLVideoElement): { width: number; height: number } {
+  let w = el.videoWidth || 1280
+  let h = el.videoHeight || 720
+  const long = Math.max(w, h)
+  if (long > MAX_VIDEO_EDGE) {
+    const scale = MAX_VIDEO_EDGE / long
+    w *= scale
+    h *= scale
+  }
+  // Even dims keep downstream encoders happy.
+  return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
 }
 
 export class Rail {
@@ -19,6 +42,7 @@ export class Rail {
   private mirrored = false
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
+  private composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
   private tap: { intervalMs: number; cb: TapCallback } | null = null
   private onLog: (m: string) => void
 
@@ -42,42 +66,53 @@ export class Rail {
     return this.backend?.outputStream ?? null
   }
 
-  async start(deviceId: string | null): Promise<{ label: string }> {
+  async start(sources: RailSources): Promise<{ label: string }> {
     if (this.backend) this.stop()
-    this.rawStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 },
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      },
-    })
-    const [track] = this.rawStream.getVideoTracks()
-    const s = track.getSettings()
-    const width = s.width || 1280
-    const height = s.height || 720
+    if (!sources.camera && !sources.videoEl) throw new Error('no input source')
+
+    let label = 'video file'
+    let width: number
+    let height: number
+    if (sources.camera) {
+      this.rawStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+          ...(sources.deviceId ? { deviceId: { exact: sources.deviceId } } : {}),
+        },
+      })
+      const [track] = this.rawStream.getVideoTracks()
+      const s = track.getSettings()
+      width = s.width || 1280
+      height = s.height || 720
+      label = track.label || 'camera'
+      if (sources.videoEl) label += ' + video file'
+    } else {
+      ;({ width, height } = videoDims(sources.videoEl!))
+    }
 
     const kind = detectBackend()
     this.backend = kind === 'streams' ? new StreamsBackend(this.onLog) : new CanvasBackend()
-    this.onLog(`pipeline backend: ${kind} (${width}x${height})`)
+    this.onLog(`pipeline backend: ${kind} (${width}x${height}) [${label}]`)
 
     await this.backend.start(
       {
-        deviceId,
         width,
         height,
         fps: 30,
         mirrored: this.mirrored,
+        composite: { ...this.composite },
         effects: [
           { name: 'marker', config: this.markerConfig },
           { name: 'drawLayer', config: this.drawConfig },
         ],
       },
-      this.rawStream,
+      { cameraStream: this.rawStream, videoEl: sources.videoEl },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
-    return { label: track.label || 'camera' }
+    return { label }
   }
 
   stop(): void {
@@ -96,6 +131,11 @@ export class Rail {
   setMirror(on: boolean): void {
     this.mirrored = on
     this.backend?.setMirror(on)
+  }
+
+  setComposite(patch: Partial<CompositeOptions>): void {
+    Object.assign(this.composite, patch)
+    this.backend?.setComposite(patch)
   }
 
   configureMarker(patch: Partial<MarkerConfig>): void {
@@ -127,7 +167,7 @@ export class Rail {
     this.backend?.busPush(key, value)
   }
 
-  /** Sampled source frames (pre-mirror) for the vision analyzer. */
+  /** Sampled base-source frames (pre-mirror) for the vision analyzer. */
   setTap(intervalMs: number, cb: TapCallback | null): void {
     this.tap = cb ? { intervalMs, cb } : null
     this.backend?.setTap(intervalMs, cb)

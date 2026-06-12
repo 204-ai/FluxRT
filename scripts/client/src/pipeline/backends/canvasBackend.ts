@@ -1,10 +1,11 @@
 // Canvas fallback backend (Safari/Firefox): hidden <video> + rVFC/rAF loop +
 // main-thread compositing + canvas.captureStream() — the legacy
 // InputProcessor approach behind the same RailBackend API. The same effect
-// implementations run here as in the pipeline worker.
+// implementations run here as in the pipeline worker. The video-file layer is
+// drawn straight from its element (Safari lacks HTMLMediaElement.captureStream).
 
 import { Compositor } from '../core/compositor'
-import type { RailBackend, RailStartOptions, TapCallback } from '../core/types'
+import type { CompositeOptions, RailBackend, RailStartOptions, SourceSet, TapCallback } from '../core/types'
 
 export class CanvasBackend implements RailBackend {
   readonly kind = 'canvas' as const
@@ -12,6 +13,7 @@ export class CanvasBackend implements RailBackend {
   outputStream: MediaStream = new MediaStream()
 
   private hiddenVideo: HTMLVideoElement | null = null
+  private fileVideo: HTMLVideoElement | null = null
   private compositor: Compositor | null = null
   private rafId = 0
   private rvfcId = 0
@@ -25,13 +27,17 @@ export class CanvasBackend implements RailBackend {
     this.previewEl = document.createElement('canvas')
   }
 
-  async start(opts: RailStartOptions, raw: MediaStream): Promise<void> {
-    const video = document.createElement('video')
-    video.srcObject = raw
-    video.muted = true
-    video.playsInline = true
-    await video.play()
-    this.hiddenVideo = video
+  async start(opts: RailStartOptions, sources: SourceSet): Promise<void> {
+    if (sources.cameraStream) {
+      const video = document.createElement('video')
+      video.srcObject = sources.cameraStream
+      video.muted = true
+      video.playsInline = true
+      await video.play()
+      this.hiddenVideo = video
+    }
+    // Direct reference — playback state belongs to the element's owner.
+    this.fileVideo = sources.videoEl
 
     this.previewEl.width = opts.width
     this.previewEl.height = opts.height
@@ -39,22 +45,29 @@ export class CanvasBackend implements RailBackend {
     if (!ctx) throw new Error('2d context unavailable')
     this.compositor = new Compositor(ctx, opts.width, opts.height)
     this.compositor.mirrored = opts.mirrored
+    this.compositor.setComposite(opts.composite)
     this.compositor.setEffects(opts.effects)
 
     this.outputStream = this.previewEl.captureStream(opts.fps)
     this.running = true
 
     const onFrame = () => {
-      if (!this.running || !this.hiddenVideo || !this.compositor) return
+      if (!this.running || !this.compositor) return
       const tsMs = performance.now()
-      this.compositor.drawFrame(this.hiddenVideo, tsMs)
+      this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, tsMs)
       this.maybeTap(tsMs)
       schedule()
     }
     const schedule = () => {
       if (!this.running) return
-      if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
-        this.rvfcId = this.hiddenVideo!.requestVideoFrameCallback(() => onFrame())
+      // rVFC doesn't fire on a paused video — with a file layer, drive by rAF
+      // so seek-while-paused and live composite tweaks still redraw.
+      if (
+        !this.fileVideo &&
+        this.hiddenVideo &&
+        'requestVideoFrameCallback' in HTMLVideoElement.prototype
+      ) {
+        this.rvfcId = this.hiddenVideo.requestVideoFrameCallback(() => onFrame())
       } else {
         this.rafId = requestAnimationFrame(onFrame)
       }
@@ -63,10 +76,13 @@ export class CanvasBackend implements RailBackend {
   }
 
   private maybeTap(tsMs: number): void {
-    if (!this.tapCb || this.tapBusy || tsMs - this.lastTapMs < this.tapIntervalMs) return
+    const tapSource = this.hiddenVideo ?? this.fileVideo
+    if (!tapSource || !this.tapCb || this.tapBusy || tsMs - this.lastTapMs < this.tapIntervalMs)
+      return
+    if (tapSource.readyState < 2 || tapSource.videoWidth === 0) return
     this.lastTapMs = tsMs
     this.tapBusy = true
-    createImageBitmap(this.hiddenVideo!)
+    createImageBitmap(tapSource)
       .then((bitmap) => {
         this.tapBusy = false
         if (this.tapCb) this.tapCb(bitmap, tsMs)
@@ -92,6 +108,7 @@ export class CanvasBackend implements RailBackend {
       this.hiddenVideo.srcObject = null
       this.hiddenVideo = null
     }
+    this.fileVideo = null
     this.compositor?.disposeEffects()
     this.compositor = null
     this.tapCb = null
@@ -99,6 +116,10 @@ export class CanvasBackend implements RailBackend {
 
   setMirror(on: boolean): void {
     if (this.compositor) this.compositor.mirrored = on
+  }
+
+  setComposite(patch: Partial<CompositeOptions>): void {
+    this.compositor?.setComposite(patch)
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {
