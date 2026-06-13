@@ -39,11 +39,12 @@ def main():
     stream_processor.set_prompt(args.prompt)
 
     resolution = stream_processor.get_resolution()
+    out_resolution = stream_processor.get_out_resolution()
     cap = cv2.VideoCapture(args.input)
 
     fps = 25
-    output_width = resolution["width"]
-    output_height = resolution["height"]
+    output_width = out_resolution["width"]
+    output_height = out_resolution["height"]
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(args.output, fourcc, fps, (output_width, output_height))

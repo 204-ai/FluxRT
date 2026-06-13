@@ -43,6 +43,9 @@ class OutputSchedulerSubprocess:
         height = self.config["resolution"]["height"]
         width = self.config["resolution"]["width"]
 
+        if self.config.get("enable_flow_upscaler", False):
+            height, width = height * 2, width * 2
+
         self.output_batch_shared_tensor = SharedTensor(
             (self.batch_size, height, width, 3),
             name=self.output_batch_shared_tensor_name,

@@ -30,6 +30,7 @@ def main():
     stream_processor.start()
 
     resolution = stream_processor.get_resolution()
+    out_resolution = stream_processor.get_out_resolution()
 
     print("Initializing...")
     while not stream_processor.is_ready():
@@ -85,7 +86,7 @@ def main():
     latency_measured = True
     while True:
         processed_frame = output_tensor.to_numpy()
-        if np.any(processed_frame[:, resolution["width"] // 2 + 4 :, :] > 240):
+        if np.any(processed_frame[:, out_resolution["width"] // 2 + 4 :, :] > 240):
             break
         cv2.imshow("Processed Stream", processed_frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
