@@ -43,49 +43,6 @@ export function InputTab({ active }: { active: boolean }) {
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
-      <div className="section-label">Sources</div>
-      <div className="controls source-row">
-        <span className={'source-badge' + (p.camEnabled ? ' on' : '')}>camera</span>
-        <label>
-          <input
-            type="checkbox"
-            checked={p.camEnabled}
-            onChange={(e) => (e.target.checked ? void p.enableCam() : void p.disableCam())}
-          />{' '}
-          Use my camera as input
-        </label>
-        <select
-          style={{ flex: '1 1 220px' }}
-          disabled={!p.camEnabled}
-          value={p.deviceId}
-          onChange={(e) => void p.setDevice(e.target.value)}
-        >
-          {p.devices.length === 0 ? (
-            <option value="">— pick a camera —</option>
-          ) : (
-            <option value="">Default camera</option>
-          )}
-          {p.devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId}>
-              {d.label}
-            </option>
-          ))}
-        </select>
-        <label>
-          <input
-            type="checkbox"
-            checked={p.mirror}
-            disabled={!p.camEnabled}
-            onChange={(e) => p.setMirror(e.target.checked)}
-          />{' '}
-          Mirror input
-        </label>
-        <span className="dim">{roleLabel}</span>
-      </div>
-      <VideoSourceSection />
-
-      <CompositeSection />
-
       <div className="section-label">Input preview &amp; draw</div>
       <div id="inputView" className="overlay-anchor">
         {!p.active && (
@@ -134,6 +91,49 @@ export function InputTab({ active }: { active: boolean }) {
           Clear drawing
         </button>
       </div>
+
+      <div className="section-label">Sources</div>
+      <div className="controls source-row">
+        <span className={'source-badge' + (p.camEnabled ? ' on' : '')}>camera</span>
+        <label>
+          <input
+            type="checkbox"
+            checked={p.camEnabled}
+            onChange={(e) => (e.target.checked ? void p.enableCam() : void p.disableCam())}
+          />{' '}
+          Use my camera as input
+        </label>
+        <select
+          style={{ flex: '1 1 220px' }}
+          disabled={!p.camEnabled}
+          value={p.deviceId}
+          onChange={(e) => void p.setDevice(e.target.value)}
+        >
+          {p.devices.length === 0 ? (
+            <option value="">— pick a camera —</option>
+          ) : (
+            <option value="">Default camera</option>
+          )}
+          {p.devices.map((d) => (
+            <option key={d.deviceId} value={d.deviceId}>
+              {d.label}
+            </option>
+          ))}
+        </select>
+        <label>
+          <input
+            type="checkbox"
+            checked={p.mirror}
+            disabled={!p.camEnabled}
+            onChange={(e) => p.setMirror(e.target.checked)}
+          />{' '}
+          Mirror input
+        </label>
+        <span className="dim">{roleLabel}</span>
+      </div>
+      <VideoSourceSection />
+
+      <CompositeSection />
 
       <div className="section-label">Hand marker</div>
       <div className="controls">
