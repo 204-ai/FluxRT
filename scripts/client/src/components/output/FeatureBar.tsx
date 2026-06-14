@@ -42,11 +42,11 @@ export function FeatureBar() {
         ))}
       </select>
 
-      <button title="Random facial features + style" onClick={() => randomize()}>
-        🎲 Randomize
+      <button className="icon-btn" title="Random facial features + style" aria-label="Randomize" onClick={() => randomize()}>
+        🎲
       </button>
-      <button title="Clear features, restore default prompt" onClick={() => resetFeatures()}>
-        ↺ Reset
+      <button className="icon-btn" title="Clear features, restore default prompt" aria-label="Reset" onClick={() => resetFeatures()}>
+        ↺
       </button>
     </div>
   )

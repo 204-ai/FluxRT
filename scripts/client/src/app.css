@@ -134,8 +134,12 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   background: rgba(18, 18, 18, 0.8); color: #9aa; border-radius: 4px;
 }
 
-/* saved-prompt picker + player below the prompt input */
-.prompt-player .saved-pick { flex: 1 1 240px; }
+/* saved-prompt picker + player below the prompt input — one compact line */
+.prompt-player { flex-wrap: nowrap; }
+.prompt-player .saved-pick { flex: 1 1 0; min-width: 0; }
+.prompt-player .loop-delay { width: 46px; }
+.prompt-player .sp-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-player .icon-btn { font-size: 15px; }
 
 /* compact side-by-side input source panels (camera | video) */
 .source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; flex-wrap: wrap; }
@@ -156,7 +160,9 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .icon-btn.on { background: #1f7a3a; color: #fff; }
 
 /* ── facial-feature builder bar ── */
-#featBar select.feat { max-width: 200px; }
+#featBar { flex-wrap: nowrap; }
+#featBar select.feat { flex: 1 1 0; min-width: 0; max-width: 200px; }
+#featBar .icon-btn { font-size: 15px; }
 
 /* ── spinner ── */
 .spinner {
