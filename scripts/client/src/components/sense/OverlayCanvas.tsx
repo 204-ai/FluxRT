@@ -5,7 +5,6 @@
 import { useEffect, useRef } from 'react'
 import { drawOverlay } from '../../vision/draw'
 import { onSenseResult, useSenseStore, type SenseSource } from '../../state/senseStore'
-import { usePipelineStore } from '../../state/pipelineStore'
 
 export function OverlayCanvas({ source }: { source: SenseSource }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -26,8 +25,10 @@ export function OverlayCanvas({ source }: { source: SenseSource }) {
         canvas.width = w
         canvas.height = h
       }
-      const mirrored = source === 'input' && usePipelineStore.getState().mirror
-      drawOverlay(canvas, r, mirrored)
+      // Sensing runs on the composite (input) / remote video (output), which
+      // already reflect the camera mirror — so draw the overlay 1:1 with no
+      // extra flip; it then follows the mirror toggle automatically.
+      drawOverlay(canvas, r, false)
     })
   }, [show, source])
 
