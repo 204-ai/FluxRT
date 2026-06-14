@@ -42,8 +42,14 @@ describe('decodeCtrl', () => {
     expect(decodeCtrl('prompts:changed')).toEqual({ kind: 'promptsChanged' })
   })
 
-  it('falls through to unknown (acks, errors)', () => {
-    expect(decodeCtrl('ack:prompt')).toEqual({ kind: 'unknown', raw: 'ack:prompt' })
-    expect(decodeCtrl('err:seed')).toEqual({ kind: 'unknown', raw: 'err:seed' })
+  it('decodes acks and errors', () => {
+    expect(decodeCtrl('ack:prompt')).toEqual({ kind: 'ack' })
+    expect(decodeCtrl('ack:seed:52')).toEqual({ kind: 'ack' })
+    expect(decodeCtrl('err:seed')).toEqual({ kind: 'err', what: 'seed' })
+    expect(decodeCtrl('err:steps')).toEqual({ kind: 'err', what: 'steps' })
+  })
+
+  it('falls through to unknown for unrecognized messages', () => {
+    expect(decodeCtrl('totally unknown')).toEqual({ kind: 'unknown', raw: 'totally unknown' })
   })
 })

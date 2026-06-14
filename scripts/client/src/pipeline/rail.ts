@@ -7,7 +7,7 @@ import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
 import type { CompositeOptions, RailBackend, RailBackendKind, TapCallback } from './core/types'
-import type { DrawLayerConfig } from './effects/drawLayer'
+import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
 export interface RailEvents {
@@ -18,6 +18,9 @@ export interface RailSources {
   deviceId: string | null
   camera: boolean
   videoEl: HTMLVideoElement | null
+  /** Force the output/canvas aspect ratio (width/height); the source is
+   *  cover-cropped into it. Used to match the server's generation aspect. */
+  targetAspect?: number | null
 }
 
 /** Longest output edge when the video file is the sole source. */
@@ -36,6 +39,20 @@ function videoDims(el: HTMLVideoElement): { width: number; height: number } {
   return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
 }
 
+/** Canvas dims forced to a target aspect (the server's output aspect), keeping
+ *  the source height; the source is cover-cropped into this by the compositor. */
+function aspectDims(srcHeight: number, aspect: number): { width: number; height: number } {
+  let h = srcHeight || 720
+  let w = h * aspect
+  const long = Math.max(w, h)
+  if (long > MAX_VIDEO_EDGE) {
+    const scale = MAX_VIDEO_EDGE / long
+    w *= scale
+    h *= scale
+  }
+  return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
+}
+
 export class Rail {
   private backend: RailBackend | null = null
   private rawStream: MediaStream | null = null
@@ -43,8 +60,16 @@ export class Rail {
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
   private composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
+  // Draw ops recorded so a pipeline restart (which rebuilds the draw layer from
+  // scratch) can replay the strokes instead of wiping the user's drawing. Each
+  // stroke is preceded by a 'cfg' marker capturing its color/size at draw time.
+  private drawHistory: Array<StrokeMessage | { type: 'cfg'; patch: Partial<DrawLayerConfig> }> = []
+  // True only between begin/end so hover-driven pointermove (no button held)
+  // is ignored — otherwise it would flood drawHistory and the worker with no-ops.
+  private inStroke = false
   private tap: { intervalMs: number; cb: TapCallback } | null = null
   private onLog: (m: string) => void
+  private onOutputTrack: (track: MediaStreamTrack | null) => void = () => {}
 
   constructor(events: RailEvents = {}) {
     this.onLog = events.onLog ?? (() => {})
@@ -93,6 +118,12 @@ export class Rail {
       ;({ width, height } = videoDims(sources.videoEl!))
     }
 
+    // Force the output aspect to match the server's generation aspect; the
+    // source is cover-cropped into it (no stretch/letterbox).
+    if (sources.targetAspect && sources.targetAspect > 0) {
+      ;({ width, height } = aspectDims(height, sources.targetAspect))
+    }
+
     const kind = detectBackend()
     this.backend = kind === 'streams' ? new StreamsBackend(this.onLog) : new CanvasBackend()
     this.onLog(`pipeline backend: ${kind} (${width}x${height}) [${label}]`)
@@ -112,7 +143,66 @@ export class Rail {
       { cameraStream: this.rawStream, videoEl: sources.videoEl },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
+    // Replay any persisted drawing onto the freshly-built draw layer so a
+    // source-set restart doesn't wipe the user's strokes.
+    if (this.drawHistory.length) {
+      for (const m of this.drawHistory) {
+        if (m.type === 'cfg') this.backend.configureEffect('drawLayer', m.patch)
+        else this.backend.effectMessage('drawLayer', m)
+      }
+      // Replay left the layer's config at the last stroke's — restore the live one.
+      this.backend.configureEffect('drawLayer', this.drawConfig)
+    }
+    // A (re)start builds a brand-new output track; notify so the session can
+    // replaceTrack on its live sender (a restart otherwise strands the peer
+    // connection on the old, ended track — frozen remote output).
+    const [outTrack] = this.backend.outputStream.getVideoTracks()
+    this.onOutputTrack(outTrack ?? null)
     return { label }
+  }
+
+  /** Notified with the new output video track on every (re)start. The session
+   *  uses it to replaceTrack on its RTCRtpSender without renegotiation. */
+  setOutputTrackHandler(fn: (track: MediaStreamTrack | null) => void): void {
+    this.onOutputTrack = fn
+  }
+
+  /** Hot-swap the video-file source in place (no restart): re-feed the worker
+   *  the element's new track while keeping the output stream/track alive. */
+  swapVideoSource(videoEl: HTMLVideoElement): void {
+    this.backend?.swapVideo(videoEl)
+  }
+
+  /** Hot-remove the video-file overlay in place (no restart): drop the overlay
+   *  layer while the camera keeps feeding and the output stream stays alive. */
+  clearVideoSource(): void {
+    this.backend?.clearVideo()
+  }
+
+  /** Hot-swap the camera device in place (no restart): acquire the new device's
+   *  stream, feed it to the backend, then stop the old one. Keeps the output
+   *  track / WebRTC sender alive. */
+  async swapCameraDevice(deviceId: string | null): Promise<void> {
+    if (!this.backend) return
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 },
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      },
+    })
+    this.backend.swapCamera(newStream)
+    // Stop the previous camera track now that the new one is feeding.
+    this.rawStream?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    this.rawStream = newStream
   }
 
   stop(): void {
@@ -150,15 +240,25 @@ export class Rail {
 
   /** Stroke coords are normalized [0..1] relative to the preview element. */
   beginStroke(x: number, y: number): void {
+    this.inStroke = true
+    // Snapshot the active config so a replay reproduces this stroke's color/size.
+    this.drawHistory.push({ type: 'cfg', patch: { ...this.drawConfig } }, { type: 'begin', x, y })
     this.backend?.effectMessage('drawLayer', { type: 'begin', x, y })
   }
   moveStroke(x: number, y: number): void {
+    if (!this.inStroke) return // hover with no active stroke — nothing to draw
+    this.drawHistory.push({ type: 'move', x, y })
     this.backend?.effectMessage('drawLayer', { type: 'move', x, y })
   }
   endStroke(): void {
+    if (!this.inStroke) return
+    this.inStroke = false
+    this.drawHistory.push({ type: 'end' })
     this.backend?.effectMessage('drawLayer', { type: 'end' })
   }
   clearDrawing(): void {
+    this.inStroke = false
+    this.drawHistory = []
     this.backend?.effectMessage('drawLayer', { type: 'clear' })
   }
 
@@ -167,7 +267,10 @@ export class Rail {
     this.backend?.busPush(key, value)
   }
 
-  /** Sampled base-source frames (pre-mirror) for the vision analyzer. */
+  /** Sampled COMPOSITE frames (already mirrored when the camera mirror is on)
+   *  for the vision analyzer — NOT pre-mirror base frames. Consumers must treat
+   *  landmarks as being in the same (mirrored) space the preview displays, so
+   *  they render 1:1 with no extra flip (see marker.ts / OverlayCanvas). */
   setTap(intervalMs: number, cb: TapCallback | null): void {
     this.tap = cb ? { intervalMs, cb } : null
     this.backend?.setTap(intervalMs, cb)

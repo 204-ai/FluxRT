@@ -1,5 +1,5 @@
-// Facial-feature builder data + prompt composition logic.
-// Ported from webrtc_static/app.js (FEATURES/STYLES/applyFeatureChange).
+// Facial-feature builder data + prompt composition logic
+// (FEATURES / STYLES / applyFeatureChange).
 
 export const FEATURE_ORDER = ['eyes', 'eyebrows', 'nose', 'ears', 'mouth'] as const
 export type FeatureKey = (typeof FEATURE_ORDER)[number] | 'style'

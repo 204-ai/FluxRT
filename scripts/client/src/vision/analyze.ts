@@ -150,7 +150,8 @@ export function analyzeBody(
   const shoulderMidX = (lm[L_SHOULDER].x + lm[R_SHOULDER].x) / 2
   const hipMidX = visible(L_HIP) && visible(R_HIP) ? (lm[L_HIP].x + lm[R_HIP].x) / 2 : shoulderMidX
   const lean = shoulderMidX - hipMidX
-  // landmarks are in source coords: +x = person's left side
+  // +x = the person's left side in the analyzed frame (the mirrored composite
+  // when the input mirror is on)
   const leaning = lean > 0.04 ? 'right' : lean < -0.04 ? 'left' : 'centered'
 
   const shoulderTilt =

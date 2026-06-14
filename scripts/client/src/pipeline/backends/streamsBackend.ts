@@ -130,10 +130,81 @@ export class StreamsBackend implements RailBackend {
     this.worker?.postMessage({ type: 'tap', intervalMs: cb ? intervalMs : 0 })
   }
 
+  swapVideo(videoEl: HTMLVideoElement): void {
+    if (!this.worker) return
+    let sent = false
+    const send = () => {
+      if (sent) return
+      sent = true
+      const w = this.worker
+      if (!w) return
+      // captureStream() returns the SAME MediaStream; on a src change the old
+      // track ends and a new one is added once the element presents frames.
+      // Pick the LIVE track — the just-ended old track may still be listed
+      // (and could be first), and binding the worker to it would stall it.
+      const stream = videoEl.captureStream()
+      this.capturedStream = stream
+      const tracks = stream.getVideoTracks()
+      const track = tracks.find((t) => t.readyState === 'live') ?? tracks[0]
+      if (!track) {
+        this.onLog('swapVideo: no live video track after re-capture')
+        return
+      }
+      const readable = new MediaStreamTrackProcessor({ track }).readable
+      w.postMessage({ type: 'swap-video', video: readable }, [readable as unknown as Transferable])
+    }
+    // Wait for the new clip's FIRST presented frame so the re-captured stream
+    // actually has a live track before handing it to the worker; re-capturing
+    // immediately would grab the old, just-ended track and freeze the input.
+    // A paused / autoplay-blocked element never fires rVFC, so also fall back on
+    // a timer (the `sent` guard makes whichever fires first win) — otherwise the
+    // overlay would silently never appear.
+    if ('requestVideoFrameCallback' in videoEl) {
+      videoEl.requestVideoFrameCallback(() => send())
+      setTimeout(send, 600)
+    } else {
+      send()
+    }
+  }
+
+  swapCamera(cameraStream: MediaStream): void {
+    if (!this.worker) return
+    // getUserMedia tracks are live immediately (no first-frame wait needed).
+    const [track] = cameraStream.getVideoTracks()
+    if (!track) {
+      this.onLog('swapCamera: no camera track')
+      return
+    }
+    const readable = new MediaStreamTrackProcessor({ track }).readable
+    this.worker.postMessage({ type: 'swap-camera', video: readable }, [
+      readable as unknown as Transferable,
+    ])
+  }
+
+  clearVideo(): void {
+    if (!this.worker) return
+    this.worker.postMessage({ type: 'clear-video' })
+    // The file capture is no longer feeding the worker — release it.
+    this.capturedStream?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    this.capturedStream = null
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
+    // The output <video> has 0x0 dimensions until it presents its first frame —
+    // drawing it then yields a blank blob. Fail loudly so callers (e.g. Comfy
+    // snap → edit) surface "not ready" instead of uploading an empty image.
+    const w = this.previewEl.videoWidth
+    const h = this.previewEl.videoHeight
+    if (!w || !h) throw new Error('output not ready yet — start the stream first')
     const c = document.createElement('canvas')
-    c.width = this.previewEl.videoWidth
-    c.height = this.previewEl.videoHeight
+    c.width = w
+    c.height = h
     c.getContext('2d')!.drawImage(this.previewEl, 0, 0)
     return new Promise((res, rej) =>
       c.toBlob((b) => (b ? res(b) : rej(new Error('snapshot failed'))), type),

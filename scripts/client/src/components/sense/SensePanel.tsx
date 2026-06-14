@@ -1,96 +1,89 @@
-// Sense feature panel: enable toggle, source selector, live analysis readout.
+// Human sensing panel: "sense human" (detection / expression / behavior, can
+// drive the prompt) + the hand marker. Both run on the SAME shared input vision
+// engine (inputVision) and always sense the composite input — there is no
+// input/output source selector.
 
-import { useSenseStore } from '../../state/senseStore'
+import { useSenseStore, type SenseOverlay } from '../../state/senseStore'
 import { usePipelineStore } from '../../state/pipelineStore'
-import { useSessionStore } from '../../state/sessionStore'
 import { InfoPanel } from './InfoPanel'
+import { MarkerStyle } from './MarkerStyle'
+
+const LANDMARKS: Array<[number, string]> = [
+  [15, 'Left wrist'],
+  [16, 'Right wrist'],
+  [19, 'Left index'],
+  [20, 'Right index'],
+  [0, 'Nose'],
+  [11, 'Left shoulder'],
+  [12, 'Right shoulder'],
+]
 
 export function SensePanel() {
-  const { enabled, source, status, analysis, setEnabled, setSource } = useSenseStore()
+  const enabled = useSenseStore((s) => s.enabled)
+  const overlay = useSenseStore((s) => s.overlay)
+  const status = useSenseStore((s) => s.status)
+  const analysis = useSenseStore((s) => s.analysis)
+  const setEnabled = useSenseStore((s) => s.setEnabled)
+  const setOverlay = useSenseStore((s) => s.setOverlay)
   const camActive = usePipelineStore((s) => s.active)
-  const connected = useSessionStore((s) => s.connected)
-
-  const inputDisabled = !camActive
-  const outputDisabled = !connected
+  const p = usePipelineStore()
 
   return (
-    <section className="sense-panel">
+    <section className="sense-panel panel-box">
+      <div className="section-label">Human sensing</div>
+
       <div className="controls">
-        <label>
+        <label title="Detect a person and analyse expression / behavior from the input">
           <input
             type="checkbox"
             checked={enabled}
             onChange={(e) => void setEnabled(e.target.checked)}
-            disabled={!camActive && !connected}
+            disabled={!camActive}
           />{' '}
-          Sense human (detection, expression, behavior)
+          Sense human (detection, expression, behavior){camActive ? '' : ' — enable camera'}
         </label>
-        <label>
-          source{' '}
-          <select
-            value={source}
-            onChange={(e) => void setSource(e.target.value as 'input' | 'output')}
-          >
-            <option value="input" disabled={inputDisabled}>
-              camera input{inputDisabled ? ' (enable camera)' : ''}
-            </option>
-            <option value="output" disabled={outputDisabled}>
-              AI output{outputDisabled ? ' (connect first)' : ''}
-            </option>
-          </select>
-        </label>
+        {enabled && (
+          <label className="dim" title="How the sense visualisation appears over the input preview">
+            show{' '}
+            <select value={overlay} onChange={(e) => setOverlay(e.target.value as SenseOverlay)}>
+              <option value="overlay">overlay</option>
+              <option value="only">only</option>
+              <option value="off">don't show</option>
+            </select>
+          </label>
+        )}
         <span className="dim">{status}</span>
       </div>
-      {enabled && <ComposeControls />}
-      {enabled && <InfoPanel analysis={analysis} />}
+      {/* In overlay/only mode the metrics show as a dense overlay over the
+          preview (see MetricsOverlay); only show them in-panel when hidden.
+          The "drive prompt from sense" controls live at the bottom of the
+          prompt panel (ComposeControls). */}
+      {enabled && overlay === 'off' && <InfoPanel analysis={analysis} />}
+
+      <div className="section-label">Hand marker</div>
+      <div className="controls">
+        <label>
+          <input
+            type="checkbox"
+            checked={p.markerEnabled}
+            disabled={!p.active}
+            onChange={(e) => void p.setMarkerEnabled(e.target.checked)}
+          />{' '}
+          Enable
+        </label>
+        <label>
+          landmark{' '}
+          <select value={p.markerLandmark} onChange={(e) => p.setMarkerLandmark(+e.target.value)}>
+            {LANDMARKS.map(([v, label]) => (
+              <option key={v} value={v}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <MarkerStyle />
+        <span className="dim">{p.poseStatus}</span>
+      </div>
     </section>
-  )
-}
-
-function ComposeControls() {
-  const composeEnabled = useSenseStore((s) => s.composeEnabled)
-  const composeTheme = useSenseStore((s) => s.composeTheme)
-  const composeMinGapSecs = useSenseStore((s) => s.composeMinGapSecs)
-  const composeKey = useSenseStore((s) => s.composeKey)
-  const composePrompt = useSenseStore((s) => s.composePrompt)
-  const setComposeEnabled = useSenseStore((s) => s.setComposeEnabled)
-  const setComposeTheme = useSenseStore((s) => s.setComposeTheme)
-  const setComposeMinGap = useSenseStore((s) => s.setComposeMinGap)
-
-  return (
-    <div className="controls">
-      <label title="Compose a FLUX prompt from emotion (valence/arousal/gaze) + gesture slots; send when the combination changes">
-        <input
-          type="checkbox"
-          checked={composeEnabled}
-          onChange={(e) => setComposeEnabled(e.target.checked)}
-        />{' '}
-        🎭 Drive prompt from sense
-      </label>
-      <label>
-        theme{' '}
-        <select value={composeTheme} onChange={(e) => setComposeTheme(e.target.value as 'natural' | 'glitch')}>
-          <option value="natural">🌿 natural — painterly, weather, flora</option>
-          <option value="glitch">📺 glitch — mosaic, chrome, phosphor</option>
-        </select>
-      </label>
-      <label className="dim">
-        min gap{' '}
-        <input
-          type="number"
-          min={1}
-          style={{ width: 54 }}
-          value={composeMinGapSecs}
-          onChange={(e) => setComposeMinGap(+e.target.value)}
-        />{' '}
-        s
-      </label>
-      {composeEnabled && (
-        <span className="dim compose-readout">
-          {composeKey ? `slots: ${composeKey}` : 'waiting for detection…'}
-          {composePrompt ? ` → ${composePrompt.slice(0, 90)}…` : ''}
-        </span>
-      )}
-    </div>
   )
 }

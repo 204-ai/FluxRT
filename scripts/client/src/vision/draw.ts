@@ -1,7 +1,8 @@
 // Display-only overlay renderer — face mesh, pose skeleton, tracking box +
-// expression label. Ported from sense-human/src/vision/draw.ts; takes the
-// serialized worker results and a `mirrored` flag (the preview pixels are
-// mirrored by the compositor, landmarks are in source coords).
+// expression label. Ported from sense-human/src/vision/draw.ts. Detection runs
+// on the already-mirrored composite (input) / un-mirrored remote video (output),
+// so landmarks are already in the space the overlay renders into — drawn 1:1
+// with no flip.
 
 import {
   DrawingUtils,
@@ -16,20 +17,10 @@ const FACE_FEATURE_COLOR = 'rgba(0, 255, 170, 0.85)'
 const POSE_COLOR = 'rgba(80, 170, 255, 0.9)'
 const BOX_COLOR = 'rgba(0, 255, 170, 0.9)'
 
-export function drawOverlay(
-  canvas: HTMLCanvasElement,
-  result: VisionResult,
-  mirrored: boolean,
-): void {
+export function drawOverlay(canvas: HTMLCanvasElement, result: VisionResult): void {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-  ctx.save()
-  if (mirrored) {
-    ctx.translate(canvas.width, 0)
-    ctx.scale(-1, 1)
-  }
 
   const utils = new DrawingUtils(ctx)
 
@@ -54,11 +45,9 @@ export function drawOverlay(
       lineWidth: 1.5,
     })
   }
-  ctx.restore()
 
-  // Box + label drawn in screen space so text never mirrors.
   const face = result.faceLandmarks[0]
-  if (face) drawFaceBox(ctx, face, canvas.width, canvas.height, result, mirrored)
+  if (face) drawFaceBox(ctx, face, canvas.width, canvas.height, result)
 }
 
 function drawFaceBox(
@@ -67,7 +56,6 @@ function drawFaceBox(
   w: number,
   h: number,
   result: VisionResult,
-  mirrored: boolean,
 ): void {
   let minX = 1, minY = 1, maxX = 0, maxY = 0
   for (const p of landmarks) {
@@ -75,11 +63,6 @@ function drawFaceBox(
     if (p.y < minY) minY = p.y
     if (p.x > maxX) maxX = p.x
     if (p.y > maxY) maxY = p.y
-  }
-  if (mirrored) {
-    const m = 1 - maxX
-    maxX = 1 - minX
-    minX = m
   }
   const pad = 0.03
   const x = (minX - pad) * w

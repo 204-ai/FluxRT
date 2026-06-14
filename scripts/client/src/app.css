@@ -1,53 +1,252 @@
 :root { color-scheme: dark; }
 body { margin: 0; background: #111; color: #eee; font: 14px/1.4 system-ui, sans-serif; }
+#root { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
 header { padding: 10px 14px; background: #1a1a1a; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 20; }
-.tabs { position: sticky; top: 41px; z-index: 19; }
 header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #333; }
 #status.live { background: #1f7a3a; }
 #status.err { background: #7a1f1f; }
 #fpsBar { margin-left: auto; font: 11px/1.2 ui-monospace, monospace; color: #9aa; white-space: nowrap; }
 
-/* ── tabs ── */
-.tabs { display: flex; gap: 2px; background: #151515; padding: 0 14px; border-bottom: 1px solid #2a2a2a; }
-.tab-btn {
-  padding: 9px 16px; background: transparent; color: #aaa; border: 0;
-  border-bottom: 2px solid transparent; cursor: pointer; font-size: 13px; border-radius: 0;
-}
-.tab-btn:hover { background: #1e1e1e; color: #ddd; }
-.tab-btn.active { color: #fff; border-bottom-color: #2a6cd4; }
+/* ── tab panels (split view: both always mounted) ── */
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* ── split view: input (left) | divider | output (right) ── */
+.split-view { display: flex; align-items: stretch; flex: 1 1 auto; min-height: 0; }
+.split-view > .tab-panel {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.split-view > .tab-panel:first-child {   /* Input — left; width driven by the divider drag */
+  flex: 0 0 auto;
+  width: var(--split-left, 50%);
+  min-width: 240px;
+}
+.split-view > .tab-panel:last-child {    /* Output — right, fills remaining */
+  flex: 1 1 0;
+}
+.split-divider {
+  flex: 0 0 6px; align-self: stretch; cursor: col-resize; background: #2d2d2d;
+}
+.split-divider:hover { background: #2a6cd4; }
+
 /* ── stage (output tab) ── */
-.stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
+.stage { position: sticky; top: 0; z-index: 2; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
 .stage video { min-width: 0; background: #000; display: block; }
-.remote-wrap { flex: 1 1 0; max-width: 70%; min-width: 0; }
-.stage.split .remote-wrap { max-width: 50%; }
+.remote-wrap { flex: 1 1 0; max-width: 100%; min-width: 0; }
 .remote-wrap video { width: 100%; }
-#invSlot { flex: 1 1 0; min-width: 0; max-width: 50%; }
-#invSlot canvas, #invSlot video { display: block; width: 100%; background: #000; touch-action: none; cursor: crosshair; }
-.stage:not(.split) #invSlot { display: none; }
 
 /* preview slots are anchors for the sense overlay */
 .overlay-anchor { position: relative; }
 .canvas-host { display: contents; }
 .sense-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
-/* ── input edit toolbar (GIMP-style, left of preview) ── */
-.tool-bar {
-  display: flex; flex-direction: column; gap: 6px; padding: 8px;
-  background: #161616; border: 1px solid #2a2a2a; border-radius: 6px; align-self: flex-start;
+/* ── floating drawing toolbar over the input preview ── */
+/* Absolutely positioned inside #inputView (.overlay-anchor) so expanding it
+   never resizes/reflows the preview. Kept inset in the top-left corner so
+   #inputView's overflow:hidden doesn't clip it and it doesn't blanket the
+   draw canvas underneath. */
+.draw-fab,
+.draw-widget {
+  position: absolute; top: 8px; left: 8px; z-index: 5; pointer-events: auto;
+  background: rgba(18, 18, 18, 0.9); border: 1px solid #2a2a2a; border-radius: 6px;
 }
-.tool-bar .tool { width: 36px; height: 36px; padding: 0; font-size: 16px; background: #2a2a2a; }
-.tool-bar .tool:hover { background: #3a3a3a; }
-.tool-bar .tool.active { background: #2a6cd4; }
-.tool-bar input[type=color] { width: 36px; height: 28px; }
-.tool-bar input[type=range] { width: 72px; }
+.draw-fab {
+  width: 34px; height: 34px; padding: 0; font-size: 16px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.draw-fab:hover { background: rgba(40, 40, 40, 0.95); }
+.draw-fab.active { background: #2a6cd4; }
+.draw-widget {
+  display: flex; align-items: center; gap: 6px; padding: 6px;
+  max-width: calc(100% - 16px); flex-wrap: wrap;
+}
+.draw-widget .tool {
+  width: 30px; height: 30px; padding: 0; font-size: 14px; line-height: 0; background: #2a2a2a;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.draw-widget .tool:hover { background: #3a3a3a; }
+.draw-widget .tool.active { background: #2a6cd4; }
+.draw-widget input[type=color] { width: 30px; height: 28px; padding: 0; }
+.draw-widget input[type=range] { width: 84px; }
+.draw-widget .dim { min-width: 18px; text-align: center; }
+
+/* ── grouped panel boxes (prompt / reference) ── */
+.panel-box {
+  margin: 10px 14px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1a1a1a;
+}
+.panel-box > .controls,
+.panel-box > .ref { background: transparent; }
+.panel-box > .section-label { padding: 8px 14px 2px; }
+
+/* ── prompt scorecard over the output stage (top-right) ── */
+/* Absolutely positioned inside .remote-wrap (.overlay-anchor) so opening it
+   never resizes/reflows the output video. */
+.rate-fab,
+.rate-widget {
+  position: absolute; top: 8px; right: 8px; z-index: 5; pointer-events: auto;
+  background: rgba(18, 18, 18, 0.92); border: 1px solid #2a2a2a; border-radius: 6px;
+}
+.rate-fab {
+  width: 30px; height: 30px; padding: 0; font-size: 15px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.rate-fab:hover { background: rgba(40, 40, 40, 0.95); }
+.rate-widget {
+  width: 188px; max-width: calc(100% - 16px);
+  padding: 8px; display: flex; flex-direction: column; gap: 8px; font-size: 11px;
+}
+.rate-head { display: flex; align-items: center; justify-content: space-between; }
+.rate-x { padding: 0; width: 22px; height: 22px; line-height: 0; background: #2a2a2a; color: #ddd; }
+.rate-x:hover { background: #3a3a3a; }
+.rate-card { display: flex; flex-direction: column; gap: 5px; }
+.rate-card label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.stars { display: inline-flex; gap: 1px; }
+.star {
+  padding: 0; width: 18px; height: 18px; line-height: 0; font-size: 14px;
+  background: transparent; color: #555;
+}
+.star:hover { background: transparent; color: #c9a227; }
+.star.on { color: #f5c518; }
+.rate-actions { display: flex; align-items: center; gap: 6px; }
+.rate-btn { padding: 4px 8px; font-size: 12px; }
+.rate-status { line-height: 1.3; }
+
+/* output resolution readout (bottom-left of the output video) */
+.res-badge {
+  position: absolute; left: 8px; bottom: 8px; z-index: 5; pointer-events: none;
+  padding: 2px 6px; font: 11px/1.2 ui-monospace, monospace;
+  background: rgba(18, 18, 18, 0.8); color: #9aa; border-radius: 4px;
+}
+
+/* centered play / pause control over the output video */
+.play-overlay {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4;
+  width: 64px; height: 64px; padding: 0; border-radius: 50%; font-size: 26px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55); color: #fff; border: 1px solid rgba(255, 255, 255, 0.3);
+  cursor: pointer; pointer-events: auto;
+}
+.play-overlay:hover:not(:disabled) { background: rgba(0, 0, 0, 0.78); }
+.play-overlay:disabled { opacity: 0.4; cursor: default; }
+.play-overlay.pause { opacity: 0; pointer-events: none; transition: opacity 0.12s; }
+.remote-wrap:hover .play-overlay.pause { opacity: 1; pointer-events: auto; }
+
+/* fixed footer status bar: pipeline stats + a 1-line log that expands to ~5 */
+.statusbar {
+  flex: 0 0 auto;
+  background: #151515; border-top: 1px solid #2a2a2a; color: #9aa;
+  font: 11px/1.4 ui-monospace, monospace; padding: 4px 14px 6px; cursor: pointer;
+}
+.statusbar-stats { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.statusbar-log {
+  margin: 2px 0 0; color: #888; white-space: pre-wrap; word-break: break-word;
+  max-height: 1.45em; overflow: hidden;
+}
+.statusbar.expanded .statusbar-log { max-height: 7.25em; overflow: auto; }
+
+/* saved-prompt picker + player below the prompt input — one compact line */
+.prompt-player { flex-wrap: nowrap; }
+.prompt-player .saved-pick { flex: 1 1 0; min-width: 0; }
+.prompt-player .loop-delay { width: 46px; }
+.prompt-player .sp-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-player .icon-btn { font-size: 15px; }
+
+/* "drive prompt from sense" — compact inline row */
+.compose-row { flex-wrap: nowrap; }
+.compose-row select, .compose-row input[type=number] { padding: 3px 5px; }
+.compose-row input[type=number] { width: 42px; }
+.compose-row .compose-readout {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* compact side-by-side input source panels (camera | video) — always horizontal */
+.source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; }
+.src-panel {
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;
+}
+.src-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
+.src-panel .controls { padding: 0; background: transparent; gap: 6px; }
+.src-row { align-items: center; }
+.src-row .icon-btn, .transport .icon-btn { font-size: 15px; }
+.device-pick { flex: 1 1 120px; min-width: 0; }
+.src-panel .file-name { flex: 1 1 60px; max-width: none; }
+.transport { width: 100%; align-items: center; gap: 6px; }
+.transport .seek { flex: 1 1 auto; min-width: 50px; }
+.transport .time-readout { min-width: auto; font-size: 10px; }
+.transport .rate { padding: 3px 4px; }
+.icon-btn.on { background: #1f7a3a; color: #fff; }
+
+/* minimal drop / upload zone (shared: video source + reference image) */
+.drop-zone {
+  flex: 1 1 auto; min-width: 0; padding: 6px 8px; border: 1px dashed #3a3a3a; border-radius: 4px;
+  background: #161616; color: #888; font-size: 12px; text-align: center; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.drop-zone:hover { border-color: #2a6cd4; color: #aaa; }
+.drop-zone.drag { border-color: #2a6cd4; background: #1a2433; color: #cde; }
+
+/* compositing mixer between the camera and video panels (vertical fader) */
+.mixer {
+  flex: 0 0 auto; align-self: stretch; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px; padding: 8px 2px;
+}
+.mixer-slider {
+  -webkit-appearance: slider-vertical; appearance: slider-vertical;
+  writing-mode: vertical-lr; direction: rtl; width: 22px; height: 96px;
+}
+.mixer-val { font-size: 10px; }
+
+/* dense detection-metrics overlay over the input preview (overlay/only modes) */
+.metrics-fab,
+.metrics-overlay {
+  position: absolute; top: 8px; right: 8px; z-index: 6; pointer-events: auto;
+  background: rgba(18, 18, 18, 0.9); border: 1px solid #2a2a2a; border-radius: 6px;
+}
+.metrics-fab {
+  width: 30px; height: 30px; padding: 0; font-size: 15px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.metrics-fab:hover { background: rgba(40, 40, 40, 0.95); }
+.metrics-overlay {
+  width: 200px; max-width: calc(100% - 16px); max-height: calc(100% - 16px);
+  overflow: auto; padding: 6px; font-size: 10px;
+}
+.metrics-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.metrics-x { padding: 0; width: 20px; height: 20px; line-height: 0; background: #2a2a2a; color: #ddd; }
+.metrics-x:hover { background: #3a3a3a; }
+/* compact the reused InfoPanel inside the overlay */
+.metrics-overlay .sense-info { display: flex; flex-direction: column; gap: 6px; }
+.metrics-overlay .sense-section { flex: none; max-width: none; padding: 0; border: 0; background: transparent; }
+.metrics-overlay .sense-section h3 { margin: 0 0 2px; font-size: 9px; text-transform: uppercase; color: #888; }
+.metrics-overlay .srow { display: flex; justify-content: space-between; gap: 6px; line-height: 1.3; }
+.metrics-overlay .meter { display: flex; align-items: center; gap: 4px; }
+.metrics-overlay .meter-track { flex: 1 1 auto; height: 4px; }
+
+/* hand-marker style popover (collapsible, next to the landmark selector) */
+.marker-style { position: relative; display: inline-flex; }
+.marker-style .icon-btn { font-size: 14px; }
+.marker-style-pop {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 6;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px; white-space: nowrap;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
+}
+.marker-style-pop label { display: flex; align-items: center; gap: 6px; }
+.marker-style-pop input[type=range] { width: 100px; }
 
 /* ── facial-feature builder bar ── */
-#featBar select.feat { max-width: 200px; }
+#featBar { flex-wrap: nowrap; }
+#featBar select.feat { flex: 1 1 0; min-width: 0; max-width: 200px; }
+#featBar .icon-btn { font-size: 15px; }
 
 /* ── spinner ── */
 .spinner {
@@ -64,7 +263,7 @@ input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #e
 textarea#prompt {
   flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee;
   border: 1px solid #333; border-radius: 4px; font: inherit; line-height: 1.4;
-  resize: none; min-height: 36px; max-height: 240px; overflow-y: auto;
+  resize: none; overflow-y: auto;
 }
 .comfy-prompt {
   flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee;
@@ -75,6 +274,24 @@ button { padding: 8px 14px; background: #2a6cd4; color: #fff; border: 0; border-
 button:hover { background: #3a7ce4; }
 button:disabled { background: #444; cursor: not-allowed; }
 button.active { background: #1f7a3a; }
+
+/* icon-only buttons (Start/Stop in the navbar) */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; width: 30px; height: 30px; line-height: 0;
+  background: #2a2a2a; color: #ddd; border-radius: 4px;
+}
+.icon-btn:hover:not(:disabled) { background: #3a3a3a; }
+.icon-btn.start:not(:disabled) { color: #4ade80; }
+.icon-btn.stop:not(:disabled) { color: #f87171; }
+.icon-btn:disabled { background: #222; color: #555; cursor: not-allowed; }
+
+/* compact seed/steps fields in the navbar */
+.nav-field { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #9aa; }
+.nav-field input { width: 56px; padding: 3px 5px; }
+header .icon-btn { font-size: 15px; }
+/* right-align the control cluster (start/stop/seed/steps/lip) in the navbar */
+header .icon-btn.start { margin-left: auto; }
 label { font-size: 12px; color: #aaa; display: flex; align-items: center; gap: 6px; }
 .dim { font-size: 11px; color: #888; }
 
@@ -85,42 +302,49 @@ input[type=color] { width: 42px; height: 28px; padding: 0; border: 1px solid #33
 /* ── reference ── */
 .ref { padding: 10px 14px; background: #1a1a1a; display: flex; align-items: center; gap: 10px; border-top: 1px solid #2a2a2a; }
 .ref.disabled { opacity: 0.5; pointer-events: none; }
-.ref-inline { flex: 0 1 340px; padding: 0; border: 0; background: transparent; }
-.ref .drop {
-  flex: 1 1 auto; min-height: 64px; padding: 10px 14px; border: 2px dashed #444; border-radius: 6px;
-  display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;
-  text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s;
+/* prompt input with the reference image inline beside it (~2:1) */
+.prompt-row { flex-wrap: nowrap; align-items: stretch; }
+.prompt-row textarea#prompt { flex: 2 1 0; min-width: 0; }
+
+/* compact reference box — the image itself is the drop target */
+.ref-box { flex: 1 1 0; min-width: 0; display: flex; }
+.ref-box.disabled { opacity: 0.5; pointer-events: none; }
+.ref-drop {
+  position: relative; flex: 1 1 auto; min-width: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  border: 1px dashed #3a3a3a; border-radius: 4px; background: #161616;
+  color: #777; font-size: 11px; cursor: pointer; transition: border-color 0.15s, background 0.15s;
 }
-.ref .drop.over { border-color: #2a6cd4; background: #142035; color: #ccc; }
-.ref .preview { display: none; max-height: 80px; max-width: 120px; border-radius: 4px; border: 1px solid #333; }
-.ref .preview.shown { display: block; }
-.ref .meta { font-size: 11px; color: #888; min-width: 110px; }
+.ref-drop:hover { border-color: #2a6cd4; color: #aaa; }
+.ref-drop.drag { border-color: #2a6cd4; background: #18222f; color: #ccd; }
+.ref-drop img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+.ref-hint { padding: 4px 6px; }
+.ref-clear {
+  position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; padding: 0;
+  line-height: 0; font-size: 12px; border-radius: 4px; cursor: pointer;
+  background: rgba(0, 0, 0, 0.6); color: #fff; border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.ref-clear:hover { background: rgba(0, 0, 0, 0.85); }
 
 .section-label { padding: 8px 14px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
 
 #inputView {
+  position: sticky; top: 0; z-index: 2;
   margin: 8px 14px; background: #0a0a0a; border: 1px solid #222; border-radius: 4px;
   min-height: 80px; display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
-#inputView canvas, #inputView video {
-  display: block; width: 100%; max-width: 720px; background: #000;
+#inputView canvas:not(.sense-overlay), #inputView video {
+  display: block; width: 100%; background: #000;
   touch-action: none; cursor: crosshair;
 }
+/* "only" mode: hide the preview video/canvas but keep its box so the aspect
+   stays correct; the transparent sense overlay draws on the dark backdrop. */
+#inputView.sense-only canvas:not(.sense-overlay),
+#inputView.sense-only video { visibility: hidden; }
 
 /* ── input sources / compositing ── */
-.source-row { border-top: 0; }
-.source-badge {
-  font-size: 10px; padding: 2px 8px; border-radius: 8px; background: #333; color: #888;
-  text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0;
-}
-.source-badge.on { background: #1f7a3a; color: #fff; }
-.file-name {
-  font-size: 12px; color: #ccc; max-width: 240px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 .transport input[type=range] { flex: 1 1 160px; min-width: 100px; }
 .time-readout { font: 11px/1.2 ui-monospace, monospace; color: #9aa; min-width: 86px; text-align: center; }
-.composite-controls input[type=range] { width: 140px; }
 
 /* ── sense panel ── */
 .sense-panel { border-top: 1px solid #2a2a2a; background: #161616; }

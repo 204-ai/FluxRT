@@ -1,5 +1,5 @@
 // Persistent freehand drawing layer, composited topmost on every frame.
-// Port of input_processor.js drawCanvas logic. Strokes arrive as normalized
+// Strokes arrive as normalized
 // [0..1] coordinates via message() so the same code runs on the main thread
 // or inside the pipeline worker.
 

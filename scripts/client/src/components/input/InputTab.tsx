@@ -1,5 +1,5 @@
-// Input tab: sources (camera + video file), compositing, input preview +
-// draw, hand marker.
+// Input tab: sources (camera + video file), compositing, input preview + draw.
+// (Hand marker + human sensing live together in the Human-sensing panel.)
 
 import { useEffect } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
@@ -8,21 +8,17 @@ import { CanvasHost } from './CanvasHost'
 import { CompositeSection } from './CompositeSection'
 import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
-
-const LANDMARKS: Array<[number, string]> = [
-  [15, 'Left wrist'],
-  [16, 'Right wrist'],
-  [19, 'Left index'],
-  [20, 'Right index'],
-  [0, 'Nose'],
-  [11, 'Left shoulder'],
-  [12, 'Right shoulder'],
-]
+import { DrawToolbar } from './DrawToolbar'
+import { SensePanel } from '../sense/SensePanel'
+import { MetricsOverlay } from '../sense/MetricsOverlay'
+import { useSenseStore } from '../../state/senseStore'
 
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
   const inputRole = useSessionStore((s) => s.inputRole)
-  const showInStage = useSessionStore((s) => s.activeTab) === 'output' && p.showInputPreview
+  const senseEnabled = useSenseStore((s) => s.enabled)
+  const senseOverlay = useSenseStore((s) => s.overlay)
+  const senseOnly = senseEnabled && senseOverlay === 'only'
 
   useEffect(() => {
     p.setLogger((m) => useSessionStore.getState().logLine(m))
@@ -43,155 +39,63 @@ export function InputTab({ active }: { active: boolean }) {
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
-      <div className="section-label">Sources</div>
-      <div className="controls source-row">
-        <span className={'source-badge' + (p.camEnabled ? ' on' : '')}>camera</span>
-        <label>
-          <input
-            type="checkbox"
-            checked={p.camEnabled}
-            onChange={(e) => (e.target.checked ? void p.enableCam() : void p.disableCam())}
-          />{' '}
-          Use my camera as input
-        </label>
-        <select
-          style={{ flex: '1 1 220px' }}
-          disabled={!p.camEnabled}
-          value={p.deviceId}
-          onChange={(e) => void p.setDevice(e.target.value)}
-        >
-          {p.devices.length === 0 ? (
-            <option value="">— pick a camera —</option>
-          ) : (
-            <option value="">Default camera</option>
-          )}
-          {p.devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId}>
-              {d.label}
-            </option>
-          ))}
-        </select>
-        <label>
-          <input
-            type="checkbox"
-            checked={p.mirror}
-            disabled={!p.camEnabled}
-            onChange={(e) => p.setMirror(e.target.checked)}
-          />{' '}
-          Mirror input
-        </label>
-        <span className="dim">{roleLabel}</span>
-      </div>
-      <VideoSourceSection />
-
-      <CompositeSection />
-
-      <div className="section-label">Input preview &amp; draw</div>
-      <div id="inputView" className="overlay-anchor">
+      <div id="inputView" className={'overlay-anchor' + (senseOnly ? ' sense-only' : '')}>
         {!p.active && (
           <div className="dim" style={{ padding: 24 }}>
             Enable your camera or load a video to preview &amp; draw on the input.
           </div>
         )}
-        <CanvasHost holds={p.active && !showInStage} />
-        {p.active && !showInStage && <OverlayCanvas source="input" />}
-      </div>
-      <div className="controls">
-        <label>
-          <input
-            type="checkbox"
-            disabled={!p.active}
-            checked={p.drawMode !== 'off'}
-            onChange={(e) => p.setDrawMode(e.target.checked ? 'brush' : 'off')}
-          />{' '}
-          Draw on input
-        </label>
-        <label>
-          color{' '}
-          <input
-            type="color"
-            value={p.drawColor}
-            disabled={!p.active}
-            onChange={(e) => p.setDrawColor(e.target.value)}
-          />
-        </label>
-        <label>
-          size{' '}
-          <input
-            type="range"
-            min={1}
-            max={60}
-            step={1}
-            value={p.drawSize}
-            disabled={!p.active}
-            onChange={(e) => p.setDrawSize(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.drawSize}px
-        </span>
-        <button disabled={!p.active} onClick={() => p.clearDrawing()}>
-          Clear drawing
-        </button>
+        <CanvasHost holds={p.active} />
+        {p.active && senseOverlay !== 'off' && <OverlayCanvas source="input" />}
+        {p.active && <DrawToolbar />}
+        {p.active && senseEnabled && senseOverlay !== 'off' && <MetricsOverlay />}
       </div>
 
-      <div className="section-label">Hand marker</div>
-      <div className="controls">
-        <label>
-          <input
-            type="checkbox"
-            checked={p.markerEnabled}
-            disabled={!p.active}
-            onChange={(e) => void p.setMarkerEnabled(e.target.checked)}
-          />{' '}
-          Enable
-        </label>
-        <label>
-          landmark{' '}
-          <select value={p.markerLandmark} onChange={(e) => p.setMarkerLandmark(+e.target.value)}>
-            {LANDMARKS.map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          color <input type="color" value={p.markerColor} onChange={(e) => p.setMarkerColor(e.target.value)} />
-        </label>
-        <label>
-          size{' '}
-          <input
-            type="range"
-            min={6}
-            max={120}
-            step={1}
-            value={p.markerSize}
-            onChange={(e) => p.setMarkerSize(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.markerSize}px
-        </span>
-        <label>
-          <input type="checkbox" checked={p.markerTrail} onChange={(e) => p.setMarkerTrail(e.target.checked)} /> Trail
-        </label>
-        <label>
-          length{' '}
-          <input
-            type="range"
-            min={4}
-            max={80}
-            step={1}
-            value={p.markerTrailLen}
-            onChange={(e) => p.setMarkerTrailLen(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.markerTrailLen}
-        </span>
-        <span className="dim">{p.poseStatus}</span>
+      <div className="source-panels">
+        <div className="src-panel">
+          <div className="src-title">Camera</div>
+          <div className="controls src-row">
+            {/* Selecting a camera auto-enables it; "Camera off" disables. */}
+            <select
+              className="device-pick"
+              value={p.camEnabled ? p.deviceId || 'default' : ''}
+              onChange={(e) => {
+                const v = e.target.value
+                if (v === '') {
+                  void p.disableCam()
+                  return
+                }
+                const id = v === 'default' ? '' : v
+                usePipelineStore.setState({ deviceId: id })
+                if (p.camEnabled) void p.setDevice(id)
+                else void p.enableCam()
+              }}
+            >
+              <option value="">Camera off</option>
+              <option value="default">Default camera</option>
+              {p.devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+            <label className="dim" title="Mirror the camera (selfie view)">
+              <input
+                type="checkbox"
+                checked={p.mirror}
+                disabled={!p.camEnabled}
+                onChange={(e) => p.setMirror(e.target.checked)}
+              />{' '}
+              Mirror
+            </label>
+          </div>
+          <span className="dim">{roleLabel}</span>
+        </div>
+        <CompositeSection />
+        <VideoSourceSection />
       </div>
+
+      <SensePanel />
     </section>
   )
 }
