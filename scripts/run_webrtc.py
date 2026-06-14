@@ -1124,16 +1124,19 @@ def main() -> None:
         help=(
             "Register a ComfyUI server the client can pull reference images "
             "from. Repeatable. Example: "
-            "--comfy-server A=http://79.169.112.61:12040"
+            "--comfy-server A=http://comfy-host:12040"
         ),
     )
     args = parser.parse_args()
 
-    # Populate comfy_servers dict. Fall back to the two known production
-    # servers (A=12040, B=12041) if none were passed on the CLI.
+    # Populate comfy_servers dict. Servers come from --comfy-server flags, or
+    # fall back to the FLUXRT_COMFY_SERVERS env var (comma-separated NAME=URL
+    # entries, e.g. "A=http://host:12040,B=http://host:12041"). No addresses
+    # are baked into the source. If neither is set, no servers are registered.
     raw_entries = args.comfy_server or [
-        "A=http://79.169.112.61:12040",
-        "B=http://79.169.112.61:12041",
+        e.strip()
+        for e in os.environ.get("FLUXRT_COMFY_SERVERS", "").split(",")
+        if e.strip()
     ]
     for entry in raw_entries:
         name, _, url = entry.partition("=")
