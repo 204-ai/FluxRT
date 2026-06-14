@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QGridLayout,
     QSizePolicy,
+    QSplitter,
 )
 
 from fluxrt import StreamProcessor
@@ -251,6 +252,14 @@ QStatusBar QLabel {{
     background-color: transparent;
 }}
 
+QSplitter#split_view::handle {{
+    background-color: {SEP};
+}}
+
+QSplitter#split_view::handle:hover {{
+    background-color: {ACCENT};
+}}
+
 QScrollBar:vertical {{
     background: transparent;
     width: 8px;
@@ -358,17 +367,37 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # ── video panels ──────────────────────────────────────────────────────
-        video_root = QWidget()
-        video_root.setObjectName("video_root")
-        video_layout = QHBoxLayout(video_root)
-        video_layout.setContentsMargins(6, 6, 6, 6)
-        video_layout.setSpacing(6)
+        # ── split view: input (left) | output (right) ──────────────────────────
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("split_view")
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
+        splitter.addWidget(self._build_input_pane())
+        splitter.addWidget(self._build_output_pane())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([600, 600])
 
-        self._input_lbl = self._make_video_panel(video_layout, "Input")
-        self._output_lbl = self._make_video_panel(video_layout, "Output")
+        # ── global action bar (spans both panels) ──────────────────────────────
+        action_bar = self._build_action_bar()
 
-        # ── control panel ─────────────────────────────────────────────────────
+        root_layout.addWidget(splitter, stretch=1)
+        root_layout.addWidget(action_bar, stretch=0)
+
+        self.statusBar().showMessage("Ready.")
+        self._refresh_cameras()
+
+    def _build_input_pane(self) -> QWidget:
+        """Left pane: input video preview + source controls (camera, Spout, video file)."""
+        pane = QWidget()
+        pane.setObjectName("video_root")
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        video_panel, self._input_lbl = self._make_video_panel("Input")
+        layout.addWidget(video_panel, stretch=1)
+
         ctrl_area = QWidget()
         ctrl_area.setObjectName("ctrl_area")
         ctrl_layout = QGridLayout(ctrl_area)
@@ -438,7 +467,7 @@ class MainWindow(QMainWindow):
         video_row_l = video_row.layout()
         self._video_path_lbl = QLabel("(none — using camera)")
         self._video_path_lbl.setObjectName("dim")
-        self._video_path_lbl.setMinimumWidth(260)
+        self._video_path_lbl.setMinimumWidth(180)
         video_row_l.addWidget(self._video_path_lbl)
         browse_video_btn = QPushButton("Browse")
         browse_video_btn.clicked.connect(self._browse_video)
@@ -448,7 +477,30 @@ class MainWindow(QMainWindow):
         video_row_l.addWidget(clear_video_btn)
         video_row_l.addStretch()
         ctrl_layout.addWidget(video_row, row, 1, 1, 2)
-        row += 1
+
+        layout.addWidget(ctrl_area, stretch=0)
+        return pane
+
+    def _build_output_pane(self) -> QWidget:
+        """Right pane: output video preview + prompt, reference, lip, vcam."""
+        pane = QWidget()
+        pane.setObjectName("video_root")
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        video_panel, self._output_lbl = self._make_video_panel("Output")
+        layout.addWidget(video_panel, stretch=1)
+
+        ctrl_area = QWidget()
+        ctrl_area.setObjectName("ctrl_area")
+        ctrl_layout = QGridLayout(ctrl_area)
+        ctrl_layout.setContentsMargins(14, 10, 14, 12)
+        ctrl_layout.setHorizontalSpacing(8)
+        ctrl_layout.setVerticalSpacing(6)
+        ctrl_layout.setColumnStretch(1, 1)
+
+        row = 0
 
         # Prompt row
         ctrl_layout.addWidget(
@@ -472,7 +524,7 @@ class MainWindow(QMainWindow):
         ref_l.addWidget(QLabel("Reference image:"))
         self._ref_path_lbl = QLabel("(none)")
         self._ref_path_lbl.setObjectName("dim")
-        self._ref_path_lbl.setMinimumWidth(260)
+        self._ref_path_lbl.setMinimumWidth(180)
         ref_l.addWidget(self._ref_path_lbl)
         browse_ref_btn = QPushButton("Browse")
         browse_ref_btn.clicked.connect(self._browse_reference)
@@ -485,42 +537,40 @@ class MainWindow(QMainWindow):
         self._ref_widget.setVisible(False)
         row += 1
 
-        # Lip transfer toggle row
-        lip_row = self._ctrl_row()
-        lip_l = lip_row.layout()
+        # Lip transfer + virtual cam row
+        out_row = self._ctrl_row()
+        out_l = out_row.layout()
         self._lip_btn = QPushButton("Enable Lip Transfer")
         self._lip_btn.setEnabled(False)
         self._lip_btn.clicked.connect(self._toggle_lip)
-        lip_l.addWidget(self._lip_btn)
-        lip_l.addStretch()
-        ctrl_layout.addWidget(lip_row, row, 0, 1, 3)
-        row += 1
-
-        # Action buttons row
-        btn_row = self._ctrl_row()
-        btn_row.layout().setContentsMargins(0, 4, 0, 0)
-        btn_l = btn_row.layout()
-        self._start_btn = QPushButton("Start")
-        self._start_btn.setObjectName("accent")
-        self._start_btn.setMinimumWidth(90)
-        self._start_btn.clicked.connect(self._toggle_start)
-        btn_l.addWidget(self._start_btn)
+        out_l.addWidget(self._lip_btn)
         self._vcam_btn = QPushButton("Enable Virtual Cam")
         self._vcam_btn.setEnabled(False)
         self._vcam_btn.clicked.connect(self._toggle_vcam)
-        btn_l.addWidget(self._vcam_btn)
+        out_l.addWidget(self._vcam_btn)
         self._vcam_err_lbl = QLabel()
         self._vcam_err_lbl.setObjectName("err")
-        btn_l.addWidget(self._vcam_err_lbl)
-        btn_l.addStretch()
-        ctrl_layout.addWidget(btn_row, row, 0, 1, 3)
+        out_l.addWidget(self._vcam_err_lbl)
+        out_l.addStretch()
+        ctrl_layout.addWidget(out_row, row, 0, 1, 3)
 
-        self.statusBar().showMessage("Ready.")
+        layout.addWidget(ctrl_area, stretch=0)
+        return pane
 
-        root_layout.addWidget(video_root, stretch=1)
-        root_layout.addWidget(ctrl_area, stretch=0)
-
-        self._refresh_cameras()
+    def _build_action_bar(self) -> QWidget:
+        """Global control bar spanning both panes: Start/Stop."""
+        bar = QWidget()
+        bar.setObjectName("ctrl_area")
+        bar_l = QHBoxLayout(bar)
+        bar_l.setContentsMargins(14, 8, 14, 10)
+        bar_l.setSpacing(8)
+        self._start_btn = QPushButton("Start")
+        self._start_btn.setObjectName("accent")
+        self._start_btn.setMinimumWidth(120)
+        self._start_btn.clicked.connect(self._toggle_start)
+        bar_l.addWidget(self._start_btn)
+        bar_l.addStretch()
+        return bar
 
     @staticmethod
     def _ctrl_row() -> QWidget:
@@ -532,7 +582,8 @@ class MainWindow(QMainWindow):
         lay.setSpacing(6)
         return w
 
-    def _make_video_panel(self, parent_layout: QHBoxLayout, title: str) -> QLabel:
+    @staticmethod
+    def _make_video_panel(title: str) -> tuple[QWidget, QLabel]:
         panel = QWidget()
         panel.setObjectName("video_panel")
         layout = QVBoxLayout(panel)
@@ -554,8 +605,7 @@ class MainWindow(QMainWindow):
         img_lbl.setMinimumSize(240, 135)
         layout.addWidget(img_lbl)
 
-        parent_layout.addWidget(panel)
-        return img_lbl
+        return panel, img_lbl
 
     # ── config ─────────────────────────────────────────────────────────────────
 
