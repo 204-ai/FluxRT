@@ -5,11 +5,13 @@
     "models_path" : "FLUX.2-klein-4B",
     "int8_models_path": "FLUX.2-klein-4B-int8",
     "resolution" : {
-        "height" : 320,
-        "width" : 576
+        "height" : 368,
+        "width" : 640
     },
     "compile_models": true,
     "enable_spatial_cache": true,
+    "enable_tiny_vae": false,
+    "enable_flow_upscaler": false,
     "enable_int8_quantization": false,
     "target_fps":null,
     "interpolation_exp": 2,
