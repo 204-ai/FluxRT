@@ -43,9 +43,15 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-# Directory holding the static browser client (index.html, app.js, app.css,
-# input_processor.js). Served at /static, with / returning index.html.
+# Directory holding the legacy static browser client (index.html, app.js,
+# app.css, input_processor.js). Served at /static, with /legacy returning its
+# index.html (and / too, if the new client build is absent).
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc_static")
+
+# New React/TS client (scripts/client). When a build exists, / serves it and
+# /legacy keeps the old client reachable. Build with: cd scripts/client &&
+# yarn && yarn vendor && yarn build
+CLIENT_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client", "dist")
 
 # ComfyUI API-format workflow templates patched + queued by /comfy/edit.
 WORKFLOWS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_workflows")
@@ -417,6 +423,14 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+# New client build, when present: Vite assets + vendored MediaPipe wasm/models.
+_client_built = os.path.isfile(os.path.join(CLIENT_DIST, "index.html"))
+if _client_built:
+    app.mount("/assets", StaticFiles(directory=os.path.join(CLIENT_DIST, "assets")), name="assets")
+    _mediapipe_dir = os.path.join(CLIENT_DIST, "mediapipe")
+    if os.path.isdir(_mediapipe_dir):
+        app.mount("/mediapipe", StaticFiles(directory=_mediapipe_dir), name="mediapipe")
+
 
 @app.middleware("http")
 async def _no_cache_client(request: Request, call_next):
@@ -425,7 +439,7 @@ async def _no_cache_client(request: Request, call_next):
     after a server update (a LAN 304 roundtrip is free)."""
     response = await call_next(request)
     path = request.url.path
-    if path == "/" or path.startswith("/static"):
+    if path == "/" or path == "/legacy" or path.startswith(("/static", "/assets")):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -996,6 +1010,13 @@ async def delete_saved_prompt(request: Request):
 
 @app.get("/")
 async def _index():
+    if _client_built:
+        return FileResponse(os.path.join(CLIENT_DIST, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/legacy")
+async def _legacy_index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
