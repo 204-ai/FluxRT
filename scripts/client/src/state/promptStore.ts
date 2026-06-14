@@ -36,6 +36,7 @@ interface PromptState {
   setRating(axis: 'style' | 'tracking' | 'stability', v: number): void
   loadSavedPrompts(): Promise<void>
   applySaved(i: number): void
+  shuffleSelect(): void
   saveCurrent(): Promise<void>
   deleteCurrent(): Promise<void>
   setLoopDelay(secs: number): void
@@ -64,7 +65,7 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   rateStability: 0,
   savedStatus: '',
   loopRunning: false,
-  loopDelay: 20,
+  loopDelay: 10,
 
   setPromptLocal(text) {
     set({ prompt: text })
@@ -141,6 +142,18 @@ export const usePromptStore = create<PromptState>((set, get) => ({
     useSessionStore.getState().logLine(`Saved prompt applied (${ratingLabel(e)})`)
   },
 
+  shuffleSelect() {
+    const list = get().savedPrompts
+    if (!list.length) {
+      set({ savedStatus: 'no saved prompts to shuffle' })
+      return
+    }
+    let i = Math.floor(Math.random() * list.length)
+    // Avoid repeating the current pick when there's more than one to choose from.
+    if (list.length > 1 && i === loopIdx) i = (i + 1) % list.length
+    get().applySaved(i)
+  },
+
   async saveCurrent() {
     const { prompt, rateStyle, rateTracking, rateStability } = get()
     const text = prompt.trim()
@@ -173,7 +186,7 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   },
 
   setLoopDelay(secs) {
-    const v = Math.max(2, secs || 20)
+    const v = Math.max(2, secs || 10)
     set({ loopDelay: v })
     // Changing the delay while looping restarts the timer with the new period.
     if (loopTimer) {

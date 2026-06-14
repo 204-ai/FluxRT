@@ -24,6 +24,14 @@ export function PromptPlayer() {
         ))}
       </select>
       <button
+        className="icon-btn"
+        title="Apply a random saved prompt"
+        aria-label="Shuffle: apply a random saved prompt"
+        onClick={() => p.shuffleSelect()}
+      >
+        🔀
+      </button>
+      <button
         className={'icon-btn' + (p.loopRunning ? ' on' : '')}
         title={p.loopRunning ? 'Stop autoplay' : 'Play through saved prompts'}
         aria-label={p.loopRunning ? 'Stop autoplay' : 'Play saved prompts'}
