@@ -1,4 +1,5 @@
-// Video-file input source: file picker, metadata, transport controls.
+// Video-file input source: compact picker + icon transport controls. Sits as
+// a side-by-side panel next to the camera; the transport spans the panel width.
 
 import { useRef } from 'react'
 import { fmtTime, usePipelineStore } from '../../state/pipelineStore'
@@ -16,9 +17,9 @@ export function VideoSourceSection() {
   }
 
   return (
-    <>
-      <div className="controls source-row">
-        <span className={'source-badge' + (p.videoLoaded ? ' on' : '')}>video</span>
+    <div className="src-panel video-panel">
+      <div className="src-title">Video</div>
+      <div className="controls src-row">
         <input
           ref={fileInput}
           type="file"
@@ -26,24 +27,44 @@ export function VideoSourceSection() {
           style={{ display: 'none' }}
           onChange={(e) => pick(e.target.files?.[0])}
         />
-        <button onClick={() => fileInput.current?.click()}>
-          {p.videoLoaded ? 'Replace video…' : 'Load video…'}
+        <button
+          className="icon-btn"
+          title={p.videoLoaded ? 'Replace video' : 'Load video'}
+          aria-label={p.videoLoaded ? 'Replace video' : 'Load video'}
+          onClick={() => fileInput.current?.click()}
+        >
+          📁
         </button>
-        {p.videoLoaded && (
+        {p.videoLoaded ? (
           <>
-            <span className="file-name" title={p.videoName}>
+            <span className="file-name" title={`${p.videoName} — ${p.videoMeta}`}>
               {p.videoName}
             </span>
-            <span className="dim">{p.videoMeta}</span>
-            <button onClick={() => void p.unloadVideo()}>Unload</button>
+            <button
+              className="icon-btn"
+              title="Unload video"
+              aria-label="Unload video"
+              onClick={() => void p.unloadVideo()}
+            >
+              🗑
+            </button>
           </>
+        ) : (
+          <span className="dim">no video loaded</span>
         )}
-        {!p.videoLoaded && <span className="dim">drive the input from an mp4/webm file</span>}
       </div>
       {p.videoLoaded && (
         <div className="controls transport">
-          <button onClick={() => p.toggleVideoPlay()}>{p.videoPlaying ? '⏸' : '▶'}</button>
+          <button
+            className="icon-btn"
+            title={p.videoPlaying ? 'Pause' : 'Play'}
+            aria-label={p.videoPlaying ? 'Pause' : 'Play'}
+            onClick={() => p.toggleVideoPlay()}
+          >
+            {p.videoPlaying ? '⏸' : '▶'}
+          </button>
           <input
+            className="seek"
             type="range"
             min={0}
             max={p.videoDuration || 0}
@@ -52,28 +73,25 @@ export function VideoSourceSection() {
             onChange={(e) => p.seekVideo(+e.target.value)}
           />
           <span className="time-readout">
-            {fmtTime(p.videoCurrentTime)} / {fmtTime(p.videoDuration)}
+            {fmtTime(p.videoCurrentTime)}/{fmtTime(p.videoDuration)}
           </span>
-          <label>
-            <input
-              type="checkbox"
-              checked={p.videoLoop}
-              onChange={(e) => p.setVideoLoop(e.target.checked)}
-            />{' '}
-            Loop
-          </label>
-          <label>
-            speed{' '}
-            <select value={p.videoRate} onChange={(e) => p.setVideoRate(+e.target.value)}>
-              {RATES.map((r) => (
-                <option key={r} value={r}>
-                  {r}×
-                </option>
-              ))}
-            </select>
-          </label>
+          <button
+            className={'icon-btn' + (p.videoLoop ? ' on' : '')}
+            title="Loop"
+            aria-label="Loop"
+            onClick={() => p.setVideoLoop(!p.videoLoop)}
+          >
+            🔁
+          </button>
+          <select className="rate" title="Playback speed" value={p.videoRate} onChange={(e) => p.setVideoRate(+e.target.value)}>
+            {RATES.map((r) => (
+              <option key={r} value={r}>
+                {r}×
+              </option>
+            ))}
+          </select>
         </div>
       )}
-    </>
+    </div>
   )
 }

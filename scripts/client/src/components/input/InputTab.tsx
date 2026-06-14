@@ -54,46 +54,48 @@ export function InputTab({ active }: { active: boolean }) {
         {p.active && <DrawToolbar />}
       </div>
 
-      <div className="section-label">Sources</div>
-      <div className="controls source-row">
-        <span className={'source-badge' + (p.camEnabled ? ' on' : '')}>camera</span>
-        <label>
-          <input
-            type="checkbox"
-            checked={p.camEnabled}
-            onChange={(e) => (e.target.checked ? void p.enableCam() : void p.disableCam())}
-          />{' '}
-          Use my camera as input
-        </label>
-        <select
-          style={{ flex: '1 1 220px' }}
-          disabled={!p.camEnabled}
-          value={p.deviceId}
-          onChange={(e) => void p.setDevice(e.target.value)}
-        >
-          {p.devices.length === 0 ? (
-            <option value="">— pick a camera —</option>
-          ) : (
-            <option value="">Default camera</option>
-          )}
-          {p.devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId}>
-              {d.label}
-            </option>
-          ))}
-        </select>
-        <label>
-          <input
-            type="checkbox"
-            checked={p.mirror}
-            disabled={!p.camEnabled}
-            onChange={(e) => p.setMirror(e.target.checked)}
-          />{' '}
-          Mirror input
-        </label>
-        <span className="dim">{roleLabel}</span>
+      <div className="source-panels">
+        <div className="src-panel">
+          <div className="src-title">Camera</div>
+          <div className="controls src-row">
+            {/* Selecting a camera auto-enables it; "Camera off" disables. */}
+            <select
+              className="device-pick"
+              value={p.camEnabled ? p.deviceId || 'default' : ''}
+              onChange={(e) => {
+                const v = e.target.value
+                if (v === '') {
+                  void p.disableCam()
+                  return
+                }
+                const id = v === 'default' ? '' : v
+                usePipelineStore.setState({ deviceId: id })
+                if (p.camEnabled) void p.setDevice(id)
+                else void p.enableCam()
+              }}
+            >
+              <option value="">Camera off</option>
+              <option value="default">Default camera</option>
+              {p.devices.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+            <label className="dim" title="Mirror the camera (selfie view)">
+              <input
+                type="checkbox"
+                checked={p.mirror}
+                disabled={!p.camEnabled}
+                onChange={(e) => p.setMirror(e.target.checked)}
+              />{' '}
+              Mirror
+            </label>
+          </div>
+          <span className="dim">{roleLabel}</span>
+        </div>
+        <VideoSourceSection />
       </div>
-      <VideoSourceSection />
 
       <CompositeSection />
 

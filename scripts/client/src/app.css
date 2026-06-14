@@ -137,6 +137,24 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 /* saved-prompt picker + player below the prompt input */
 .prompt-player .saved-pick { flex: 1 1 240px; }
 
+/* compact side-by-side input source panels (camera | video) */
+.source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; flex-wrap: wrap; }
+.src-panel {
+  flex: 1 1 0; min-width: 220px; display: flex; flex-direction: column; gap: 6px;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;
+}
+.src-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
+.src-panel .controls { padding: 0; background: transparent; gap: 6px; }
+.src-row { align-items: center; }
+.src-row .icon-btn, .transport .icon-btn { font-size: 15px; }
+.device-pick { flex: 1 1 120px; min-width: 0; }
+.src-panel .file-name { flex: 1 1 60px; max-width: none; }
+.transport { width: 100%; align-items: center; gap: 6px; }
+.transport .seek { flex: 1 1 auto; min-width: 50px; }
+.transport .time-readout { min-width: auto; font-size: 10px; }
+.transport .rate { padding: 3px 4px; }
+.icon-btn.on { background: #1f7a3a; color: #fff; }
+
 /* ── facial-feature builder bar ── */
 #featBar select.feat { max-width: 200px; }
 
