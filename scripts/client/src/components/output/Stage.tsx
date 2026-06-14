@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react'
 import { setRemoteTrackHandler, useSessionStore } from '../../state/sessionStore'
 import { outputVision } from '../../state/runtime'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
+import { RatingOverlay } from './RatingOverlay'
 
 export function Stage() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -32,6 +33,7 @@ export function Stage() {
       <div className="remote-wrap overlay-anchor">
         <video id="v" ref={videoRef} autoPlay playsInline muted />
         <OverlayCanvas source="output" />
+        <RatingOverlay />
       </div>
     </div>
   )
