@@ -273,6 +273,13 @@ function applyHealthBoot(j: Healthz): void {
     useSessionStore.setState({ serverDefaultPrompt: j.prompt })
     if (!usePromptStore.getState().prompt) usePromptStore.setState({ prompt: j.prompt })
   }
+  // Adopt the server's actual seed/steps (0 is valid — guard on type, not falsy).
+  if (typeof j.seed === 'number' && !isFocused('seed')) {
+    usePromptStore.setState({ seed: String(j.seed) })
+  }
+  if (typeof j.steps === 'number' && !isFocused('steps')) {
+    usePromptStore.setState({ steps: String(j.steps) })
+  }
   useSessionStore.setState({ inputRole: j.input_source === 'peer' ? 'peer' : 'server' })
 
   if (j.lip_enabled) {
@@ -331,6 +338,12 @@ function dispatchCtrl(raw: unknown): void {
       break
     case 'promptsChanged':
       void usePromptStore.getState().loadSavedPrompts()
+      break
+    case 'ack':
+      // Silent confirmation of a prompt/seed/steps change — no UI noise.
+      break
+    case 'err':
+      session.logLine('Server rejected ' + m.what)
       break
     case 'unknown':
       session.logLine('server: ' + m.raw)

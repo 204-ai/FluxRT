@@ -196,9 +196,15 @@ export class StreamsBackend implements RailBackend {
   }
 
   async snapshot(type = 'image/png'): Promise<Blob> {
+    // The output <video> has 0x0 dimensions until it presents its first frame —
+    // drawing it then yields a blank blob. Fail loudly so callers (e.g. Comfy
+    // snap → edit) surface "not ready" instead of uploading an empty image.
+    const w = this.previewEl.videoWidth
+    const h = this.previewEl.videoHeight
+    if (!w || !h) throw new Error('output not ready yet — start the stream first')
     const c = document.createElement('canvas')
-    c.width = this.previewEl.videoWidth
-    c.height = this.previewEl.videoHeight
+    c.width = w
+    c.height = h
     c.getContext('2d')!.drawImage(this.previewEl, 0, 0)
     return new Promise((res, rej) =>
       c.toBlob((b) => (b ? res(b) : rej(new Error('snapshot failed'))), type),

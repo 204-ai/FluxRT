@@ -2,13 +2,13 @@
 // drop / paste / click sets OR replaces the image. Sits inline next to the
 // prompt input. The image itself is the dropzone; a 🗑 overlay clears it.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect } from 'react'
 import { useReferenceStore } from '../../state/referenceStore'
+import { useFileDrop } from '../../lib/useFileDrop'
 
 export function ReferencePanel() {
   const r = useReferenceStore()
-  const fileRef = useRef<HTMLInputElement>(null)
-  const [drag, setDrag] = useState(false)
+  const { drag, open, inputProps, dropProps } = useFileDrop((f) => void r.upload(f))
   const hasImg = r.previewShown && !!r.previewUrl
 
   useEffect(() => {
@@ -31,18 +31,8 @@ export function ReferencePanel() {
       <div
         className={'ref-drop' + (drag ? ' drag' : '') + (hasImg ? ' has-img' : '')}
         title={hasImg ? 'Click / drop / paste to replace the reference' : 'Drop / paste an image or click to choose a reference'}
-        onClick={() => fileRef.current?.click()}
-        onDragOver={(e) => {
-          e.preventDefault()
-          if (!drag) setDrag(true)
-        }}
-        onDragLeave={() => setDrag(false)}
-        onDrop={(e) => {
-          e.preventDefault()
-          setDrag(false)
-          const f = e.dataTransfer.files?.[0]
-          if (f) void r.upload(f)
-        }}
+        onClick={open}
+        {...dropProps}
       >
         {hasImg ? (
           <img src={r.previewUrl} alt="reference" />
@@ -63,17 +53,7 @@ export function ReferencePanel() {
           </button>
         )}
       </div>
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        hidden
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          if (f) void r.upload(f)
-          e.target.value = ''
-        }}
-      />
+      <input {...inputProps} accept="image/*" hidden />
     </div>
   )
 }

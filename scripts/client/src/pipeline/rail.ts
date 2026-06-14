@@ -7,7 +7,7 @@ import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
 import type { CompositeOptions, RailBackend, RailBackendKind, TapCallback } from './core/types'
-import type { DrawLayerConfig } from './effects/drawLayer'
+import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
 export interface RailEvents {
@@ -60,6 +60,10 @@ export class Rail {
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
   private composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
+  // Draw ops recorded so a pipeline restart (which rebuilds the draw layer from
+  // scratch) can replay the strokes instead of wiping the user's drawing. Each
+  // stroke is preceded by a 'cfg' marker capturing its color/size at draw time.
+  private drawHistory: Array<StrokeMessage | { type: 'cfg'; patch: Partial<DrawLayerConfig> }> = []
   private tap: { intervalMs: number; cb: TapCallback } | null = null
   private onLog: (m: string) => void
   private onOutputTrack: (track: MediaStreamTrack | null) => void = () => {}
@@ -136,6 +140,16 @@ export class Rail {
       { cameraStream: this.rawStream, videoEl: sources.videoEl },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
+    // Replay any persisted drawing onto the freshly-built draw layer so a
+    // source-set restart doesn't wipe the user's strokes.
+    if (this.drawHistory.length) {
+      for (const m of this.drawHistory) {
+        if (m.type === 'cfg') this.backend.configureEffect('drawLayer', m.patch)
+        else this.backend.effectMessage('drawLayer', m)
+      }
+      // Replay left the layer's config at the last stroke's — restore the live one.
+      this.backend.configureEffect('drawLayer', this.drawConfig)
+    }
     // A (re)start builds a brand-new output track; notify so the session can
     // replaceTrack on its live sender (a restart otherwise strands the peer
     // connection on the old, ended track — frozen remote output).
@@ -223,15 +237,20 @@ export class Rail {
 
   /** Stroke coords are normalized [0..1] relative to the preview element. */
   beginStroke(x: number, y: number): void {
+    // Snapshot the active config so a replay reproduces this stroke's color/size.
+    this.drawHistory.push({ type: 'cfg', patch: { ...this.drawConfig } }, { type: 'begin', x, y })
     this.backend?.effectMessage('drawLayer', { type: 'begin', x, y })
   }
   moveStroke(x: number, y: number): void {
+    this.drawHistory.push({ type: 'move', x, y })
     this.backend?.effectMessage('drawLayer', { type: 'move', x, y })
   }
   endStroke(): void {
+    this.drawHistory.push({ type: 'end' })
     this.backend?.effectMessage('drawLayer', { type: 'end' })
   }
   clearDrawing(): void {
+    this.drawHistory = []
     this.backend?.effectMessage('drawLayer', { type: 'clear' })
   }
 

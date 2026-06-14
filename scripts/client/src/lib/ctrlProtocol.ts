@@ -16,6 +16,8 @@ export type CtrlIn =
   | { kind: 'stateSeed'; value: string }
   | { kind: 'stateSteps'; value: string }
   | { kind: 'promptsChanged' }
+  | { kind: 'ack' }
+  | { kind: 'err'; what: string }
   | { kind: 'unknown'; raw: string }
 
 export function encodeCtrl(msg: CtrlOut): string {
@@ -52,6 +54,10 @@ export function decodeCtrl(raw: string): CtrlIn {
     return { kind: 'stateSteps', value: raw.slice('state:steps:'.length) }
   } else if (raw === 'prompts:changed') {
     return { kind: 'promptsChanged' }
+  } else if (raw.startsWith('ack:')) {
+    return { kind: 'ack' }
+  } else if (raw.startsWith('err:')) {
+    return { kind: 'err', what: raw.slice('err:'.length) }
   }
   return { kind: 'unknown', raw }
 }

@@ -5,7 +5,9 @@ export interface Healthz {
   peers: number
   resolution?: { width: number; height: number }
   prompt?: string
-  input_source?: 'peer' | 'server'
+  seed?: number
+  steps?: number
+  input_source?: 'peer' | 'server' | 'none'
   reference_enabled?: boolean
   reference_set?: boolean
   reference_version?: number

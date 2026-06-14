@@ -77,12 +77,16 @@ export const usePromptStore = create<PromptState>((set, get) => ({
 
   setSeed(v) {
     set({ seed: v })
-    useSessionStore.getState().sendCtrl({ kind: 'seed', value: parseInt(v, 10) || 0 })
+    // Only push a real number — an empty/invalid field shouldn't silently send a
+    // coerced value that diverges from what's shown. The server validates range.
+    const n = parseInt(v, 10)
+    if (!Number.isNaN(n)) useSessionStore.getState().sendCtrl({ kind: 'seed', value: n })
   },
 
   setSteps(v) {
     set({ steps: v })
-    useSessionStore.getState().sendCtrl({ kind: 'steps', value: parseInt(v, 10) || 1 })
+    const n = parseInt(v, 10)
+    if (!Number.isNaN(n)) useSessionStore.getState().sendCtrl({ kind: 'steps', value: n })
   },
 
   applyFeature(key, phrase) {

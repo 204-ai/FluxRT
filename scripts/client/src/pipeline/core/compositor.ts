@@ -15,6 +15,21 @@ const BLEND_OP: Record<BlendMode, GlobalCompositeOperation> = {
   difference: 'difference',
 }
 
+/** Cover-fit (center-crop) destination rect: scale the source up to fill the
+ *  W×H canvas, centered — never stretched, never letterboxed. */
+function coverRect(
+  W: number,
+  H: number,
+  w: number,
+  h: number,
+): { dx: number; dy: number; dw: number; dh: number } {
+  if (w <= 0 || h <= 0) return { dx: 0, dy: 0, dw: W, dh: H }
+  const scale = Math.max(W / w, H / h)
+  const dw = w * scale
+  const dh = h * scale
+  return { dx: (W - dw) / 2, dy: (H - dh) / 2, dw, dh }
+}
+
 function dimsOf(src: Layer): { w: number; h: number } {
   if (typeof VideoFrame !== 'undefined' && src instanceof VideoFrame) {
     return { w: src.displayWidth, h: src.displayHeight }
@@ -62,17 +77,7 @@ export class Compositor {
   private drawCamera(src: Layer, alpha: number, blend: GlobalCompositeOperation): void {
     const { ctx, width: W, height: H } = this
     const { w, h } = dimsOf(src)
-    let dx = 0
-    let dy = 0
-    let dw = W
-    let dh = H
-    if (w > 0 && h > 0) {
-      const scale = Math.max(W / w, H / h)
-      dw = w * scale
-      dh = h * scale
-      dx = (W - dw) / 2
-      dy = (H - dh) / 2
-    }
+    const { dx, dy, dw, dh } = coverRect(W, H, w, h)
     ctx.save()
     ctx.globalAlpha = alpha
     ctx.globalCompositeOperation = blend
@@ -91,17 +96,7 @@ export class Compositor {
   private drawVideo(src: Layer, alpha: number, blend: GlobalCompositeOperation): void {
     const { ctx, width: W, height: H } = this
     const { w, h } = dimsOf(src)
-    let dx = 0
-    let dy = 0
-    let dw = W
-    let dh = H
-    if (w > 0 && h > 0) {
-      const scale = Math.max(W / w, H / h)
-      dw = w * scale
-      dh = h * scale
-      dx = (W - dw) / 2
-      dy = (H - dh) / 2
-    }
+    const { dx, dy, dw, dh } = coverRect(W, H, w, h)
     ctx.save()
     ctx.globalAlpha = alpha
     ctx.globalCompositeOperation = blend

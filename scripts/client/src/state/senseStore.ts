@@ -167,7 +167,10 @@ export const useSenseStore = create<SenseState>((set, get) => ({
       if (get().source === 'input') void inputVision.release('sense')
       else outputVision.stop()
     }
-    set({ source, analysis: null })
+    // The two sources share the module-level compose dedup keys; reset them so
+    // the first compose after a switch isn't suppressed as a stale duplicate.
+    lastComposeKey = ''
+    set({ source, analysis: null, composeKey: '' })
     if (wasEnabled) {
       try {
         await attach(source)
