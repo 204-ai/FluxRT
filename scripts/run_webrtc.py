@@ -66,6 +66,7 @@ sp: Optional[StreamProcessor] = None
 input_tensor = None
 output_tensor = None
 resolution = None
+out_resolution = None
 
 latest_rgb: Optional[np.ndarray] = None
 latest_lock = threading.Lock()
@@ -351,7 +352,8 @@ class FluxRTTrack(VideoStreamTrack):
         self.fps = fps
         self._t0 = time.time()
         self._n = 0
-        h, w = resolution["height"], resolution["width"]
+        # Output frames are at the (possibly upscaled) output resolution.
+        h, w = out_resolution["height"], out_resolution["width"]
         self._blank = np.zeros((h, w, 3), dtype=np.uint8)
 
     async def recv(self) -> av.VideoFrame:
@@ -1046,7 +1048,7 @@ def _perf_metrics() -> dict:
 # Entry point.
 # ──────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    global sp, input_tensor, output_tensor, resolution
+    global sp, input_tensor, output_tensor, resolution, out_resolution
 
     parser = argparse.ArgumentParser(description="FluxRT WebRTC server")
     parser.add_argument("--config", default="configs/stream_processor_config.json")
@@ -1181,7 +1183,14 @@ def main() -> None:
     input_tensor = sp.get_input_tensor()
     output_tensor = sp.get_output_tensor()
     resolution = sp.get_resolution()
-    log.info("Resolution: %dx%d", resolution["width"], resolution["height"])
+    out_resolution = sp.get_out_resolution()
+    log.info(
+        "Resolution: in %dx%d  out %dx%d",
+        resolution["width"],
+        resolution["height"],
+        out_resolution["width"],
+        out_resolution["height"],
+    )
 
     if args.no_server_camera:
         log.info("--no-server-camera: skipping local camera; waiting for peer input.")

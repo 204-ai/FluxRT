@@ -33,6 +33,8 @@ from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.stream_processor.transformer_flux2 import SpatialCache
 from fluxrt.stream_processor.update_controller import UpdateController
 
+from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
+
 import time
 
 prev_time = time.time()
@@ -183,7 +185,7 @@ def retrieve_latents(
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
-        return encoder_output.latent_dist.mode()
+        return encoder_output.latent_dist.sample()
     elif hasattr(encoder_output, "latents"):
         return encoder_output.latents
     else:
@@ -224,6 +226,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         is_distilled: bool = False,
         update_controller: UpdateController = None,
         subprocess_config=None,
+        upscaler_pipeline: FlowUpscalerPipeline | None = None,
     ):
         super().__init__()
 
@@ -237,11 +240,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         self.register_to_config(is_distilled=is_distilled)
 
-        self.vae_scale_factor = (
-            2 ** (len(self.vae.config.block_out_channels) - 1)
-            if getattr(self, "vae", None) is not None
-            else 8
-        )
+        self.vae_scale_factor = 8
         # Flux latents are turned into 2x2 patches and packed. This means the latent width and height has to be divisible
         # by the patch size. So the vae scale factor is multiplied by the patch size to account for this
         self.image_processor = Flux2ImageProcessor(
@@ -256,6 +255,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         self._progress_bar_config = {"disable": True}
         self.subprocess_config = subprocess_config
+        self.upscaler_pipeline = upscaler_pipeline
 
     @staticmethod
     def _get_qwen3_prompt_embeds(
@@ -1075,6 +1075,13 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         latents_bn_std = torch.sqrt(
             self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps
         ).to(latents.device, latents.dtype)
+
+        if self.upscaler_pipeline is not None:
+            latents = self._unpatchify_latents(latents)
+            latents = self.upscaler_pipeline(latents, generator=generator)
+            latents = self._patchify_latents(latents)
+            profile("upscale")
+
         latents = latents * latents_bn_std + latents_bn_mean
         latents = self._unpatchify_latents(latents)
 

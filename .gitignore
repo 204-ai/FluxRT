@@ -11,6 +11,8 @@ RIFE-safetensors/
 LivePortrait/
 LivePortrait-code/
 loras/
+taef2/
+FlowUpscaler/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -219,3 +221,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# npm lockfiles — this project uses yarn only; ignore any stray npm output
+package-lock.json

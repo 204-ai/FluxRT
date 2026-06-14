@@ -38,6 +38,10 @@ from fluxrt.stream_processor.postprocessors import (
     LivePortraitPostProcessor,
 )
 
+from fluxrt.flow_upscaler.upscaler_unet import UpscalerUNet
+from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
+from fluxrt.stream_processor.flux_tiny_vae import DiffusersTAEF2Wrapper
+
 
 class ModelInferenceSubprocess:
     def __init__(
@@ -85,6 +89,7 @@ class ModelInferenceSubprocess:
 
     def init_process_state(self):
         self.device = "cuda"
+        self.dtype = torch.bfloat16
         self.process_state = {
             "prompt": self.config["default_prompt"],
             "steps": self.config["default_steps"],
@@ -102,9 +107,7 @@ class ModelInferenceSubprocess:
         self.transformer = Flux2Transformer2DModel.from_pretrained(
             f"{models_path}/transformer", local_files_only=True, device=device
         ).to(dtype)
-        self.vae = AutoencoderKLFlux2.from_pretrained(
-            f"{models_path}/vae", local_files_only=True, device=device
-        ).to(dtype)
+
         self.text_encoder = Qwen3ForCausalLM.from_pretrained(
             f"{models_path}/text_encoder", local_files_only=True
         ).to(device, dtype)
@@ -118,24 +121,18 @@ class ModelInferenceSubprocess:
             QuantizedFlux2Transformer2DModel,
         )
 
-        device = self.device
-        dtype = torch.bfloat16
-
         models_path = self.config["models_path"]
         int8_models_path = self.config["int8_models_path"]
 
         qtransformer = QuantizedFlux2Transformer2DModel.from_pretrained(
             int8_models_path, local_files_only=True
         )
-        qtransformer.to(device=device, dtype=dtype)
+        qtransformer.to(device=self.device, dtype=self.dtype)
         self.transformer = qtransformer._wrapped
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            f"{models_path}/scheduler", local_files_only=True, device=device
+            f"{models_path}/scheduler", local_files_only=True, device=self.device
         )
-        self.vae = AutoencoderKLFlux2.from_pretrained(
-            f"{models_path}/vae", local_files_only=True, device=device
-        ).to(device, dtype)
 
         config = AutoConfig.from_pretrained(
             f"{int8_models_path}/text_encoder", local_files_only=True
@@ -148,7 +145,7 @@ class ModelInferenceSubprocess:
         state_dict = load_file(f"{int8_models_path}/text_encoder/model.safetensors")
         requantize(text_encoder, state_dict=state_dict, quantization_map=qmap)
         text_encoder.eval()
-        text_encoder.to(device, dtype=dtype)
+        text_encoder.to(self.device, dtype=self.dtype)
         self.text_encoder = text_encoder
 
         self.tokenizer = Qwen2TokenizerFast.from_pretrained(
@@ -160,13 +157,37 @@ class ModelInferenceSubprocess:
         self.interpolation_model.load_state_dict(
             load_file("RIFE-safetensors/flownet.safetensors")
         )
-        self.interpolation_model.to("cuda", dtype=torch.float16)
+        # interpolation model reqires torch.float16, not torch.bfloat16 to avoid pixelation on grid sample layers
+        self.interpolation_model.to(self.device, torch.float16)
         self.interpolation_model.eval()
 
         if self.config.get("enable_int8_quantization", False):
             self.load_quantized_models()
         else:
             self.load_models_without_quantization()
+
+        if self.config.get("enable_flow_upscaler", False):
+            self.upscaler_unet = UpscalerUNet()
+            state_dict = state_dict = load_file(
+                "FlowUpscaler/flow_upscaler.safetensors"
+            )
+            self.upscaler_unet.load_state_dict(state_dict)
+            self.upscaler_unet.to(self.device, self.dtype)
+            self.upscaler_pipe = FlowUpscalerPipeline(
+                self.upscaler_unet, self.scheduler
+            )
+        else:
+            self.upscaler_pipe = None
+
+        if self.config.get("enable_tiny_vae", False):
+            self.vae = DiffusersTAEF2Wrapper(path="taef2/taef2.safetensors").to(
+                self.device, self.dtype
+            )
+        else:
+            models_path = self.config["models_path"]
+            self.vae = AutoencoderKLFlux2.from_pretrained(
+                f"{models_path}/vae", local_files_only=True, device=self.device
+            ).to(self.dtype)
 
         if self.config.get("compile_models", False):
             self.transformer = torch.compile(
@@ -180,7 +201,7 @@ class ModelInferenceSubprocess:
             )
 
         reference_image_seq_len = None
-        if self.config["use_reference_image"]:
+        if self.config.get("use_reference_image", False):
             reference_image_res = self.config["reference_image_resolution"]
             reference_image_seq_len = (reference_image_res["width"] // 16) * (
                 reference_image_res["height"] // 16
@@ -202,6 +223,7 @@ class ModelInferenceSubprocess:
             transformer=self.transformer,
             update_controller=self.update_controller,
             subprocess_config=self.config,
+            upscaler_pipeline=self.upscaler_pipe,
         )
         self.pipe.to(self.device)
 
@@ -227,17 +249,21 @@ class ModelInferenceSubprocess:
         self.update_controller.reset_cache()
 
     def init_shared_tensors(self):
-        h, w = self.resolution["height"], self.resolution["width"]
+        height, width = self.resolution["height"], self.resolution["width"]
+        out_height, out_width = height, width
+
+        if self.config.get("enable_flow_upscaler", False):
+            out_height, out_width = out_height * 2, out_width * 2
 
         self.input_shared_tensor = SharedTensor(
-            (h, w, 3),
+            (height, width, 3),
             name=self.input_shared_tensor_name,
         )
 
         # All interpolated then one original
         output_batch_size = 2**self.interpolation_exp
         self.output_batch_shared_tensor = SharedTensor(
-            (output_batch_size, h, w, 3),
+            (output_batch_size, out_height, out_width, 3),
             name=self.output_batch_shared_tensor_name,
         )
 
