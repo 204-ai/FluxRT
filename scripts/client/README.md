@@ -4,6 +4,22 @@ Rewrite of the browser client (`scripts/webrtc_static/`) as a Vite + React 19 + 
 
 ## Build & serve
 
+After every `git pull`, one command (yarn only):
+
+```sh
+bash scripts/client/setup.sh              # install + vendor + build
+bash scripts/client/setup.sh --no-vendor  # skip MediaPipe vendoring on rebuilds
+```
+
+Equivalent yarn scripts if you're already in `scripts/client`:
+
+```sh
+yarn setup      # install + vendor + build (same as setup.sh)
+yarn rebuild    # install + build, skips vendoring
+```
+
+Or the individual steps:
+
 ```sh
 cd scripts/client
 yarn            # install

@@ -9,7 +9,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "vendor": "node scripts/vendor-models.mjs"
+    "vendor": "node scripts/vendor-models.mjs",
+    "setup": "yarn install && yarn vendor && yarn build",
+    "rebuild": "yarn install && yarn build"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.22-rc.20250304",
