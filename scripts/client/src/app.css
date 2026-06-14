@@ -239,6 +239,7 @@ button.active { background: #1f7a3a; }
 /* compact seed/steps fields in the navbar */
 .nav-field { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #9aa; }
 .nav-field input { width: 56px; padding: 3px 5px; }
+header .icon-btn { font-size: 15px; }
 label { font-size: 12px; color: #aaa; display: flex; align-items: center; gap: 6px; }
 .dim { font-size: 11px; color: #888; }
 

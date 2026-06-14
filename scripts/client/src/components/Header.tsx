@@ -107,24 +107,22 @@ export function Header() {
           onKeyDown={(e) => e.key === 'Enter' && setSteps((e.target as HTMLInputElement).value)}
         />
       </label>
-      <label
-        className="nav-field"
+      <button
+        className={'icon-btn lip' + (lipActive ? ' on' : '')}
+        aria-label="Toggle lipsync"
+        aria-pressed={lipActive}
+        disabled={!lipEnabled || lipBusy}
         title={
           lipEnabled
             ? lipActive
-              ? 'Lipsync ON'
-              : 'Lipsync OFF'
+              ? 'Lipsync ON — click to disable'
+              : 'Lipsync OFF — click to enable'
             : 'Lipsync unavailable (add lip_transfer to config)'
         }
+        onClick={() => void toggleLip(!lipActive)}
       >
-        <input
-          type="checkbox"
-          disabled={!lipEnabled || lipBusy}
-          checked={lipActive}
-          onChange={(e) => void toggleLip(e.target.checked)}
-        />{' '}
-        Lip
-      </label>
+        👄
+      </button>
     </header>
   )
 }
