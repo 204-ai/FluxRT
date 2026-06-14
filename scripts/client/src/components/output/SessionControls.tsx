@@ -5,11 +5,6 @@ import { usePromptStore } from '../../state/promptStore'
 import { registerFocusable } from '../../state/focusRegistry'
 
 export function SessionControls() {
-  const status = useSessionStore((s) => s.status)
-  const starting = useSessionStore((s) => s.starting)
-  const connected = useSessionStore((s) => s.connected)
-  const start = useSessionStore((s) => s.start)
-  const stop = useSessionStore((s) => s.stop)
   const showInputPreview = usePipelineStore((s) => s.showInputPreview)
   const pipelineActive = usePipelineStore((s) => s.active)
   const setShowInputPreview = usePipelineStore((s) => s.setShowInputPreview)
@@ -35,16 +30,8 @@ export function SessionControls() {
     return () => window.removeEventListener('beforeunload', onUnload)
   }, [])
 
-  const canStart = !starting && !connected && status !== 'connecting...'
-
   return (
     <div className="controls">
-      <button disabled={!canStart} onClick={() => void start()}>
-        Start
-      </button>
-      <button disabled={!connected} onClick={() => stop()}>
-        Stop
-      </button>
       <label>
         seed{' '}
         <input
