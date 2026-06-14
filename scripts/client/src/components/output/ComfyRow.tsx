@@ -23,14 +23,22 @@ export function ComfyRow() {
           )}
         </select>
         <button
+          className="icon-btn"
           disabled={r.comfyBusy || noServers}
           title="Snap the input frame, run Qwen-Image-Edit on it, use as reference"
+          aria-label="Snap and Qwen-edit"
           onClick={() => void r.doComfyEdit()}
         >
-          📸 Snap → Qwen edit
+          📸
         </button>
-        <button disabled={r.comfyBusy || noServers} onClick={() => void r.doComfyPull()}>
-          Pull latest output → reference
+        <button
+          className="icon-btn"
+          disabled={r.comfyBusy || noServers}
+          title="Pull latest ComfyUI output as reference"
+          aria-label="Pull latest output as reference"
+          onClick={() => void r.doComfyPull()}
+        >
+          ⬇
         </button>
         {r.comfyBusy && <span className="spinner" />}
         <span className="dim">{r.comfyStatus}</span>

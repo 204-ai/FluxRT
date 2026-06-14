@@ -1,12 +1,12 @@
-// Reference image: drop-zone (click / drag / global paste), preview, clear.
+// Reference image — minimal: a shared drop/upload zone (click / drag / global
+// paste), a small preview, and an icon-only clear button.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect } from 'react'
 import { useReferenceStore } from '../../state/referenceStore'
+import { DropZone } from '../DropZone'
 
 export function ReferencePanel() {
   const r = useReferenceStore()
-  const fileRef = useRef<HTMLInputElement>(null)
-  const [over, setOver] = useState(false)
 
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
@@ -25,43 +25,16 @@ export function ReferencePanel() {
 
   return (
     <div className={'ref ref-inline' + (r.enabled ? '' : ' disabled')}>
-      <div
-        className={'drop' + (over ? ' over' : '')}
-        style={{ minHeight: 54 }}
-        onClick={() => fileRef.current?.click()}
-        onDragEnter={(e) => {
-          e.preventDefault()
-          setOver(true)
-        }}
-        onDragOver={(e) => {
-          e.preventDefault()
-          setOver(true)
-        }}
-        onDragLeave={(e) => {
-          e.preventDefault()
-          setOver(false)
-        }}
-        onDrop={(e) => {
-          e.preventDefault()
-          setOver(false)
-          if (e.dataTransfer.files.length) void r.upload(e.dataTransfer.files[0])
-        }}
-      >
-        {r.dropHint}
-      </div>
-      <input
-        ref={fileRef}
-        type="file"
+      <DropZone
         accept="image/*"
-        hidden
-        onChange={(e) => {
-          if (e.target.files?.length) void r.upload(e.target.files[0])
-          e.target.value = ''
-        }}
+        label={r.dropHint}
+        onFile={(f) => void r.upload(f)}
+        title="Drop / paste an image or click to choose a reference"
       />
       {r.previewShown && r.previewUrl && <img className="preview shown" src={r.previewUrl} alt="reference preview" />}
-      <div className="meta">{r.meta}</div>
-      <button onClick={() => void r.clear()}>Clear</button>
+      <button className="icon-btn" title="Clear reference image" aria-label="Clear reference image" onClick={() => void r.clear()}>
+        🗑
+      </button>
     </div>
   )
 }

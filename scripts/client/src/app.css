@@ -172,14 +172,14 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .transport .rate { padding: 3px 4px; }
 .icon-btn.on { background: #1f7a3a; color: #fff; }
 
-/* minimal video drop / upload zone */
-.video-drop {
+/* minimal drop / upload zone (shared: video source + reference image) */
+.drop-zone {
   flex: 1 1 auto; min-width: 0; padding: 6px 8px; border: 1px dashed #3a3a3a; border-radius: 4px;
   background: #161616; color: #888; font-size: 12px; text-align: center; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.video-drop:hover { border-color: #2a6cd4; color: #aaa; }
-.video-drop.drag { border-color: #2a6cd4; background: #1a2433; color: #cde; }
+.drop-zone:hover { border-color: #2a6cd4; color: #aaa; }
+.drop-zone.drag { border-color: #2a6cd4; background: #1a2433; color: #cde; }
 
 /* ── facial-feature builder bar ── */
 #featBar { flex-wrap: nowrap; }
