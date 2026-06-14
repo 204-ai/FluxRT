@@ -10,6 +10,7 @@ import {
   type FeatureState,
 } from '../lib/features'
 import { deletePrompt, getSavedPrompts, savePrompt, type SavedPrompt } from '../lib/api'
+import { parsePromptsFile } from '../lib/promptsFile'
 import { useSessionStore } from './sessionStore'
 
 interface PromptState {
@@ -35,6 +36,7 @@ interface PromptState {
   resetFeatures(): void
   setRating(axis: 'style' | 'tracking' | 'stability', v: number): void
   loadSavedPrompts(): Promise<void>
+  loadPromptsFromFile(file: File): Promise<void>
   applySaved(i: number): void
   shuffleSelect(): void
   saveCurrent(): Promise<void>
@@ -127,6 +129,27 @@ export const usePromptStore = create<PromptState>((set, get) => ({
     } catch (e) {
       useSessionStore.getState().logLine('Saved prompts load error: ' + e)
     }
+  },
+
+  async loadPromptsFromFile(file) {
+    let parsed: SavedPrompt[]
+    try {
+      parsed = parsePromptsFile(await file.text())
+    } catch (e) {
+      set({ savedStatus: 'file read error: ' + (e instanceof Error ? e.message : e) })
+      return
+    }
+    if (!parsed.length) {
+      set({ savedStatus: 'no prompts found in file' })
+      return
+    }
+    // The file defines the current selection — replace the dropdown list with
+    // exactly the file's prompts. Not merged with the server's saved prompts
+    // and not persisted; a page reload (or save/delete, which refetch) restores
+    // the server list. Re-base the autoloop so play/shuffle start from the head.
+    loopIdx = -1
+    set({ savedPrompts: parsed, savedStatus: `loaded ${parsed.length} from ${file.name}` })
+    useSessionStore.getState().logLine(`Loaded ${parsed.length} prompts from ${file.name}`)
   },
 
   applySaved(i) {
