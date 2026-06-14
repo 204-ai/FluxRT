@@ -6,6 +6,7 @@
 import { useSenseStore, type SenseOverlay } from '../../state/senseStore'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { InfoPanel } from './InfoPanel'
+import { MarkerStyle } from './MarkerStyle'
 
 const LANDMARKS: Array<[number, string]> = [
   [15, 'Left wrist'],
@@ -80,40 +81,7 @@ export function SensePanel() {
             ))}
           </select>
         </label>
-        <label>
-          color <input type="color" value={p.markerColor} onChange={(e) => p.setMarkerColor(e.target.value)} />
-        </label>
-        <label>
-          size{' '}
-          <input
-            type="range"
-            min={6}
-            max={120}
-            step={1}
-            value={p.markerSize}
-            onChange={(e) => p.setMarkerSize(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.markerSize}px
-        </span>
-        <label>
-          <input type="checkbox" checked={p.markerTrail} onChange={(e) => p.setMarkerTrail(e.target.checked)} /> Trail
-        </label>
-        <label>
-          length{' '}
-          <input
-            type="range"
-            min={4}
-            max={80}
-            step={1}
-            value={p.markerTrailLen}
-            onChange={(e) => p.setMarkerTrailLen(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.markerTrailLen}
-        </span>
+        <MarkerStyle />
         <span className="dim">{p.poseStatus}</span>
       </div>
     </section>

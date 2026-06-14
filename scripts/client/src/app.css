@@ -240,6 +240,17 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .metrics-overlay .meter { display: flex; align-items: center; gap: 4px; }
 .metrics-overlay .meter-track { flex: 1 1 auto; height: 4px; }
 
+/* hand-marker style popover (collapsible, next to the landmark selector) */
+.marker-style { position: relative; display: inline-flex; }
+.marker-style .icon-btn { font-size: 14px; }
+.marker-style-pop {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 6;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px; white-space: nowrap;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
+}
+.marker-style-pop label { display: flex; align-items: center; gap: 6px; }
+.marker-style-pop input[type=range] { width: 100px; }
+
 /* ── facial-feature builder bar ── */
 #featBar { flex-wrap: nowrap; }
 #featBar select.feat { flex: 1 1 0; min-width: 0; max-width: 200px; }
