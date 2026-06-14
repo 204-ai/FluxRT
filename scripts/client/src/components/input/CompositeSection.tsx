@@ -1,8 +1,9 @@
 // Two-layer compositing controls — shown only when camera + video are both
-// live. Changes apply live (no pipeline restart).
+// live. Compositing always applies (camera over video); only opacity + blend
+// are adjustable. Changes apply live (no pipeline restart).
 
 import { usePipelineStore } from '../../state/pipelineStore'
-import type { BlendMode, LayerOrder } from '../../pipeline/core/types'
+import type { BlendMode } from '../../pipeline/core/types'
 
 const BLENDS: BlendMode[] = ['normal', 'screen', 'multiply', 'difference']
 
@@ -14,16 +15,6 @@ export function CompositeSection() {
     <>
       <div className="section-label">Compositing</div>
       <div className="controls composite-controls">
-        <label>
-          layers{' '}
-          <select
-            value={p.compositeOrder}
-            onChange={(e) => p.setCompositeOrder(e.target.value as LayerOrder)}
-          >
-            <option value="camera-over">camera over video</option>
-            <option value="video-over">video over camera</option>
-          </select>
-        </label>
         <label>
           opacity{' '}
           <input
