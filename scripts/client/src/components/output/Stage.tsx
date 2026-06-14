@@ -9,6 +9,12 @@ import { RatingOverlay } from './RatingOverlay'
 export function Stage() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const logLine = useSessionStore((s) => s.logLine)
+  const connected = useSessionStore((s) => s.connected)
+  const starting = useSessionStore((s) => s.starting)
+  const status = useSessionStore((s) => s.status)
+  const start = useSessionStore((s) => s.start)
+  const stop = useSessionStore((s) => s.stop)
+  const canStart = !starting && !connected && status !== 'connecting...'
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
 
   useEffect(() => {
@@ -46,6 +52,26 @@ export function Stage() {
         <video id="v" ref={videoRef} autoPlay playsInline muted />
         <OverlayCanvas source="output" />
         <RatingOverlay />
+        {connected ? (
+          <button
+            className="play-overlay pause"
+            title="Stop stream"
+            aria-label="Stop stream"
+            onClick={() => stop()}
+          >
+            ⏸
+          </button>
+        ) : (
+          <button
+            className="play-overlay"
+            title="Start stream"
+            aria-label="Start stream"
+            disabled={!canStart}
+            onClick={() => void start()}
+          >
+            ▶
+          </button>
+        )}
         {dims && (
           <div className="res-badge" title="Output resolution">
             {dims.w}×{dims.h}
