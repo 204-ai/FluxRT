@@ -54,7 +54,9 @@ export function SensePanel() {
         <span className="dim">{status}</span>
       </div>
       {enabled && <ComposeControls />}
-      {enabled && <InfoPanel analysis={analysis} />}
+      {/* In overlay/only mode the metrics show as a dense overlay over the
+          preview (see MetricsOverlay); only show them in-panel when hidden. */}
+      {enabled && overlay === 'off' && <InfoPanel analysis={analysis} />}
 
       <div className="section-label">Hand marker</div>
       <div className="controls">

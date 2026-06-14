@@ -10,6 +10,7 @@ import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
 import { SensePanel } from '../sense/SensePanel'
+import { MetricsOverlay } from '../sense/MetricsOverlay'
 import { useSenseStore } from '../../state/senseStore'
 
 export function InputTab({ active }: { active: boolean }) {
@@ -47,6 +48,7 @@ export function InputTab({ active }: { active: boolean }) {
         <CanvasHost holds={p.active} />
         {p.active && senseOverlay !== 'off' && <OverlayCanvas source="input" />}
         {p.active && <DrawToolbar />}
+        {p.active && senseEnabled && senseOverlay !== 'off' && <MetricsOverlay />}
       </div>
 
       <div className="source-panels">
