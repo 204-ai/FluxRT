@@ -1,5 +1,5 @@
-// Input tab: sources (camera + video file), compositing, input preview +
-// draw, hand marker.
+// Input tab: sources (camera + video file), compositing, input preview + draw.
+// (Hand marker + human sensing live together in the Human-sensing panel.)
 
 import { useEffect } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
@@ -9,16 +9,6 @@ import { CompositeSection } from './CompositeSection'
 import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
-
-const LANDMARKS: Array<[number, string]> = [
-  [15, 'Left wrist'],
-  [16, 'Right wrist'],
-  [19, 'Left index'],
-  [20, 'Right index'],
-  [0, 'Nose'],
-  [11, 'Left shoulder'],
-  [12, 'Right shoulder'],
-]
 
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
@@ -98,64 +88,6 @@ export function InputTab({ active }: { active: boolean }) {
       </div>
 
       <CompositeSection />
-
-      <div className="section-label">Hand marker</div>
-      <div className="controls">
-        <label>
-          <input
-            type="checkbox"
-            checked={p.markerEnabled}
-            disabled={!p.active}
-            onChange={(e) => void p.setMarkerEnabled(e.target.checked)}
-          />{' '}
-          Enable
-        </label>
-        <label>
-          landmark{' '}
-          <select value={p.markerLandmark} onChange={(e) => p.setMarkerLandmark(+e.target.value)}>
-            {LANDMARKS.map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          color <input type="color" value={p.markerColor} onChange={(e) => p.setMarkerColor(e.target.value)} />
-        </label>
-        <label>
-          size{' '}
-          <input
-            type="range"
-            min={6}
-            max={120}
-            step={1}
-            value={p.markerSize}
-            onChange={(e) => p.setMarkerSize(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.markerSize}px
-        </span>
-        <label>
-          <input type="checkbox" checked={p.markerTrail} onChange={(e) => p.setMarkerTrail(e.target.checked)} /> Trail
-        </label>
-        <label>
-          length{' '}
-          <input
-            type="range"
-            min={4}
-            max={80}
-            step={1}
-            value={p.markerTrailLen}
-            onChange={(e) => p.setMarkerTrailLen(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.markerTrailLen}
-        </span>
-        <span className="dim">{p.poseStatus}</span>
-      </div>
     </section>
   )
 }
