@@ -130,6 +130,24 @@ export class StreamsBackend implements RailBackend {
     this.worker?.postMessage({ type: 'tap', intervalMs: cb ? intervalMs : 0 })
   }
 
+  swapVideo(videoEl: HTMLVideoElement): void {
+    if (!this.worker) return
+    // The element's previous captured track ended when its src changed; capture
+    // its NEW video track and hand a fresh readable to the worker. The output
+    // generator/track is left untouched, so the WebRTC stream keeps flowing.
+    const stream = videoEl.captureStream()
+    this.capturedStream = stream
+    const [track] = stream.getVideoTracks()
+    if (!track) {
+      this.onLog('swapVideo: no video track after re-capture')
+      return
+    }
+    const readable = new MediaStreamTrackProcessor({ track }).readable
+    this.worker.postMessage({ type: 'swap-video', video: readable }, [
+      readable as unknown as Transferable,
+    ])
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     const c = document.createElement('canvas')
     c.width = this.previewEl.videoWidth

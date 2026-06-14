@@ -115,6 +115,12 @@ export class Rail {
     return { label }
   }
 
+  /** Hot-swap the video-file source in place (no restart): re-feed the worker
+   *  the element's new track while keeping the output stream/track alive. */
+  swapVideoSource(videoEl: HTMLVideoElement): void {
+    this.backend?.swapVideo(videoEl)
+  }
+
   stop(): void {
     this.backend?.stop()
     this.backend = null

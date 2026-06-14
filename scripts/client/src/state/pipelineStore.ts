@@ -259,6 +259,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
           const meta = await videoSource.swapSource(file)
           videoSource.setLoop(videoLoop)
           videoSource.setRate(videoRate)
+          // Re-feed the running pipeline the element's NEW captured track so the
+          // output (and WebRTC) keep flowing; the old track ended on the src swap.
+          rail.swapVideoSource(videoSource.el)
           // Listeners stay bound to the same element across the swap.
           set({
             videoName: file.name,

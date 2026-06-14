@@ -86,5 +86,9 @@ export interface RailBackend {
   busPush(key: string, value: unknown): void
   /** Sample source frames at most every `intervalMs`; null disables the tap. */
   setTap(intervalMs: number, cb: TapCallback | null): void
+  /** Hot-swap the video-file input in place — re-feed the element's
+   *  (re-captured) video track WITHOUT recreating the output track, so the
+   *  WebRTC stream keeps flowing. */
+  swapVideo(videoEl: HTMLVideoElement): void
   snapshot(type?: string): Promise<Blob>
 }

@@ -34,6 +34,7 @@ type InMsg =
   | { type: 'bus'; key: string; value: unknown }
   | { type: 'tap'; intervalMs: number }
   | { type: 'stop' }
+  | { type: 'swap-video'; video: ReadableStream<VideoFrame> }
 
 let compositor: Compositor | null = null
 let running = false
@@ -41,6 +42,7 @@ let tapIntervalMs = 0
 let lastTapMs = 0
 let openFrames = 0
 let wake: (() => void) | null = null
+let requestVideoSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
 
 function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
@@ -98,8 +100,35 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
 
   // Base layer drives the loop cadence and the vision tap.
   const baseIsCamera = camera !== null
-  const base = startValve(baseIsCamera ? camera! : video!)
-  const overlay = camera && video ? startValve(video) : null
+  let base = startValve(baseIsCamera ? camera! : video!)
+  let overlay = camera && video ? startValve(video) : null
+
+  // Hot-swap the video-file input without restarting: cancel the old video
+  // valve and start a fresh one on the re-captured readable. The video is the
+  // `base` valve when there's no camera, otherwise the `overlay`.
+  requestVideoSwap = (readable) => {
+    if (!running) {
+      void readable.cancel().catch(() => {})
+      return
+    }
+    const videoIsBase = !baseIsCamera
+    const oldValve = videoIsBase ? base : overlay
+    if (oldValve) {
+      try {
+        void oldValve.reader.cancel()
+      } catch {
+        /* already done */
+      }
+      if (oldValve.pending) {
+        oldValve.pending.close()
+        openFrames--
+        oldValve.pending = null
+      }
+    }
+    const fresh = startValve(readable)
+    if (videoIsBase) base = fresh
+    else overlay = fresh
+  }
   // Steady-state holds one extra open frame for the retained overlay.
   const leakThreshold = 4 + (overlay ? 1 : 0)
   let retainedOverlay: VideoFrame | null = null
@@ -155,6 +184,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       if (openFrames > leakThreshold) post({ type: 'leak', open: openFrames })
     }
   } finally {
+    requestVideoSwap = null
     for (const v of [base, overlay]) {
       if (!v) continue
       try {
@@ -203,6 +233,9 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
     case 'stop':
       running = false
       wake?.()
+      break
+    case 'swap-video':
+      requestVideoSwap?.(m.video)
       break
   }
 }

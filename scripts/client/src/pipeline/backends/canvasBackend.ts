@@ -139,6 +139,12 @@ export class CanvasBackend implements RailBackend {
     this.tapCb = cb
   }
 
+  swapVideo(videoEl: HTMLVideoElement): void {
+    // The same element is redrawn every frame, so a new src is picked up
+    // automatically — just keep the reference current.
+    this.fileVideo = videoEl
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     return new Promise((res, rej) =>
       this.previewEl.toBlob((b) => (b ? res(b) : rej(new Error('snapshot failed'))), type),

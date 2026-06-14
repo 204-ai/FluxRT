@@ -100,7 +100,9 @@ export class VideoFileSource {
 
     // New clip is decoding; now safe to free the old blob URL.
     if (prevUrl) URL.revokeObjectURL(prevUrl)
-    void this.el.play().catch(() => {})
+    // Await play so the element is producing frames before the rail re-captures
+    // its (new) track — a stalled track would yield no frames to swap in.
+    await this.el.play().catch(() => {})
     return { width: this.el.videoWidth, height: this.el.videoHeight, duration: this.el.duration }
   }
 
