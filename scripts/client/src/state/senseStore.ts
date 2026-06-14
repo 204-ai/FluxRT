@@ -93,7 +93,7 @@ async function attach(source: SenseSource): Promise<void> {
   if (source === 'input') {
     unsubResult = inputVision.subscribe(handleResult)
     unsubStatus = inputVision.onStatus((m) => useSenseStore.setState({ status: m }))
-    await inputVision.acquire('sense', { face: true, pose: true })
+    await inputVision.acquire('sense', { face: true, pose: true, segment: false })
   } else {
     unsubResult = outputVision.subscribe(handleResult)
     unsubStatus = outputVision.onStatus((m) => useSenseStore.setState({ status: m }))

@@ -9,6 +9,7 @@ import { CanvasBackend } from './backends/canvasBackend'
 import type { CompositeOptions, RailBackend, RailBackendKind, TapCallback } from './core/types'
 import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
+import type { BackgroundConfig } from './effects/backgroundRemoval'
 
 export interface RailEvents {
   onLog?: (msg: string) => void
@@ -59,6 +60,7 @@ export class Rail {
   private mirrored = false
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
+  private bgConfig: Partial<BackgroundConfig> = {}
   private composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
   // Draw ops recorded so a pipeline restart (which rebuilds the draw layer from
   // scratch) can replay the strokes instead of wiping the user's drawing. Each
@@ -136,6 +138,9 @@ export class Rail {
         mirrored: this.mirrored,
         composite: { ...this.composite },
         effects: [
+          // Background removal first — marker + drawing render over the
+          // replaced background, not the original one.
+          { name: 'backgroundRemoval', config: this.bgConfig },
           { name: 'marker', config: this.markerConfig },
           { name: 'drawLayer', config: this.drawConfig },
         ],
@@ -236,6 +241,11 @@ export class Rail {
   configureDraw(patch: Partial<DrawLayerConfig>): void {
     Object.assign(this.drawConfig, patch)
     this.backend?.configureEffect('drawLayer', patch)
+  }
+
+  configureBackground(patch: Partial<BackgroundConfig>): void {
+    Object.assign(this.bgConfig, patch)
+    this.backend?.configureEffect('backgroundRemoval', patch)
   }
 
   /** Stroke coords are normalized [0..1] relative to the preview element. */

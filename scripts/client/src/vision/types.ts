@@ -63,10 +63,23 @@ export interface HumanAnalysis {
   inferenceMs: number
 }
 
+/**
+ * Single-channel foreground matte from the image segmenter. Per-pixel
+ * confidence (0..255, 255 = foreground), row-major, length = width*height.
+ * A plain typed array (not an ImageBitmap) so it crosses the worker/bus
+ * boundary by cheap structured-clone with no GPU-resource lifecycle to leak.
+ */
+export interface SegmentationMask {
+  data: Uint8Array
+  width: number
+  height: number
+}
+
 /** Result payload posted from the vision worker per processed frame. */
 export interface VisionResult {
   analysis: HumanAnalysis
   faceLandmarks: Landmark[][]
   poseLandmarks: Landmark[][]
+  segmentation: SegmentationMask | null
   tsMs: number
 }

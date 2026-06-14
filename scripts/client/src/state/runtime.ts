@@ -21,18 +21,21 @@ export const rail = new Rail({ onLog: (m) => rtLog(m) })
 /** File-backed <video> input layer — outlives rail restarts. */
 export const videoSource = new VideoFileSource()
 
-export type VisionConsumer = 'marker' | 'sense'
+export type VisionConsumer = 'marker' | 'sense' | 'bgremove'
+
+type VisionCaps = { face: boolean; pose: boolean; segment: boolean }
 
 /**
- * Shares one vision worker between the hand-marker (pose only) and the Sense
- * panel (face+pose) on the input rail. Reinitializes the worker when the
- * required capability set grows/shrinks; forwards pose results into the rail
- * bus so the marker effect can read them at render time.
+ * Shares one vision worker between the hand-marker (pose only), the Sense
+ * panel (face+pose), and background removal (segmentation) on the input rail.
+ * Reinitializes the worker when the required capability set grows/shrinks;
+ * forwards pose + segmentation results into the rail bus so the marker and
+ * background effects can read them at render time.
  */
 class InputVisionManager {
   private client: VisionClient | null = null
-  private caps = { face: false, pose: false }
-  private consumers = new Map<VisionConsumer, { face: boolean; pose: boolean }>()
+  private caps: VisionCaps = { face: false, pose: false, segment: false }
+  private consumers = new Map<VisionConsumer, VisionCaps>()
   private listeners = new Set<(r: VisionResult) => void>()
   private statusListeners = new Set<(msg: string) => void>()
   private starting: Promise<void> | null = null
@@ -47,7 +50,7 @@ class InputVisionManager {
     return () => this.statusListeners.delete(l)
   }
 
-  async acquire(consumer: VisionConsumer, caps: { face: boolean; pose: boolean }): Promise<void> {
+  async acquire(consumer: VisionConsumer, caps: VisionCaps): Promise<void> {
     this.consumers.set(consumer, caps)
     await this.reconcile()
   }
@@ -57,15 +60,17 @@ class InputVisionManager {
     await this.reconcile()
   }
 
-  private wanted(): { face: boolean; pose: boolean } | null {
+  private wanted(): VisionCaps | null {
     if (this.consumers.size === 0) return null
     let face = false
     let pose = false
+    let segment = false
     for (const c of this.consumers.values()) {
       face = face || c.face
       pose = pose || c.pose
+      segment = segment || c.segment
     }
-    return { face, pose }
+    return { face, pose, segment }
   }
 
   private async reconcile(): Promise<void> {
@@ -79,7 +84,13 @@ class InputVisionManager {
     // rebuild to ADD a capability, never to drop one. Tearing down on a shrink
     // would kill the worker a still-active consumer depends on (e.g. releasing
     // 'sense' must not stall the 'marker' that still needs pose).
-    if (this.client && (!want.face || this.caps.face) && (!want.pose || this.caps.pose)) return
+    if (
+      this.client &&
+      (!want.face || this.caps.face) &&
+      (!want.pose || this.caps.pose) &&
+      (!want.segment || this.caps.segment)
+    )
+      return
     this.teardown()
     const client = new VisionClient()
     this.client = client
@@ -87,6 +98,7 @@ class InputVisionManager {
     client.onStatus((m) => this.statusListeners.forEach((l) => l(m)))
     client.subscribe((r) => {
       if (r.poseLandmarks.length) rail.busPush('pose', { landmarks: r.poseLandmarks[0] })
+      if (r.segmentation) rail.busPush('segmentation', r.segmentation)
       this.listeners.forEach((l) => l(r))
     })
     this.starting = client.init(want)
@@ -110,7 +122,7 @@ class InputVisionManager {
     rail.setTap(0, null)
     this.client?.dispose()
     this.client = null
-    this.caps = { face: false, pose: false }
+    this.caps = { face: false, pose: false, segment: false }
   }
 }
 
@@ -149,7 +161,7 @@ class OutputVisionManager {
     client.onStatus((m) => this.statusListeners.forEach((l) => l(m)))
     client.subscribe((r) => this.listeners.forEach((l) => l(r)))
     try {
-      await client.init({ face: true, pose: true })
+      await client.init({ face: true, pose: true, segment: false })
     } catch (e) {
       // Init failed — clear the slot and drop the worker so a later start()
       // retries instead of early-returning on a permanently-dead client.

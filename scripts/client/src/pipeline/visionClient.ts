@@ -15,7 +15,7 @@ export class VisionClient {
   private ready = false
   private disposed = false
 
-  async init(opts: { face: boolean; pose: boolean }): Promise<void> {
+  async init(opts: { face: boolean; pose: boolean; segment: boolean }): Promise<void> {
     const config: EngineConfig = { ...DEFAULT_ENGINE_PATHS, ...opts }
     this.worker = new Worker(new URL('./workers/vision.worker.ts', import.meta.url), {
       type: 'module',

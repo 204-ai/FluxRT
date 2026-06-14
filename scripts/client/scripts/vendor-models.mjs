@@ -18,6 +18,10 @@ const MODELS = {
     'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
   'pose_landmarker_lite.task':
     'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  // Binary selfie segmentation (256x256) — one foreground-confidence mask.
+  // Drives the background-removal effect.
+  'selfie_segmenter.tflite':
+    'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite',
 }
 
 await mkdir(wasmDst, { recursive: true })

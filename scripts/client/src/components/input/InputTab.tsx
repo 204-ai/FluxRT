@@ -7,6 +7,7 @@ import { useSessionStore } from '../../state/sessionStore'
 import { CanvasHost } from './CanvasHost'
 import { CompositeSection } from './CompositeSection'
 import { VideoSourceSection } from './VideoSourceSection'
+import { BackgroundSection } from './BackgroundSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
 import { SensePanel } from '../sense/SensePanel'
@@ -93,6 +94,7 @@ export function InputTab({ active }: { active: boolean }) {
         </div>
         <CompositeSection />
         <VideoSourceSection />
+        <BackgroundSection />
       </div>
 
       <SensePanel />

@@ -8,22 +8,26 @@ import {
   FilesetResolver,
   FaceLandmarker,
   PoseLandmarker,
+  ImageSegmenter,
 } from '@mediapipe/tasks-vision'
 import { analyze, MovementTracker } from './analyze'
-import type { VisionResult } from './types'
+import type { SegmentationMask, VisionResult } from './types'
 
 export interface EngineConfig {
   wasmBase: string
   faceModel: string
   poseModel: string
+  segmentModel: string
   face: boolean
   pose: boolean
+  segment: boolean
 }
 
 export const DEFAULT_ENGINE_PATHS = {
   wasmBase: '/mediapipe/wasm',
   faceModel: '/mediapipe/models/face_landmarker.task',
   poseModel: '/mediapipe/models/pose_landmarker_lite.task',
+  segmentModel: '/mediapipe/models/selfie_segmenter.tflite',
 }
 
 /**
@@ -61,6 +65,7 @@ async function ensureWasmGlue(wasmBase: string): Promise<void> {
 export class VisionEngine {
   private face: FaceLandmarker | null = null
   private pose: PoseLandmarker | null = null
+  private seg: ImageSegmenter | null = null
   private tracker = new MovementTracker()
   private fpsWindow: number[] = []
   private lastTs = 0
@@ -90,6 +95,16 @@ export class VisionEngine {
         numPoses: 1,
       })
     }
+    if (cfg.segment) {
+      onStatus('loading image segmenter…')
+      await ensureWasmGlue(cfg.wasmBase)
+      this.seg = await ImageSegmenter.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: cfg.segmentModel, delegate: 'GPU' },
+        runningMode: 'VIDEO',
+        outputConfidenceMasks: true,
+        outputCategoryMask: false,
+      })
+    }
     onStatus('')
   }
 
@@ -101,6 +116,7 @@ export class VisionEngine {
     const t0 = performance.now()
     const faceResult = this.face ? this.face.detectForVideo(input, tsMs) : null
     const poseResult = this.pose ? this.pose.detectForVideo(input, tsMs) : null
+    const segmentation = this.seg ? this.runSegment(input, tsMs) : null
     const inferenceMs = performance.now() - t0
 
     const now = performance.now()
@@ -111,14 +127,35 @@ export class VisionEngine {
       analysis: analyze(faceResult, poseResult, this.tracker, this.fpsWindow.length, inferenceMs),
       faceLandmarks: faceResult?.faceLandmarks ?? [],
       poseLandmarks: poseResult?.landmarks ?? [],
+      segmentation,
       tsMs,
+    }
+  }
+
+  /** Copy the foreground-confidence mask into a plain Uint8Array, then close
+   *  the result so the GPU-backed masks are freed every frame (MediaPipe holds
+   *  them until close() — leaking them stalls the GPU). The selfie segmenter
+   *  emits a single confidence mask where higher = more likely foreground. */
+  private runSegment(input: ImageBitmap, tsMs: number): SegmentationMask | null {
+    const res = this.seg!.segmentForVideo(input, tsMs)
+    try {
+      const mask = res.confidenceMasks?.[0]
+      if (!mask) return null
+      const f = mask.getAsFloat32Array()
+      const data = new Uint8Array(f.length)
+      for (let i = 0; i < f.length; i++) data[i] = (f[i] * 255) | 0
+      return { data, width: mask.width, height: mask.height }
+    } finally {
+      res.close()
     }
   }
 
   close(): void {
     this.face?.close()
     this.pose?.close()
+    this.seg?.close()
     this.face = null
     this.pose = null
+    this.seg = null
   }
 }

@@ -6,6 +6,7 @@ import { create } from 'zustand'
 import { inputVision, rail, videoSource } from './runtime'
 import { getHealthz } from '../lib/api'
 import type { BlendMode, LayerOrder } from '../pipeline/core/types'
+import type { BackgroundMode } from '../pipeline/effects/backgroundRemoval'
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
 
@@ -46,6 +47,13 @@ interface PipelineState {
   markerTrailLen: number
   poseStatus: string
 
+  bgEnabled: boolean
+  bgMode: BackgroundMode
+  bgBlur: number
+  bgColor: string
+  bgInvert: boolean
+  bgStatus: string
+
   log: (msg: string) => void
   setLogger(fn: (msg: string) => void): void
   enableCam(): Promise<void>
@@ -78,6 +86,12 @@ interface PipelineState {
   setMarkerSize(n: number): void
   setMarkerTrail(on: boolean): void
   setMarkerTrailLen(n: number): void
+
+  setBgEnabled(on: boolean): Promise<void>
+  setBgMode(mode: BackgroundMode): void
+  setBgBlur(n: number): void
+  setBgColor(c: string): void
+  setBgInvert(on: boolean): void
 }
 
 function fmtTime(s: number): string {
@@ -99,11 +113,16 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     rail.stop()
     if (!get().camEnabled && !get().videoLoaded) {
       get().stopPipeline()
-      // Nothing left to analyze — drop the marker's vision worker.
+      // Nothing left to analyze — drop the vision workers the effects held.
       if (get().markerEnabled) {
         set({ markerEnabled: false, poseStatus: '' })
         rail.configureMarker({ enabled: false })
         void inputVision.release('marker')
+      }
+      if (get().bgEnabled) {
+        set({ bgEnabled: false, bgStatus: '' })
+        rail.configureBackground({ enabled: false })
+        void inputVision.release('bgremove')
       }
       return
     }
@@ -161,6 +180,13 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     markerTrail: false,
     markerTrailLen: 20,
     poseStatus: '',
+
+    bgEnabled: false,
+    bgMode: 'blur',
+    bgBlur: 12,
+    bgColor: '#00ff00',
+    bgInvert: false,
+    bgStatus: '',
 
     log: () => {},
     setLogger(fn) {
@@ -413,7 +439,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       rail.configureMarker({ enabled: on })
       if (on) {
         try {
-          await inputVision.acquire('marker', { face: false, pose: true })
+          await inputVision.acquire('marker', { face: false, pose: true, segment: false })
           set({ poseStatus: 'marker: ON' })
         } catch {
           set({ poseStatus: 'pose load error', markerEnabled: false })
@@ -442,6 +468,38 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     setMarkerTrailLen(n) {
       set({ markerTrailLen: n })
       rail.configureMarker({ trailLen: n })
+    },
+
+    async setBgEnabled(on) {
+      set({ bgEnabled: on, bgStatus: on ? 'loading segmenter...' : '' })
+      rail.configureBackground({ enabled: on })
+      if (on) {
+        try {
+          await inputVision.acquire('bgremove', { face: false, pose: false, segment: true })
+          set({ bgStatus: 'background: ON' })
+        } catch {
+          set({ bgStatus: 'segmenter load error', bgEnabled: false })
+          rail.configureBackground({ enabled: false })
+        }
+      } else {
+        void inputVision.release('bgremove')
+      }
+    },
+    setBgMode(mode) {
+      set({ bgMode: mode })
+      rail.configureBackground({ mode })
+    },
+    setBgBlur(n) {
+      set({ bgBlur: n })
+      rail.configureBackground({ blur: n })
+    },
+    setBgColor(c) {
+      set({ bgColor: c })
+      rail.configureBackground({ color: c })
+    },
+    setBgInvert(on) {
+      set({ bgInvert: on })
+      rail.configureBackground({ invert: on })
     },
   }
 })
