@@ -13,21 +13,21 @@ export function OutputTab({ active }: { active: boolean }) {
     <section className={'tab-panel' + (active ? ' active' : '')}>
       <Stage />
 
-      {/* Prompt box — everything that builds/sends the prompt. */}
+      {/* Prompt box — prompt input with the reference image inline beside it. */}
       <section className="panel-box">
         <div className="section-label">Prompt</div>
-        <div className="controls">
+        <div className="controls prompt-row">
           <PromptEditor />
+          <ReferencePanel />
         </div>
         <PromptPlayer />
         <FeatureBar />
         {senseEnabled && <ComposeControls />}
       </section>
 
-      {/* Reference image + ComfyUI box. */}
+      {/* ComfyUI box. */}
       <section className="panel-box">
-        <div className="section-label">Reference &amp; ComfyUI</div>
-        <ReferencePanel />
+        <div className="section-label">ComfyUI</div>
         <ComfyRow />
       </section>
     </section>
