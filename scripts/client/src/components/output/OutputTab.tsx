@@ -4,8 +4,11 @@ import { PromptPlayer } from './PromptPlayer'
 import { FeatureBar } from './FeatureBar'
 import { ReferencePanel } from './ReferencePanel'
 import { ComfyRow } from './ComfyRow'
+import { ComposeControls } from '../sense/ComposeControls'
+import { useSenseStore } from '../../state/senseStore'
 
 export function OutputTab({ active }: { active: boolean }) {
+  const senseEnabled = useSenseStore((s) => s.enabled)
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
       <Stage />
@@ -18,6 +21,7 @@ export function OutputTab({ active }: { active: boolean }) {
         </div>
         <PromptPlayer />
         <FeatureBar />
+        {senseEnabled && <ComposeControls />}
       </section>
 
       {/* Reference image + ComfyUI box. */}
