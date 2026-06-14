@@ -8,6 +8,21 @@ from multiprocessing import Process, Value, Manager
 from queue import Empty
 from PIL import Image
 
+# ── torch.compile / Dynamo tuning ─────────────────────────────────────────────
+# The spatial-cache transformer in transformer_flux2.py specializes Dynamo
+# graphs on (a) per-block KV cache indexing (single_block_keys[block_id] for 20
+# distinct block_id values) and (b) sparse_mlp_compute() shapes that change
+# with the per-frame active-token mask. The default recompile_limit (8) gives
+# up partway and falls back to eager mode for the remaining graphs, costing
+# ~10-25% throughput. Raising the limit lets every variant compile, then warm
+# up once and stay hot.
+try:
+    torch._dynamo.config.recompile_limit = 64
+    torch._dynamo.config.cache_size_limit = 256
+except AttributeError:
+    # Older torch builds without _dynamo.config — skip silently; nothing breaks.
+    pass
+
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.models import AutoencoderKLFlux2
 from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM, AutoConfig
@@ -51,10 +66,20 @@ class ModelInferenceSubprocess:
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
 
-        manager = Manager()
-        self.command_queue = manager.Queue()
-        self.shared_state = manager.dict()
+        self._manager = Manager()
+        self.command_queue = self._manager.Queue()
+        self.shared_state = self._manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
+
+    def __getstate__(self):
+        # The subprocess is spawned via Process(target=self.process_main),
+        # which pickles `self`. The SyncManager holds a weakref and is not
+        # picklable, so drop it from the child's state. Only the parent calls
+        # stop(), where _manager still exists; the picklable queue/dict
+        # proxies the child actually uses are kept.
+        state = self.__dict__.copy()
+        state.pop("_manager", None)
+        return state
 
     def enable_quantization(self):
         """
@@ -281,7 +306,25 @@ class ModelInferenceSubprocess:
     def stop(self):
         self.running.value = False
         if self.process:
-            self.process.join()
+            # Graceful first: let process_main observe running=False and exit
+            # its loop. Escalate to terminate/kill if it is wedged in CUDA,
+            # torch.compile, or a blocking call so Ctrl+C never hangs.
+            self.process.join(timeout=5)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=3)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=2)
+            self.process = None
+        # Tear down the Manager process spawned in __init__; otherwise it
+        # lingers as an orphan after the main process exits.
+        if getattr(self, "_manager", None) is not None:
+            try:
+                self._manager.shutdown()
+            except Exception:
+                pass
+            self._manager = None
 
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))

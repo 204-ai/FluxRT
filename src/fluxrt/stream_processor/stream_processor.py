@@ -70,11 +70,19 @@ class StreamProcessor:
         return self.output_shared_tensor
 
     def stop(self) -> None:
-        self.model_inference_subprocess.stop()
-        self.output_scheduler_subprocess.stop()
-        self.input_shared_tensor.close_and_unlink()
-        self.output_shared_tensor.close_and_unlink()
-        self.output_batch_shared_tensor.close_and_unlink()
+        # Run every teardown step even if an earlier one raises, so a single
+        # failure can't leak subprocesses or shared-memory segments.
+        for step in (
+            self.model_inference_subprocess.stop,
+            self.output_scheduler_subprocess.stop,
+            self.input_shared_tensor.close_and_unlink,
+            self.output_shared_tensor.close_and_unlink,
+            self.output_batch_shared_tensor.close_and_unlink,
+        ):
+            try:
+                step()
+            except Exception as exc:
+                print(f"StreamProcessor.stop: {step.__qualname__} failed: {exc}")
 
     def set_prompt(self, prompt: str) -> None:
         self.model_inference_subprocess.set_param(name="prompt", value=prompt)

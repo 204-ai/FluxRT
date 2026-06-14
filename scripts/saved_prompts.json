@@ -1,0 +1,44 @@
+[
+  {
+    "prompt": "person as an ancient Roman mosaic, small tesserae tiles in ochre terracotta and gold, fine grout lines following the contours, weathered stone texture",
+    "style": 5,
+    "tracking": 5,
+    "stability": 5
+  },
+  {
+    "prompt": "person rendered in glowing green phosphor pixels, 1-bit monochrome, visible scanlines sweeping across the body, deep black background, electron beam glow",
+    "style": 5,
+    "tracking": 5,
+    "stability": 5
+  },
+  {
+    "prompt": "person stitched as dense embroidery, raised satin-stitch threads in saturated wool colors following the facial contours, visible linen weave texture",
+    "style": 4,
+    "tracking": 4,
+    "stability": 5
+  },
+  {
+    "prompt": "person as a glowing 3D wireframe mesh, thin cyan polygon edges and sparkling vertex points mapping the face and body, deep black void background",
+    "style": 4,
+    "tracking": 4,
+    "stability": 4
+  },
+  {
+    "prompt": "person as corrupted digital glitch art, RGB channels split and shifted, blocky compression artifacts and scanline tearing following the movement, vivid neon colors",
+    "style": 4,
+    "tracking": 4,
+    "stability": 4
+  },
+  {
+    "prompt": "person as a printed circuit board, glowing gold traces and solder points mapping the facial features, dark green substrate, soft electric shimmer",
+    "style": 4,
+    "tracking": 4,
+    "stability": 4
+  },
+  {
+    "prompt": "person as glowing green phosphor wireframe, 1-bit monochrome pixels, scanlines following the contours of the face and body, pure black void background",
+    "style": 4,
+    "tracking": 4,
+    "stability": 4
+  }
+]

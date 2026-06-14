@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FluxRT — WebRTC</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>FluxRT WebRTC</h1>
+    <span id="status">idle</span>
+    <span id="fpsBar">measuring…</span>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="input">Input</button>
+    <button class="tab-btn" data-tab="output">Output</button>
+  </nav>
+
+  <!-- ── OUTPUT TAB ──────────────────────────────────────────────────────── -->
+  <section class="tab-panel" data-tab="output">
+    <div class="stage" id="stage">
+      <div id="inputToolbar" class="tool-bar">
+        <button id="tbBrush" class="tool" title="Brush">✏️</button>
+        <button id="tbErase" class="tool" title="Eraser">🧽</button>
+        <input id="tbColor" type="color" value="#ffffff" title="Color">
+        <input id="tbSize" type="range" min="1" max="60" step="1" value="6" title="Brush size">
+        <span id="tbSizeLbl" class="dim" style="text-align:center;">6</span>
+        <button id="tbClear" class="tool" title="Clear drawing">🗑️</button>
+      </div>
+      <div id="invSlot"></div>
+      <video id="v" autoplay playsinline muted></video>
+    </div>
+
+    <div class="controls">
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+      <label>seed <input id="seed" type="number" value="52"></label>
+      <label>steps <input id="steps" type="number" value="2" min="1" max="8"></label>
+      <label><input id="showInput" type="checkbox" disabled> Show input preview (left)</label>
+    </div>
+
+    <div class="controls" style="align-items:flex-start;">
+      <textarea id="prompt" rows="1" placeholder="Prompt — Enter to apply, Shift+Enter for newline"></textarea>
+      <div class="ref" id="refRow" style="flex:0 1 340px; padding:0; border:0; background:transparent;">
+        <div class="drop" id="drop" style="min-height:54px;">Drop / click reference</div>
+        <input type="file" id="file" accept="image/*" hidden>
+        <img class="preview" id="preview" alt="reference preview">
+        <div class="meta" id="refMeta">no reference</div>
+        <button id="clearRef">Clear</button>
+      </div>
+    </div>
+
+    <div class="controls" id="featBar"></div>
+
+    <div class="ref" id="savedRow">
+      <select id="savedSelect" style="flex:1 1 300px;"><option value="">⭐ Saved prompts…</option></select>
+      <label class="dim" title="PROMPTING.md scale, 1–5">style <select id="rateStyle"></select></label>
+      <label class="dim" title="Does the output follow your movement?">tracking <select id="rateTracking"></select></label>
+      <label class="dim" title="Does the look hold steady frame to frame?">stability <select id="rateStability"></select></label>
+      <button id="savePromptBtn" title="Save the current prompt with these ratings">♥ Save</button>
+      <button id="delPromptBtn" title="Remove the current prompt from saved">🗑</button>
+      <label class="dim">every <input id="loopDelay" type="number" value="20" min="2" style="width:54px;"> s</label>
+      <button id="loopBtn" title="Cycle through the saved prompts in order">▶ Loop</button>
+      <span id="savedStatus" class="dim"></span>
+    </div>
+
+    <div class="ref" id="comfyRow">
+      <label class="dim">Comfy server:</label>
+      <select id="comfySelect" style="min-width:120px;"><option value="">(loading...)</option></select>
+      <button id="comfyEdit" title="Snap the input frame, run Qwen-Image-Edit on it, use as reference">📸 Snap → Qwen edit</button>
+      <button id="comfyPull">Pull latest output → reference</button>
+      <span id="comfySpin" class="spinner" hidden></span>
+      <span id="comfyStatus" class="dim"></span>
+    </div>
+
+    <div class="controls">
+      <input id="comfyPrompt" type="text" style="flex:1 1 280px;padding:8px 10px;background:#222;color:#eee;border:1px solid #333;border-radius:4px;"
+             placeholder="Qwen edit prompt (sent with Snap → Qwen edit)">
+    </div>
+
+    <div class="controls">
+      <label><input id="lipXfer" type="checkbox" disabled> Lip transfer</label>
+      <span id="lipStatus" class="dim">lipsync: unavailable</span>
+    </div>
+  </section>
+
+  <!-- ── INPUT TAB ───────────────────────────────────────────────────────── -->
+  <section class="tab-panel active" data-tab="input">
+    <div class="controls">
+      <label><input id="useCam" type="checkbox"> Use my camera as input</label>
+      <select id="camSelect" style="flex:1 1 220px;" disabled><option value="">— pick a camera —</option></select>
+      <label><input id="flipInput" type="checkbox" disabled> Mirror input</label>
+      <span id="inputStatus" class="dim">input: server</span>
+    </div>
+
+    <div class="section-label">Input preview &amp; draw</div>
+    <div id="inputView">
+      <div class="dim" style="padding:24px;">Enable your camera to preview &amp; draw on the input.</div>
+    </div>
+    <div class="controls">
+      <label><input id="drawEnable" type="checkbox" disabled> Draw on input</label>
+      <label>color <input id="drawColor" type="color" value="#ffffff" disabled></label>
+      <label>size <input id="drawSize" type="range" min="1" max="60" step="1" value="6" disabled></label>
+      <span id="drawSizeLbl" class="dim" style="min-width:28px;">6px</span>
+      <button id="drawClear" disabled>Clear drawing</button>
+    </div>
+
+    <div class="section-label">Hand marker</div>
+    <div class="controls">
+      <label><input id="handMarker" type="checkbox" disabled> Enable</label>
+      <label>landmark
+        <select id="markerLandmark">
+          <option value="15">Left wrist</option>
+          <option value="16">Right wrist</option>
+          <option value="19">Left index</option>
+          <option value="20">Right index</option>
+          <option value="0">Nose</option>
+          <option value="11">Left shoulder</option>
+          <option value="12">Right shoulder</option>
+        </select>
+      </label>
+      <label>color <input id="markerColor" type="color" value="#ff3c3c"></label>
+      <label>size <input id="markerSize" type="range" min="6" max="120" step="1" value="32"></label>
+      <span id="markerSizeLbl" class="dim" style="min-width:28px;">32px</span>
+      <label><input id="trailToggle" type="checkbox"> Trail</label>
+      <label>length <input id="trailLen" type="range" min="4" max="80" step="1" value="20"></label>
+      <span id="trailLenLbl" class="dim" style="min-width:28px;">20</span>
+      <span id="poseStatus" class="dim"></span>
+    </div>
+  </section>
+
+  <pre class="log" id="log"></pre>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
