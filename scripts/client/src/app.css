@@ -267,10 +267,14 @@ input[type=color] { width: 42px; height: 28px; padding: 0; border: 1px solid #33
   margin: 8px 14px; background: #0a0a0a; border: 1px solid #222; border-radius: 4px;
   min-height: 80px; display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
-#inputView canvas, #inputView video {
+#inputView canvas:not(.sense-overlay), #inputView video {
   display: block; width: 100%; background: #000;
   touch-action: none; cursor: crosshair;
 }
+/* "only" mode: hide the preview video/canvas but keep its box so the aspect
+   stays correct; the transparent sense overlay draws on the dark backdrop. */
+#inputView.sense-only canvas:not(.sense-overlay),
+#inputView.sense-only video { visibility: hidden; }
 
 /* ── input sources / compositing ── */
 .source-row { border-top: 0; }

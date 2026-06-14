@@ -38,13 +38,13 @@ export function InputTab({ active }: { active: boolean }) {
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
-      <div id="inputView" className="overlay-anchor">
+      <div id="inputView" className={'overlay-anchor' + (senseOnly ? ' sense-only' : '')}>
         {!p.active && (
           <div className="dim" style={{ padding: 24 }}>
             Enable your camera or load a video to preview &amp; draw on the input.
           </div>
         )}
-        <CanvasHost holds={p.active && !senseOnly} />
+        <CanvasHost holds={p.active} />
         {p.active && senseOverlay !== 'off' && <OverlayCanvas source="input" />}
         {p.active && <DrawToolbar />}
       </div>
