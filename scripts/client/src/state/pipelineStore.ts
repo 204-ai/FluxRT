@@ -4,6 +4,7 @@
 
 import { create } from 'zustand'
 import { inputVision, rail, videoSource } from './runtime'
+import { getHealthz } from '../lib/api'
 import type { BlendMode, LayerOrder } from '../pipeline/core/types'
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
@@ -233,10 +234,23 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
 
     async startPipeline() {
       const { deviceId, camEnabled, videoLoaded, log } = get()
+      // Crop the input to the server's output aspect ratio so the input preview
+      // (and the frames sent upstream) match the model's framing — no distortion
+      // or letterbox when the camera/video aspect differs from the output.
+      let targetAspect: number | null = null
+      try {
+        const h = await getHealthz()
+        if (h.resolution && h.resolution.height > 0) {
+          targetAspect = h.resolution.width / h.resolution.height
+        }
+      } catch {
+        /* server resolution unknown — fall back to the source aspect */
+      }
       const { label } = await rail.start({
         deviceId: deviceId || null,
         camera: camEnabled,
         videoEl: videoLoaded ? videoSource.el : null,
+        targetAspect,
       })
       log('Input pipeline started: ' + label)
       set({ active: true })

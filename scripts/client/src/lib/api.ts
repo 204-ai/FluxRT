@@ -3,6 +3,7 @@
 
 export interface Healthz {
   peers: number
+  resolution?: { width: number; height: number }
   prompt?: string
   input_source?: 'peer' | 'server'
   reference_enabled?: boolean

@@ -56,17 +56,32 @@ export class Compositor {
     this.effects.find((e) => e.name === name)?.message?.(data)
   }
 
-  /** Mirror applies to the camera layer only (selfie view). */
+  /** Mirror applies to the camera layer only (selfie view). Cover-fit
+   *  (center-crop) so a camera whose aspect differs from the output canvas is
+   *  cropped, never stretched. */
   private drawCamera(src: Layer, alpha: number, blend: GlobalCompositeOperation): void {
     const { ctx, width: W, height: H } = this
+    const { w, h } = dimsOf(src)
+    let dx = 0
+    let dy = 0
+    let dw = W
+    let dh = H
+    if (w > 0 && h > 0) {
+      const scale = Math.max(W / w, H / h)
+      dw = w * scale
+      dh = h * scale
+      dx = (W - dw) / 2
+      dy = (H - dh) / 2
+    }
     ctx.save()
     ctx.globalAlpha = alpha
     ctx.globalCompositeOperation = blend
     if (this.mirrored) {
       ctx.scale(-1, 1)
-      ctx.drawImage(src as CanvasImageSource, -W, 0, W, H)
+      // In flipped space, an image spanning screen [dx, dx+dw] is drawn at -(dx+dw).
+      ctx.drawImage(src as CanvasImageSource, -(dx + dw), dy, dw, dh)
     } else {
-      ctx.drawImage(src as CanvasImageSource, 0, 0, W, H)
+      ctx.drawImage(src as CanvasImageSource, dx, dy, dw, dh)
     }
     ctx.restore()
   }

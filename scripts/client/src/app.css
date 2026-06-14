@@ -39,7 +39,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 /* ── stage (output tab) ── */
 .stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
 .stage video { min-width: 0; background: #000; display: block; }
-.remote-wrap { flex: 1 1 0; max-width: 70%; min-width: 0; }
+.remote-wrap { flex: 1 1 0; max-width: 100%; min-width: 0; }
 .remote-wrap video { width: 100%; }
 
 /* preview slots are anchors for the sense overlay */
@@ -192,7 +192,7 @@ input[type=color] { width: 42px; height: 28px; padding: 0; border: 1px solid #33
   min-height: 80px; display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
 #inputView canvas, #inputView video {
-  display: block; width: 100%; max-width: 720px; background: #000;
+  display: block; width: 100%; background: #000;
   touch-action: none; cursor: crosshair;
 }
 

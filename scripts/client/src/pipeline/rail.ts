@@ -18,6 +18,9 @@ export interface RailSources {
   deviceId: string | null
   camera: boolean
   videoEl: HTMLVideoElement | null
+  /** Force the output/canvas aspect ratio (width/height); the source is
+   *  cover-cropped into it. Used to match the server's generation aspect. */
+  targetAspect?: number | null
 }
 
 /** Longest output edge when the video file is the sole source. */
@@ -33,6 +36,20 @@ function videoDims(el: HTMLVideoElement): { width: number; height: number } {
     h *= scale
   }
   // Even dims keep downstream encoders happy.
+  return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
+}
+
+/** Canvas dims forced to a target aspect (the server's output aspect), keeping
+ *  the source height; the source is cover-cropped into this by the compositor. */
+function aspectDims(srcHeight: number, aspect: number): { width: number; height: number } {
+  let h = srcHeight || 720
+  let w = h * aspect
+  const long = Math.max(w, h)
+  if (long > MAX_VIDEO_EDGE) {
+    const scale = MAX_VIDEO_EDGE / long
+    w *= scale
+    h *= scale
+  }
   return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
 }
 
@@ -91,6 +108,12 @@ export class Rail {
       if (sources.videoEl) label += ' + video file'
     } else {
       ;({ width, height } = videoDims(sources.videoEl!))
+    }
+
+    // Force the output aspect to match the server's generation aspect; the
+    // source is cover-cropped into it (no stretch/letterbox).
+    if (sources.targetAspect && sources.targetAspect > 0) {
+      ;({ width, height } = aspectDims(height, sources.targetAspect))
     }
 
     const kind = detectBackend()
