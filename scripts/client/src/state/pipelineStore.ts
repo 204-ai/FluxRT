@@ -257,7 +257,29 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
 
     async loadVideoFile(file) {
       const { log, videoLoop, videoRate } = get()
+      // Hot-swap: a clip is already feeding a running pipeline → swap the
+      // <video> src in place and keep the SAME captured track / output stream
+      // alive (no rail restart, no WebRTC renegotiation, no black frame). The
+      // source set (camera on/off) is unchanged here, so only the file differs.
+      const hotSwap = get().videoLoaded && get().active
       try {
+        if (hotSwap) {
+          const meta = await videoSource.swapSource(file)
+          videoSource.setLoop(videoLoop)
+          videoSource.setRate(videoRate)
+          // Listeners stay bound to the same element across the swap.
+          set({
+            videoName: file.name,
+            videoMeta: `${meta.width}×${meta.height}, ${fmtTime(meta.duration)}`,
+            videoDuration: meta.duration,
+            videoCurrentTime: 0,
+            videoPlaying: true,
+          })
+          log(
+            `Video swapped: ${file.name} (${meta.width}x${meta.height}, ${fmtTime(meta.duration)}) — pipeline kept live`,
+          )
+          return
+        }
         const meta = await videoSource.load(file)
         detachVideoListeners?.()
         attachVideoListeners()

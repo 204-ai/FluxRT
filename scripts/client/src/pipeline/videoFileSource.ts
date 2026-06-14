@@ -58,6 +58,52 @@ export class VideoFileSource {
     return { width: this.el.videoWidth, height: this.el.videoHeight, duration: this.el.duration }
   }
 
+  // Hot-swap the source IN PLACE on the same <video> element, so a
+  // captureStream() track already taken from it keeps emitting frames (no
+  // pipeline restart). Unlike load(), a failed swap does NOT unload — it rolls
+  // back to the previous clip so the live output is never blanked.
+  async swapSource(file: File): Promise<VideoFileMeta> {
+    if (!file.type.startsWith('video/')) throw new Error('not a video file')
+    const prevUrl = this.url
+    const newUrl = URL.createObjectURL(file)
+    this.el.src = newUrl
+    this.url = newUrl
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          this.el.removeEventListener('loadedmetadata', onMeta)
+          this.el.removeEventListener('error', onErr)
+        }
+        const onMeta = () => {
+          cleanup()
+          resolve()
+        }
+        const onErr = () => {
+          cleanup()
+          reject(new Error('video decode error — unsupported codec?'))
+        }
+        this.el.addEventListener('loadedmetadata', onMeta)
+        this.el.addEventListener('error', onErr)
+      })
+      if (this.el.videoWidth === 0) throw new Error('no video track (audio-only or unsupported codec)')
+    } catch (e) {
+      // Roll back to the previous clip — keep the captured track/output alive.
+      URL.revokeObjectURL(newUrl)
+      this.url = prevUrl
+      if (prevUrl) {
+        this.el.src = prevUrl
+        void this.el.play().catch(() => {})
+      }
+      throw e
+    }
+
+    // New clip is decoding; now safe to free the old blob URL.
+    if (prevUrl) URL.revokeObjectURL(prevUrl)
+    void this.el.play().catch(() => {})
+    return { width: this.el.videoWidth, height: this.el.videoHeight, duration: this.el.duration }
+  }
+
   unload(): void {
     this.el.pause()
     this.el.removeAttribute('src')
