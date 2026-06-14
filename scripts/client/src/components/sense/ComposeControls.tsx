@@ -1,6 +1,5 @@
-// "Drive prompt from sense" controls — compose toggle, theme, min gap, and the
-// live readout. Lives at the bottom of the prompt panel (shown when sensing is
-// enabled) since it builds/sends the prompt. Reads the shared sense store.
+// "Drive prompt from sense" — a single compact inline row at the bottom of the
+// prompt panel (shown when sensing is enabled). Reads the shared sense store.
 
 import { useSenseStore } from '../../state/senseStore'
 
@@ -15,37 +14,37 @@ export function ComposeControls() {
   const setComposeMinGap = useSenseStore((s) => s.setComposeMinGap)
 
   return (
-    <div className="controls">
+    <div className="controls compose-row">
       <label title="Compose a FLUX prompt from emotion (valence/arousal/gaze) + gesture slots; send when the combination changes">
         <input
           type="checkbox"
           checked={composeEnabled}
           onChange={(e) => setComposeEnabled(e.target.checked)}
         />{' '}
-        🎭 Drive prompt from sense
+        🎭 Drive from sense
       </label>
-      <label>
-        theme{' '}
-        <select value={composeTheme} onChange={(e) => setComposeTheme(e.target.value as 'natural' | 'glitch')}>
-          <option value="natural">🌿 natural — painterly, weather, flora</option>
-          <option value="glitch">📺 glitch — mosaic, chrome, phosphor</option>
-        </select>
-      </label>
-      <label className="dim">
-        min gap{' '}
+      <select
+        value={composeTheme}
+        title="Theme"
+        onChange={(e) => setComposeTheme(e.target.value as 'natural' | 'glitch')}
+      >
+        <option value="natural">🌿 natural</option>
+        <option value="glitch">📺 glitch</option>
+      </select>
+      <label className="dim" title="Minimum seconds between prompt updates">
+        gap{' '}
         <input
           type="number"
           min={1}
-          style={{ width: 54 }}
           value={composeMinGapSecs}
           onChange={(e) => setComposeMinGap(+e.target.value)}
         />{' '}
         s
       </label>
       {composeEnabled && (
-        <span className="dim compose-readout">
-          {composeKey ? `slots: ${composeKey}` : 'waiting for detection…'}
-          {composePrompt ? ` → ${composePrompt.slice(0, 90)}…` : ''}
+        <span className="dim compose-readout" title={composePrompt || composeKey}>
+          {composeKey ? `slots: ${composeKey}` : 'waiting…'}
+          {composePrompt ? ` → ${composePrompt}` : ''}
         </span>
       )}
     </div>

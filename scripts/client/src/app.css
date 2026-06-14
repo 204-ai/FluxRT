@@ -168,6 +168,14 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .prompt-player .sp-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prompt-player .icon-btn { font-size: 15px; }
 
+/* "drive prompt from sense" — compact inline row */
+.compose-row { flex-wrap: nowrap; }
+.compose-row select, .compose-row input[type=number] { padding: 3px 5px; }
+.compose-row input[type=number] { width: 42px; }
+.compose-row .compose-readout {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* compact side-by-side input source panels (camera | video) — always horizontal */
 .source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; }
 .src-panel {
