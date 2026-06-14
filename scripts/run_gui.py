@@ -314,6 +314,7 @@ class MainWindow(QMainWindow):
         self._input_tensor = None
         self._output_tensor = None
         self._resolution: dict | None = None
+        self._out_resolution: dict | None = None
         self._use_ref_image = False
         self._lip_transfer_in_config = False
         self._lip_active = False
@@ -803,7 +804,10 @@ class MainWindow(QMainWindow):
             self._input_tensor = sp.get_input_tensor()
             self._output_tensor = sp.get_output_tensor()
             self._resolution = sp.get_resolution()
-            log(f"StreamProcessor ready — resolution={self._resolution}")
+            self._out_resolution = sp.get_out_resolution()
+            log(
+                f"StreamProcessor ready — resolution={self._resolution}  out_resolution={self._out_resolution}"
+            )
             if self._ref_full_path and self._use_ref_image:
                 self._apply_reference(self._ref_full_path)
             if self._lip_active:
@@ -1058,15 +1062,15 @@ class MainWindow(QMainWindow):
             self._start_vcam()
 
     def _start_vcam(self) -> None:
-        if self._resolution is None:
+        if self._out_resolution is None:
             return
         try:
             import pyvirtualcam
             from pyvirtualcam import PixelFormat
 
             vcam = pyvirtualcam.Camera(
-                width=self._resolution["width"],
-                height=self._resolution["height"],
+                width=self._out_resolution["width"],
+                height=self._out_resolution["height"],
                 fps=30,
                 fmt=PixelFormat.BGR,
             )

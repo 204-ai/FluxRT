@@ -151,40 +151,105 @@ cd FluxRT
 git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
 ```
 
-### Optional: int8 quantized FLUX.2-klein-4B
+# Extensions
+
+A set of extensions that improves speed, resolution, vram usage and reqire additional models or tools installation.
+
+### Faster decoding: TAEF2
+
+Uses tiny VAE decoder by madebyollin, reduces decoder overhead, more useful with high output resolution.
+
+#### Installation
 
 Download from Hugging Face:
 
-[https://huggingface.co/aydin99/FLUX.2-klein-4B-int8](https://huggingface.co/aydin99/FLUX.2-klein-4B-int8)
+```bash
+cd FluxRT
+git clone https://huggingface.co/madebyollin/taef2
+```
 
-This is required only if you want to use quantized `int8` inference.
-Note that downloading unquantized `FLUX.2-klein-4B` model (previous point) is **still reqired**.
+#### Usage
+
+Set in config:
+```json
+"enable_tiny_vae": true
+```
+
+### Frame Super Resolution: Flow Upscaler
+
+Uses fast latent super resolution model to upscale each generated frame 2 times.
+
+**It is highly recommended to use it with with TAEF2**
+
+#### Installation
+
+Download from Hugging Face:
+
+```bash
+cd FluxRT
+git clone https://huggingface.co/TensorForger/FlowUpscaler
+```
+
+#### Usage
+
+Set in config:
+```json
+"enable_flow_upscaler": true
+```
+
+
+### Low VRAM: int8 quantized FLUX.2-klein-4B
+
+Reduces VRAM usage, enables 24 GB cards support.
+
+#### Installation
+
+Download from Hugging Face:
 
 ```bash
 cd FluxRT
 git clone https://huggingface.co/aydin99/FLUX.2-klein-4B-int8
 ```
 
-### Optional: Lip Transfer (LivePortrait)
+Note that downloading unquantized `FLUX.2-klein-4B` model is **still reqired**.
+
+
+#### Usage
+
+Set in config:
+```json
+"enable_int8_quantization": true
+```
+
+Or use `--int8` flag when running scripts.
+
+### Style customization: LoRA
+
+#### Installation
+
+Download lora weights to the repo root.
+
+#### Usage
+
+Set in config (example):
+```json
+"use_lora": true,
+"lora_weights_path": "flux2_4b_koni_animestyle/Flux_klein_4b_anime_Koni.safetensors",
+```
+
+Loras work well with `--int8` flag too.
+
+### Better Lip Transfer: LivePortrait
 
 Real-time face reenactment that transfers facial expressions from the webcam feed onto the AI-generated output. Requires [LivePortrait](https://github.com/KlingAIResearch/LivePortrait) and its models.
+
+#### Installation
 
 ```bash
 git clone https://github.com/KlingAIResearch/LivePortrait LivePortrait-code
 pip install -r requirements_lipsync.txt
 git clone https://huggingface.co/KwaiVGI/LivePortrait
 ```
-
-Add to your config JSON:
-
-```json
-"lip_transfer": {
-    "enable": true,
-    "models_dir": "LivePortrait/liveportrait"
-}
-```
-
-The GUI toggle button will be enabled automatically when this is present in the config. Lip transfer is **off by default** at runtime — toggle it in the GUI as needed.
 
 <details>
 <summary>Required directory structure</summary>
@@ -222,10 +287,19 @@ FluxRT/
 
 </details>
 
+#### Usage
 
-## 4. Run
+```json
+"lip_transfer": {
+    "enable": true,
+    "models_dir": "LivePortrait/liveportrait"
+}
+```
 
-To enable `int8` quantization you can either add falg `--int8` when running any script or set `enable_int8_quantization` to `true` in  the corresponding config.
+The GUI toggle button will be enabled automatically when this is present in the config. Lip transfer is **off by default** at runtime — toggle it in the GUI as needed.
+
+
+# Running scripts
 
 Run any script with conda environment activated:
 
@@ -340,21 +414,6 @@ Add `--save` flag to write into `benchmark.md` file.
 You can check report generated on my machine in `benchmark.md`
 
 I would appreciate it if you could share your report in the [issues](https://github.com/tensorforger/FluxRT/issues), especially if it was generated on different hardware setup.
-
-### How to use Lora
-
-To enable lora:
-
-1. Download lora weights to the repo root.
-2. Add these lines in the corresponding config, in case of gradio demo it is `configs/config_with_reference.json` (example for [https://huggingface.co/Sawata97/flux2_4b_koni_animestyle](https://huggingface.co/Sawata97/flux2_4b_koni_animestyle)):
-
-```json
-"use_lora": true,
-"lora_weights_path": "flux2_4b_koni_animestyle/Flux_klein_4b_anime_Koni.safetensors",
-```
-
-Loras work well with `--int8` flag too.
-But note that there are still very few loras for `FLUX.2-Klein-4B` model.
 
 # How It Works
 

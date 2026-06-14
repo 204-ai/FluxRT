@@ -11,6 +11,8 @@
     "compile_models": true,
     "enable_spatial_cache": true,
     "enable_int8_quantization": false,
+    "enable_tiny_vae": false,
+    "enable_flow_upscaler": false,
     "target_fps":null,
     "interpolation_exp": 2,
     "use_reference_image": true,
@@ -23,5 +25,5 @@
         "enable": true,
         "models_dir": "LivePortrait/liveportrait"
     },
-    "logging": false
+    "logging": true
 }
