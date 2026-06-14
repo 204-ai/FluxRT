@@ -20,6 +20,22 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* ── split view: input (left) | output (right) ── */
+.split-view { display: flex; align-items: stretch; }
+.split-view > .tab-panel {
+  display: block;
+  min-width: 0;
+  overflow: auto;
+  max-height: calc(100vh - 41px);
+}
+.split-view > .tab-panel:first-child {   /* Input — left, resizable */
+  flex: 0 0 auto; width: 50%; min-width: 300px; max-width: 75%;
+  resize: horizontal; border-right: 1px solid #2a2a2a;
+}
+.split-view > .tab-panel:last-child {    /* Output — right, fills remaining */
+  flex: 1 1 0;
+}
+
 /* ── stage (output tab) ── */
 .stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
 .stage video { min-width: 0; background: #000; display: block; }
