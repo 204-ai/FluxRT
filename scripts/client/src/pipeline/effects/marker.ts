@@ -1,9 +1,11 @@
 // Hand/body marker effect — colored circle (+ optional fading trail) on a
 // chosen pose landmark. Port of input_processor.js step 2, except landmarks
 // now come from the shared vision analyzer via the bus (key 'pose') instead
-// of a bespoke PoseLandmarker, and detection runs on SOURCE frames
-// (pre-mirror) — so we flip x and swap left/right landmark ids when mirrored
-// to reproduce the legacy "tracks the side the user perceives" behavior.
+// of a bespoke PoseLandmarker. Detection runs on the COMPOSITE frame, which
+// already reflects the camera mirror — so the landmarks are in the same space
+// we render into. We use them 1:1 with no extra x-flip or left/right id swap,
+// and the marker follows the mirror toggle automatically (same reasoning as
+// the sense overlay, which also draws 1:1 — see OverlayCanvas).
 
 import type { BusReader, CanvasEffect, Ctx2D, FrameInfo } from '../core/types'
 
@@ -19,10 +21,6 @@ export interface MarkerConfig {
 export interface PoseBusValue {
   landmarks: Array<{ x: number; y: number; visibility?: number }>
 }
-
-// MediaPipe sees the un-mirrored frame; when the display is mirrored the
-// user's perceived "left" is the body's right. Swap paired ids for parity.
-const MIRROR_SWAP: Record<number, number> = { 15: 16, 16: 15, 19: 20, 20: 19, 11: 12, 12: 11 }
 
 function hexToRgb(hex: string): string {
   const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim())
@@ -63,11 +61,9 @@ export function createMarkerEffect(initial?: Partial<MarkerConfig>): CanvasEffec
       const pose = bus.get<PoseBusValue>('pose')
       let cx: number | null = null
       let cy: number | null = null
-      const idx = info.mirrored ? (MIRROR_SWAP[o.landmark] ?? o.landmark) : o.landmark
-      const lm = pose?.landmarks?.[idx]
+      const lm = pose?.landmarks?.[o.landmark]
       if (lm && (lm.visibility === undefined || lm.visibility > 0.5)) {
-        const x = info.mirrored ? 1 - lm.x : lm.x
-        cx = x * info.width
+        cx = lm.x * info.width
         cy = lm.y * info.height
       }
 

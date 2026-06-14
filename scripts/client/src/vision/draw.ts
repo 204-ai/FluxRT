@@ -1,7 +1,9 @@
 // Display-only overlay renderer — face mesh, pose skeleton, tracking box +
-// expression label. Ported from sense-human/src/vision/draw.ts; takes the
-// serialized worker results and a `mirrored` flag (the preview pixels are
-// mirrored by the compositor, landmarks are in source coords).
+// expression label. Ported from sense-human/src/vision/draw.ts. Detection now
+// runs on the already-mirrored composite (input) / un-mirrored remote video
+// (output), so landmarks are already in the space the overlay renders into and
+// every caller passes mirrored=false (draw 1:1). The `mirrored` flip path is
+// kept only for completeness; no current caller sets it.
 
 import {
   DrawingUtils,

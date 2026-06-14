@@ -222,7 +222,10 @@ export class Rail {
     this.backend?.busPush(key, value)
   }
 
-  /** Sampled base-source frames (pre-mirror) for the vision analyzer. */
+  /** Sampled COMPOSITE frames (already mirrored when the camera mirror is on)
+   *  for the vision analyzer — NOT pre-mirror base frames. Consumers must treat
+   *  landmarks as being in the same (mirrored) space the preview displays, so
+   *  they render 1:1 with no extra flip (see marker.ts / OverlayCanvas). */
   setTap(intervalMs: number, cb: TapCallback | null): void {
     this.tap = cb ? { intervalMs, cb } : null
     this.backend?.setTap(intervalMs, cb)
