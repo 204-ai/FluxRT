@@ -154,10 +154,10 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .prompt-player .sp-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prompt-player .icon-btn { font-size: 15px; }
 
-/* compact side-by-side input source panels (camera | video) */
-.source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; flex-wrap: wrap; }
+/* compact side-by-side input source panels (camera | video) — always horizontal */
+.source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; }
 .src-panel {
-  flex: 1 1 0; min-width: 220px; display: flex; flex-direction: column; gap: 6px;
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px;
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;
 }
 .src-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
@@ -171,6 +171,15 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .transport .time-readout { min-width: auto; font-size: 10px; }
 .transport .rate { padding: 3px 4px; }
 .icon-btn.on { background: #1f7a3a; color: #fff; }
+
+/* minimal video drop / upload zone */
+.video-drop {
+  flex: 1 1 auto; min-width: 0; padding: 6px 8px; border: 1px dashed #3a3a3a; border-radius: 4px;
+  background: #161616; color: #888; font-size: 12px; text-align: center; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.video-drop:hover { border-color: #2a6cd4; color: #aaa; }
+.video-drop.drag { border-color: #2a6cd4; background: #1a2433; color: #cde; }
 
 /* ── facial-feature builder bar ── */
 #featBar { flex-wrap: nowrap; }

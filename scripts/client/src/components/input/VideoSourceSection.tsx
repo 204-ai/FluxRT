@@ -1,7 +1,7 @@
-// Video-file input source: compact picker + icon transport controls. Sits as
-// a side-by-side panel next to the camera; the transport spans the panel width.
+// Video-file input source: a minimal drop/upload zone + icon transport. Sits
+// side-by-side with the camera; the transport spans the panel width.
 
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { fmtTime, usePipelineStore } from '../../state/pipelineStore'
 
 const RATES = [0.25, 0.5, 1, 1.5, 2]
@@ -9,6 +9,7 @@ const RATES = [0.25, 0.5, 1, 1.5, 2]
 export function VideoSourceSection() {
   const p = usePipelineStore()
   const fileInput = useRef<HTMLInputElement>(null)
+  const [drag, setDrag] = useState(false)
 
   const pick = (file: File | undefined) => {
     if (file) void p.loadVideoFile(file)
@@ -27,30 +28,32 @@ export function VideoSourceSection() {
           style={{ display: 'none' }}
           onChange={(e) => pick(e.target.files?.[0])}
         />
-        <button
-          className="icon-btn"
-          title={p.videoLoaded ? 'Replace video' : 'Load video'}
-          aria-label={p.videoLoaded ? 'Replace video' : 'Load video'}
+        <div
+          className={'video-drop' + (drag ? ' drag' : '')}
           onClick={() => fileInput.current?.click()}
+          onDragOver={(e) => {
+            e.preventDefault()
+            if (!drag) setDrag(true)
+          }}
+          onDragLeave={() => setDrag(false)}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDrag(false)
+            pick(e.dataTransfer.files?.[0])
+          }}
+          title={p.videoLoaded ? `${p.videoName} — ${p.videoMeta}` : 'Drop a video file or click to choose'}
         >
-          📁
-        </button>
-        {p.videoLoaded ? (
-          <>
-            <span className="file-name" title={`${p.videoName} — ${p.videoMeta}`}>
-              {p.videoName}
-            </span>
-            <button
-              className="icon-btn"
-              title="Unload video"
-              aria-label="Unload video"
-              onClick={() => void p.unloadVideo()}
-            >
-              🗑
-            </button>
-          </>
-        ) : (
-          <span className="dim">no video loaded</span>
+          {p.videoLoaded ? p.videoName : 'Drop video or click'}
+        </div>
+        {p.videoLoaded && (
+          <button
+            className="icon-btn"
+            title="Unload video"
+            aria-label="Unload video"
+            onClick={() => void p.unloadVideo()}
+          >
+            🗑
+          </button>
         )}
       </div>
       {p.videoLoaded && (
