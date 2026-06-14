@@ -174,6 +174,20 @@ export class StreamsBackend implements RailBackend {
     ])
   }
 
+  clearVideo(): void {
+    if (!this.worker) return
+    this.worker.postMessage({ type: 'clear-video' })
+    // The file capture is no longer feeding the worker — release it.
+    this.capturedStream?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    this.capturedStream = null
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     const c = document.createElement('canvas')
     c.width = this.previewEl.videoWidth

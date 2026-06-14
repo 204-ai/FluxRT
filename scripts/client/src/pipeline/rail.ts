@@ -144,6 +144,12 @@ export class Rail {
     this.backend?.swapVideo(videoEl)
   }
 
+  /** Hot-remove the video-file overlay in place (no restart): drop the overlay
+   *  layer while the camera keeps feeding and the output stream stays alive. */
+  clearVideoSource(): void {
+    this.backend?.clearVideo()
+  }
+
   /** Hot-swap the camera device in place (no restart): acquire the new device's
    *  stream, feed it to the backend, then stop the old one. Keeps the output
    *  track / WebRTC sender alive. */

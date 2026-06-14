@@ -153,6 +153,13 @@ export class CanvasBackend implements RailBackend {
     }
   }
 
+  clearVideo(): void {
+    // Drop the overlay reference; the next onFrame composites camera-only and
+    // schedule() hands the driver back to rVFC-on-camera. The output canvas /
+    // captureStream track is untouched.
+    this.fileVideo = null
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     return new Promise((res, rej) =>
       this.previewEl.toBlob((b) => (b ? res(b) : rej(new Error('snapshot failed'))), type),

@@ -69,7 +69,8 @@ export interface EffectInit {
   config: Record<string, unknown>
 }
 
-/** Callback receiving sampled source frames (pre-mirror) for analysis. */
+/** Callback receiving sampled COMPOSITE frames (already mirrored when the
+ *  camera mirror is on) for analysis. */
 export type TapCallback = (frame: ImageBitmap, tsMs: number) => void
 
 export interface RailBackend {
@@ -93,5 +94,9 @@ export interface RailBackend {
   /** Hot-swap the camera input in place — feed the new device's track without
    *  recreating the output track (no pipeline restart / WebRTC renegotiation). */
   swapCamera(cameraStream: MediaStream): void
+  /** Hot-REMOVE the video-file overlay in place — drop the overlay layer while
+   *  the camera keeps feeding, WITHOUT recreating the output track (mirror of
+   *  swapVideo). No-op when there is no overlay. */
+  clearVideo(): void
   snapshot(type?: string): Promise<Blob>
 }

@@ -36,6 +36,7 @@ type InMsg =
   | { type: 'stop' }
   | { type: 'swap-video'; video: ReadableStream<VideoFrame> }
   | { type: 'swap-camera'; video: ReadableStream<VideoFrame> }
+  | { type: 'clear-video' }
 
 let compositor: Compositor | null = null
 let running = false
@@ -45,6 +46,7 @@ let openFrames = 0
 let wake: (() => void) | null = null
 let requestVideoSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
 let requestCameraSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
+let requestOverlayClear: (() => void) | null = null
 
 function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
@@ -104,6 +106,11 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   const baseIsCamera = camera !== null
   let base = startValve(baseIsCamera ? camera! : video!)
   let overlay = camera && video ? startValve(video) : null
+  // Steady-state holds one extra open frame for the retained overlay; recomputed
+  // when a camera-only pipeline gains/loses an overlay at runtime. Declared
+  // before the swap/clear closures that mutate it (no use-before-init).
+  let leakThreshold = 4 + (overlay ? 1 : 0)
+  let retainedOverlay: VideoFrame | null = null
 
   // Hot-swap the video-file input without restarting: cancel the old video
   // valve and start a fresh one on the re-captured readable. The video is the
@@ -130,6 +137,9 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     const fresh = startValve(readable)
     if (videoIsBase) base = fresh
     else overlay = fresh
+    // A camera-only pipeline gaining its first video overlay now retains one
+    // extra frame in steady state — widen the leak guard to match init.
+    leakThreshold = 4 + (overlay ? 1 : 0)
   }
 
   // Hot-swap the camera: it's always the `base` valve when a camera is present.
@@ -150,9 +160,31 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     }
     base = startValve(readable)
   }
-  // Steady-state holds one extra open frame for the retained overlay.
-  const leakThreshold = 4 + (overlay ? 1 : 0)
-  let retainedOverlay: VideoFrame | null = null
+
+  // Hot-remove the overlay: drop the video layer while the camera keeps
+  // feeding. Cancels the overlay valve, frees any held frames, and narrows the
+  // leak guard back to camera-only. No-op when there is no overlay.
+  requestOverlayClear = () => {
+    if (overlay) {
+      try {
+        void overlay.reader.cancel()
+      } catch {
+        /* already done */
+      }
+      if (overlay.pending) {
+        overlay.pending.close()
+        openFrames--
+        overlay.pending = null
+      }
+      overlay = null
+    }
+    if (retainedOverlay) {
+      retainedOverlay.close()
+      openFrames--
+      retainedOverlay = null
+    }
+    leakThreshold = 4
+  }
 
   try {
     while (running) {
@@ -208,6 +240,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   } finally {
     requestVideoSwap = null
     requestCameraSwap = null
+    requestOverlayClear = null
     for (const v of [base, overlay]) {
       if (!v) continue
       try {
@@ -262,6 +295,9 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       break
     case 'swap-camera':
       requestCameraSwap?.(m.video)
+      break
+    case 'clear-video':
+      requestOverlayClear?.()
       break
   }
 }

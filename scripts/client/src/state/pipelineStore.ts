@@ -267,13 +267,12 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
 
     async loadVideoFile(file) {
       const { log, videoLoop, videoRate } = get()
-      // Hot-swap: a clip is already feeding a running pipeline → swap the
-      // <video> src in place and keep the SAME captured track / output stream
-      // alive (no rail restart, no WebRTC renegotiation, no black frame). The
-      // source set (camera on/off) is unchanged here, so only the file differs.
-      const hotSwap = get().videoLoaded && get().active
+      const active = get().active
       try {
-        if (hotSwap) {
+        // Case 1 — a clip is already feeding a running pipeline: swap the
+        // <video> src in place and keep the SAME captured track / output stream
+        // alive (no rail restart, no WebRTC renegotiation, no black frame).
+        if (active && get().videoLoaded) {
           const meta = await videoSource.swapSource(file)
           videoSource.setLoop(videoLoop)
           videoSource.setRate(videoRate)
@@ -293,6 +292,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
           )
           return
         }
+
+        // First load of this clip onto the shared <video> element.
         const meta = await videoSource.load(file)
         detachVideoListeners?.()
         attachVideoListeners()
@@ -306,6 +307,20 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
           videoCurrentTime: 0,
           videoPlaying: true,
         })
+
+        // Case 2 — pipeline already running (a camera): hot-ADD the clip as an
+        // overlay layer instead of restarting, so the output stream / WebRTC
+        // track stays alive (no stall). The worker creates the overlay valve on
+        // the first swap-video even though it was started camera-only.
+        if (active) {
+          rail.swapVideoSource(videoSource.el)
+          log(
+            `Video added: ${file.name} (${meta.width}x${meta.height}, ${fmtTime(meta.duration)}) — composited live over the camera`,
+          )
+          return
+        }
+
+        // Case 3 — nothing running yet: start the pipeline with this clip.
         log(`Video loaded: ${file.name} (${meta.width}x${meta.height}, ${fmtTime(meta.duration)})`)
         await restartSources()
       } catch (e) {
@@ -314,6 +329,11 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     },
 
     async unloadVideo() {
+      // Hot-remove: the camera is still feeding a running pipeline → drop the
+      // overlay layer in place and keep the SAME output stream alive (mirror of
+      // the hot-ADD in loadVideoFile). Otherwise (video-only / stopped) fall
+      // back to a source-set restart.
+      const hotRemove = get().active && get().camEnabled
       detachVideoListeners?.()
       videoSource.unload()
       set({
@@ -324,6 +344,11 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
         videoCurrentTime: 0,
         videoPlaying: false,
       })
+      if (hotRemove) {
+        rail.clearVideoSource()
+        get().log('Video removed — camera kept live')
+        return
+      }
       await restartSources().catch((e) =>
         get().log('Pipeline restart failed: ' + (e instanceof Error ? e.message : e)),
       )
