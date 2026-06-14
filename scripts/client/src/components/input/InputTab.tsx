@@ -43,7 +43,6 @@ export function InputTab({ active }: { active: boolean }) {
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
-      <div className="section-label">Input preview &amp; draw</div>
       <div id="inputView" className="overlay-anchor">
         {!p.active && (
           <div className="dim" style={{ padding: 24 }}>

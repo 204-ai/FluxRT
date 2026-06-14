@@ -1,5 +1,6 @@
 import { Stage } from './Stage'
 import { PromptEditor } from './PromptEditor'
+import { PromptPlayer } from './PromptPlayer'
 import { FeatureBar } from './FeatureBar'
 import { ReferencePanel } from './ReferencePanel'
 import { ComfyRow } from './ComfyRow'
@@ -16,6 +17,7 @@ export function OutputTab({ active }: { active: boolean }) {
         <div className="controls">
           <PromptEditor />
         </div>
+        <PromptPlayer />
         <FeatureBar />
       </section>
 
