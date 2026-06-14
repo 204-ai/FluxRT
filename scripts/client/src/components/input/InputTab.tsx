@@ -9,6 +9,7 @@ import { CompositeSection } from './CompositeSection'
 import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
+import { SensePanel } from '../sense/SensePanel'
 
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
@@ -88,6 +89,8 @@ export function InputTab({ active }: { active: boolean }) {
       </div>
 
       <CompositeSection />
+
+      <SensePanel />
     </section>
   )
 }

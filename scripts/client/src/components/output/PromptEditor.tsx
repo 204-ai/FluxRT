@@ -1,5 +1,5 @@
-// Auto-growing prompt textarea: Enter sends, Shift+Enter newline. Inbound
-// state:prompt sync is focus-guarded via the focus registry.
+// Prompt textarea fixed at 3 lines with vertical scroll. Enter sends,
+// Shift+Enter newline. Inbound state:prompt sync is focus-guarded.
 
 import { useEffect, useRef } from 'react'
 import { usePromptStore } from '../../state/promptStore'
@@ -14,18 +14,11 @@ export function PromptEditor() {
     return () => registerFocusable('prompt', null)
   }, [])
 
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = el.scrollHeight + 2 + 'px'
-  }, [prompt])
-
   return (
     <textarea
       ref={ref}
       id="prompt"
-      rows={1}
+      rows={3}
       placeholder="Prompt — Enter to apply, Shift+Enter for newline"
       value={prompt}
       onChange={(e) => usePromptStore.getState().setPromptLocal(e.target.value)}

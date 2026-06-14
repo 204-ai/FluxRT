@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Header } from './components/Header'
-import { LogPanel } from './components/LogPanel'
+import { StatusBar } from './components/StatusBar'
 import { InputTab } from './components/input/InputTab'
 import { OutputTab } from './components/output/OutputTab'
-import { SensePanel } from './components/sense/SensePanel'
 import { useSessionStore } from './state/sessionStore'
 
 let booted = false
@@ -62,8 +61,7 @@ export default function App() {
         />
         <OutputTab active />
       </div>
-      <SensePanel />
-      <LogPanel />
+      <StatusBar />
     </>
   )
 }

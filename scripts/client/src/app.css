@@ -26,7 +26,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   display: block;
   min-width: 0;
   overflow: auto;
-  max-height: calc(100vh - 41px);
+  max-height: calc(100vh - 41px - 40px); /* header + collapsed status bar */
 }
 .split-view > .tab-panel:first-child {   /* Input — left; width driven by the divider drag */
   flex: 0 0 auto;
@@ -42,7 +42,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .split-divider:hover { background: #2a6cd4; }
 
 /* ── stage (output tab) ── */
-.stage { position: relative; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
+.stage { position: sticky; top: 0; z-index: 2; display: flex; justify-content: center; padding: 12px; background: #0a0a0a; gap: 8px; }
 .stage video { min-width: 0; background: #000; display: block; }
 .remote-wrap { flex: 1 1 0; max-width: 100%; min-width: 0; }
 .remote-wrap video { width: 100%; }
@@ -134,6 +134,19 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   background: rgba(18, 18, 18, 0.8); color: #9aa; border-radius: 4px;
 }
 
+/* fixed footer status bar: pipeline stats + a 1-line log that expands to ~5 */
+.statusbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  background: #151515; border-top: 1px solid #2a2a2a; color: #9aa;
+  font: 11px/1.4 ui-monospace, monospace; padding: 4px 14px 6px; cursor: pointer;
+}
+.statusbar-stats { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.statusbar-log {
+  margin: 2px 0 0; color: #888; white-space: pre-wrap; word-break: break-word;
+  max-height: 1.45em; overflow: hidden;
+}
+.statusbar.expanded .statusbar-log { max-height: 7.25em; overflow: auto; }
+
 /* saved-prompt picker + player below the prompt input — one compact line */
 .prompt-player { flex-wrap: nowrap; }
 .prompt-player .saved-pick { flex: 1 1 0; min-width: 0; }
@@ -179,7 +192,7 @@ input[type=number] { width: 70px; padding: 8px 10px; background: #222; color: #e
 textarea#prompt {
   flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee;
   border: 1px solid #333; border-radius: 4px; font: inherit; line-height: 1.4;
-  resize: none; min-height: 36px; max-height: 240px; overflow-y: auto;
+  resize: none; overflow-y: auto;
 }
 .comfy-prompt {
   flex: 1 1 280px; padding: 8px 10px; background: #222; color: #eee;
@@ -229,6 +242,7 @@ input[type=color] { width: 42px; height: 28px; padding: 0; border: 1px solid #33
 .section-label { padding: 8px 14px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
 
 #inputView {
+  position: sticky; top: 0; z-index: 2;
   margin: 8px 14px; background: #0a0a0a; border: 1px solid #222; border-radius: 4px;
   min-height: 80px; display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
