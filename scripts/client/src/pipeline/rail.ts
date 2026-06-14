@@ -144,6 +144,32 @@ export class Rail {
     this.backend?.swapVideo(videoEl)
   }
 
+  /** Hot-swap the camera device in place (no restart): acquire the new device's
+   *  stream, feed it to the backend, then stop the old one. Keeps the output
+   *  track / WebRTC sender alive. */
+  async swapCameraDevice(deviceId: string | null): Promise<void> {
+    if (!this.backend) return
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 },
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      },
+    })
+    this.backend.swapCamera(newStream)
+    // Stop the previous camera track now that the new one is feeding.
+    this.rawStream?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    this.rawStream = newStream
+  }
+
   stop(): void {
     this.backend?.stop()
     this.backend = null

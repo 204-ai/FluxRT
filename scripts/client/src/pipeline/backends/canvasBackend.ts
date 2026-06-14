@@ -145,6 +145,15 @@ export class CanvasBackend implements RailBackend {
     this.fileVideo = videoEl
   }
 
+  swapCamera(cameraStream: MediaStream): void {
+    // Re-point the hidden <video> at the new camera stream; the rAF loop draws
+    // it every frame, so the output canvas/captureStream keeps flowing.
+    if (this.hiddenVideo) {
+      this.hiddenVideo.srcObject = cameraStream
+      void this.hiddenVideo.play().catch(() => {})
+    }
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     return new Promise((res, rej) =>
       this.previewEl.toBlob((b) => (b ? res(b) : rej(new Error('snapshot failed'))), type),

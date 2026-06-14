@@ -160,6 +160,20 @@ export class StreamsBackend implements RailBackend {
     }
   }
 
+  swapCamera(cameraStream: MediaStream): void {
+    if (!this.worker) return
+    // getUserMedia tracks are live immediately (no first-frame wait needed).
+    const [track] = cameraStream.getVideoTracks()
+    if (!track) {
+      this.onLog('swapCamera: no camera track')
+      return
+    }
+    const readable = new MediaStreamTrackProcessor({ track }).readable
+    this.worker.postMessage({ type: 'swap-camera', video: readable }, [
+      readable as unknown as Transferable,
+    ])
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     const c = document.createElement('canvas')
     c.width = this.previewEl.videoWidth

@@ -90,5 +90,8 @@ export interface RailBackend {
    *  (re-captured) video track WITHOUT recreating the output track, so the
    *  WebRTC stream keeps flowing. */
   swapVideo(videoEl: HTMLVideoElement): void
+  /** Hot-swap the camera input in place — feed the new device's track without
+   *  recreating the output track (no pipeline restart / WebRTC renegotiation). */
+  swapCamera(cameraStream: MediaStream): void
   snapshot(type?: string): Promise<Blob>
 }

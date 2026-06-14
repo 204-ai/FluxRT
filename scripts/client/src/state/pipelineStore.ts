@@ -208,10 +208,14 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     async setDevice(deviceId) {
       set({ deviceId })
       if (!get().camEnabled || !rail.active) return
+      // Hot-swap the camera track in place — keeps the output stream alive
+      // instead of restarting the whole pipeline (which froze the output).
       try {
-        await restartSources()
+        await rail.swapCameraDevice(deviceId || null)
       } catch (e) {
         get().log('Camera switch failed: ' + (e instanceof Error ? e.message : e))
+        // Fall back to a full restart if the in-place swap couldn't acquire.
+        await restartSources().catch(() => {})
       }
     },
 

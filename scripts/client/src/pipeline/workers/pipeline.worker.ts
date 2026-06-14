@@ -35,6 +35,7 @@ type InMsg =
   | { type: 'tap'; intervalMs: number }
   | { type: 'stop' }
   | { type: 'swap-video'; video: ReadableStream<VideoFrame> }
+  | { type: 'swap-camera'; video: ReadableStream<VideoFrame> }
 
 let compositor: Compositor | null = null
 let running = false
@@ -43,6 +44,7 @@ let lastTapMs = 0
 let openFrames = 0
 let wake: (() => void) | null = null
 let requestVideoSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
+let requestCameraSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
 
 function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
@@ -129,6 +131,25 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     if (videoIsBase) base = fresh
     else overlay = fresh
   }
+
+  // Hot-swap the camera: it's always the `base` valve when a camera is present.
+  requestCameraSwap = (readable) => {
+    if (!running || !baseIsCamera) {
+      void readable.cancel().catch(() => {})
+      return
+    }
+    try {
+      void base.reader.cancel()
+    } catch {
+      /* already done */
+    }
+    if (base.pending) {
+      base.pending.close()
+      openFrames--
+      base.pending = null
+    }
+    base = startValve(readable)
+  }
   // Steady-state holds one extra open frame for the retained overlay.
   const leakThreshold = 4 + (overlay ? 1 : 0)
   let retainedOverlay: VideoFrame | null = null
@@ -185,6 +206,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     }
   } finally {
     requestVideoSwap = null
+    requestCameraSwap = null
     for (const v of [base, overlay]) {
       if (!v) continue
       try {
@@ -236,6 +258,9 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       break
     case 'swap-video':
       requestVideoSwap?.(m.video)
+      break
+    case 'swap-camera':
+      requestCameraSwap?.(m.video)
       break
   }
 }
