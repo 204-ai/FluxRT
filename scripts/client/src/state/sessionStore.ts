@@ -41,10 +41,8 @@ interface SessionState {
   lipActive: boolean
   serverDefaultPrompt: string
   perf: PerfStats
-  activeTab: 'input' | 'output'
 
   logLine(msg: string): void
-  setTab(tab: 'input' | 'output'): void
   start(): Promise<void>
   stop(): void
   sendCtrl(msg: CtrlOut): boolean
@@ -55,6 +53,7 @@ interface SessionState {
 
 let pc: RTCPeerConnection | null = null
 let ch: RTCDataChannel | null = null
+let outputSender: RTCRtpSender | null = null
 const MAX_LOG_LINES = 500
 let logLines: string[] = []
 
@@ -63,10 +62,6 @@ let logLines: string[] = []
 let lastRecvFps = '—'
 let lastFrames: number | null = null
 let lastT: number | null = null
-
-export function getRemoteStreamTarget(): RTCPeerConnection | null {
-  return pc
-}
 
 type RemoteTrackHandler = (stream: MediaStream) => void
 let onRemoteTrack: RemoteTrackHandler = () => {}
@@ -85,17 +80,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   lipActive: false,
   serverDefaultPrompt: '',
   perf: { pipe: '—', interp: '—', proc: '—', vram: '—', recv: '—' },
-  activeTab: 'input',
 
   logLine(msg) {
     const t = new Date().toLocaleTimeString()
     logLines.push(`[${t}] ${msg}`)
     if (logLines.length > MAX_LOG_LINES) logLines = logLines.slice(-MAX_LOG_LINES)
     set({ logText: logLines.join('\n') + '\n' })
-  },
-
-  setTab(tab) {
-    set({ activeTab: tab })
   },
 
   async start() {
@@ -130,7 +120,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         const stream = rail.outputStream
         const [vt] = stream?.getVideoTracks() ?? []
         if (!vt || !stream) throw new Error('no output track')
-        pc.addTransceiver(vt, { direction: 'sendrecv', streams: [stream] })
+        outputSender = pc.addTransceiver(vt, { direction: 'sendrecv', streams: [stream] }).sender
       } catch (e) {
         logLine('Input source failed: ' + (e instanceof Error ? e.message : e))
         set({ status: 'input blocked', statusCls: 'err', starting: false })
@@ -189,6 +179,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       pc = null
     }
+    outputSender = null
     // Camera pipeline keeps running — bound to the Input-tab toggle, not the
     // connection, so preview + drawing survive a disconnect/reconnect.
     onRemoteTrack(new MediaStream())
@@ -294,7 +285,6 @@ function applyHealthBoot(j: Healthz): void {
   // connect right away (recvonly; the <video> is muted+autoplay).
   if ((j.peers ?? 0) > 0 && !pc) {
     session.logLine(`${j.peers} client(s) already connected — auto-starting viewer`)
-    useSessionStore.setState({ activeTab: 'output' })
     session.start().catch((e) => {
       session.logLine('Auto-start failed: ' + (e instanceof Error ? e.message : e))
       useSessionStore.setState({ starting: false })
@@ -351,6 +341,16 @@ function dispatchCtrl(raw: unknown): void {
 export function logToSession(msg: string): void {
   useSessionStore.getState().logLine(msg)
 }
+
+// When the rail (re)starts and builds a NEW output track, swap it onto the live
+// sender so a pipeline restart (camera/video toggle while connected) doesn't
+// freeze the remote on the old, ended track — replaceTrack needs no renegotiation.
+rail.setOutputTrackHandler((track) => {
+  if (!pc || !outputSender || !track || outputSender.track === track) return
+  void outputSender.replaceTrack(track).catch((e) =>
+    logToSession('output track replace failed: ' + (e instanceof Error ? e.message : e)),
+  )
+})
 
 // Make rail logs visible even before boot() runs.
 setRuntimeLogger(logToSession)

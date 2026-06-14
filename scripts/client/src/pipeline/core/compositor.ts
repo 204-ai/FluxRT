@@ -128,7 +128,7 @@ export class Compositor {
     } else {
       ctx.clearRect(0, 0, W, H)
     }
-    const info = { width: W, height: H, tsMs, mirrored: this.mirrored }
+    const info = { width: W, height: H, tsMs }
     for (const e of this.effects) e.render(ctx, info, this.bus)
   }
 

@@ -28,7 +28,7 @@ export function OverlayCanvas({ source }: { source: SenseSource }) {
       // Sensing runs on the composite (input) / remote video (output), which
       // already reflect the camera mirror — so draw the overlay 1:1 with no
       // extra flip; it then follows the mirror toggle automatically.
-      drawOverlay(canvas, r, false)
+      drawOverlay(canvas, r)
     })
   }, [show, source])
 

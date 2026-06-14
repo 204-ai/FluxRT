@@ -62,6 +62,7 @@ export class Rail {
   private composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
   private tap: { intervalMs: number; cb: TapCallback } | null = null
   private onLog: (m: string) => void
+  private onOutputTrack: (track: MediaStreamTrack | null) => void = () => {}
 
   constructor(events: RailEvents = {}) {
     this.onLog = events.onLog ?? (() => {})
@@ -135,7 +136,18 @@ export class Rail {
       { cameraStream: this.rawStream, videoEl: sources.videoEl },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
+    // A (re)start builds a brand-new output track; notify so the session can
+    // replaceTrack on its live sender (a restart otherwise strands the peer
+    // connection on the old, ended track — frozen remote output).
+    const [outTrack] = this.backend.outputStream.getVideoTracks()
+    this.onOutputTrack(outTrack ?? null)
     return { label }
+  }
+
+  /** Notified with the new output video track on every (re)start. The session
+   *  uses it to replaceTrack on its RTCRtpSender without renegotiation. */
+  setOutputTrackHandler(fn: (track: MediaStreamTrack | null) => void): void {
+    this.onOutputTrack = fn
   }
 
   /** Hot-swap the video-file source in place (no restart): re-feed the worker

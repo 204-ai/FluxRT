@@ -75,7 +75,11 @@ class InputVisionManager {
       this.teardown()
       return
     }
-    if (this.client && this.caps.face === want.face && this.caps.pose === want.pose) return
+    // Keep the existing worker if it already provides everything wanted — only
+    // rebuild to ADD a capability, never to drop one. Tearing down on a shrink
+    // would kill the worker a still-active consumer depends on (e.g. releasing
+    // 'sense' must not stall the 'marker' that still needs pose).
+    if (this.client && (!want.face || this.caps.face) && (!want.pose || this.caps.pose)) return
     this.teardown()
     const client = new VisionClient()
     this.client = client
@@ -119,6 +123,7 @@ export const inputVision = new InputVisionManager()
 class OutputVisionManager {
   private client: VisionClient | null = null
   private timer = 0
+  private sampling = false
   private video: HTMLVideoElement | null = null
   private listeners = new Set<(r: VisionResult) => void>()
   private statusListeners = new Set<(msg: string) => void>()
@@ -143,18 +148,31 @@ class OutputVisionManager {
     this.client = client
     client.onStatus((m) => this.statusListeners.forEach((l) => l(m)))
     client.subscribe((r) => this.listeners.forEach((l) => l(r)))
-    await client.init({ face: true, pose: true })
+    try {
+      await client.init({ face: true, pose: true })
+    } catch (e) {
+      // Init failed — clear the slot and drop the worker so a later start()
+      // retries instead of early-returning on a permanently-dead client.
+      this.client = null
+      client.dispose()
+      throw e
+    }
     this.timer = window.setInterval(() => void this.sample(), 100)
   }
 
   private async sample(): Promise<void> {
     const v = this.video
-    if (!v || !this.client?.isReady || v.readyState < 2 || v.videoWidth === 0) return
+    if (this.sampling || !v || !this.client?.isReady || v.readyState < 2 || v.videoWidth === 0) return
+    this.sampling = true
     try {
       const bitmap = await createImageBitmap(v)
-      this.client.push(bitmap, performance.now())
+      // stop() may have run during the await — don't push to a disposed client.
+      if (this.client) this.client.push(bitmap, performance.now())
+      else bitmap.close()
     } catch {
       /* video not ready — skip */
+    } finally {
+      this.sampling = false
     }
   }
 

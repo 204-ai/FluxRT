@@ -8,8 +8,6 @@ export interface FrameInfo {
   width: number
   height: number
   tsMs: number
-  /** True when the base frame was drawn horizontally flipped (selfie view). */
-  mirrored: boolean
 }
 
 /** Latest-value store analyzers publish into; effects read synchronously at render time. */

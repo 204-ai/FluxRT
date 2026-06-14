@@ -132,7 +132,10 @@ export class StreamsBackend implements RailBackend {
 
   swapVideo(videoEl: HTMLVideoElement): void {
     if (!this.worker) return
+    let sent = false
     const send = () => {
+      if (sent) return
+      sent = true
       const w = this.worker
       if (!w) return
       // captureStream() returns the SAME MediaStream; on a src change the old
@@ -153,8 +156,12 @@ export class StreamsBackend implements RailBackend {
     // Wait for the new clip's FIRST presented frame so the re-captured stream
     // actually has a live track before handing it to the worker; re-capturing
     // immediately would grab the old, just-ended track and freeze the input.
+    // A paused / autoplay-blocked element never fires rVFC, so also fall back on
+    // a timer (the `sent` guard makes whichever fires first win) — otherwise the
+    // overlay would silently never appear.
     if ('requestVideoFrameCallback' in videoEl) {
       videoEl.requestVideoFrameCallback(() => send())
+      setTimeout(send, 600)
     } else {
       send()
     }

@@ -74,7 +74,11 @@ export function createMarkerEffect(initial?: Partial<MarkerConfig>): CanvasEffec
         const last = trail[trail.length - 1]
         if (!last || last.x !== cx || last.y !== cy) trail.push({ x: cx, y: cy })
         while (trail.length > o.trailLen) trail.shift()
-      } else if (!o.trail) {
+      } else if (o.trail) {
+        // Landmark lost this frame (occluded / left frame): fade the trail out
+        // one point per frame instead of leaving it frozen at the last position.
+        trail.shift()
+      } else {
         trail.length = 0
       }
 
