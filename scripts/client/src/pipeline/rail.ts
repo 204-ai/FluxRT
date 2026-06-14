@@ -64,6 +64,9 @@ export class Rail {
   // scratch) can replay the strokes instead of wiping the user's drawing. Each
   // stroke is preceded by a 'cfg' marker capturing its color/size at draw time.
   private drawHistory: Array<StrokeMessage | { type: 'cfg'; patch: Partial<DrawLayerConfig> }> = []
+  // True only between begin/end so hover-driven pointermove (no button held)
+  // is ignored — otherwise it would flood drawHistory and the worker with no-ops.
+  private inStroke = false
   private tap: { intervalMs: number; cb: TapCallback } | null = null
   private onLog: (m: string) => void
   private onOutputTrack: (track: MediaStreamTrack | null) => void = () => {}
@@ -237,19 +240,24 @@ export class Rail {
 
   /** Stroke coords are normalized [0..1] relative to the preview element. */
   beginStroke(x: number, y: number): void {
+    this.inStroke = true
     // Snapshot the active config so a replay reproduces this stroke's color/size.
     this.drawHistory.push({ type: 'cfg', patch: { ...this.drawConfig } }, { type: 'begin', x, y })
     this.backend?.effectMessage('drawLayer', { type: 'begin', x, y })
   }
   moveStroke(x: number, y: number): void {
+    if (!this.inStroke) return // hover with no active stroke — nothing to draw
     this.drawHistory.push({ type: 'move', x, y })
     this.backend?.effectMessage('drawLayer', { type: 'move', x, y })
   }
   endStroke(): void {
+    if (!this.inStroke) return
+    this.inStroke = false
     this.drawHistory.push({ type: 'end' })
     this.backend?.effectMessage('drawLayer', { type: 'end' })
   }
   clearDrawing(): void {
+    this.inStroke = false
     this.drawHistory = []
     this.backend?.effectMessage('drawLayer', { type: 'clear' })
   }
