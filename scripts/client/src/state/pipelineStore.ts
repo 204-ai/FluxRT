@@ -19,7 +19,6 @@ interface PipelineState {
   deviceId: string
   mirror: boolean
   active: boolean
-  showInputPreview: boolean
 
   videoLoaded: boolean
   videoName: string
@@ -53,7 +52,6 @@ interface PipelineState {
   setDevice(deviceId: string): Promise<void>
   refreshCameras(): Promise<void>
   setMirror(on: boolean): void
-  setShowInputPreview(on: boolean): void
   startPipeline(): Promise<void>
   stopPipeline(): void
 
@@ -137,7 +135,6 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     deviceId: '',
     mirror: false,
     active: false,
-    showInputPreview: false,
 
     videoLoaded: false,
     videoName: '',
@@ -234,10 +231,6 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       rail.setMirror(on)
     },
 
-    setShowInputPreview(on) {
-      set({ showInputPreview: on })
-    },
-
     async startPipeline() {
       const { deviceId, camEnabled, videoLoaded, log } = get()
       const { label } = await rail.start({
@@ -246,13 +239,12 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
         videoEl: videoLoaded ? videoSource.el : null,
       })
       log('Input pipeline started: ' + label)
-      // Auto-enable the side-by-side input preview on the Output tab.
-      set({ active: true, showInputPreview: true })
+      set({ active: true })
     },
 
     stopPipeline() {
       rail.stop()
-      set({ active: false, showInputPreview: false, drawMode: 'off' })
+      set({ active: false, drawMode: 'off' })
     },
 
     async loadVideoFile(file) {

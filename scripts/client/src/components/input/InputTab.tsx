@@ -8,6 +8,7 @@ import { CanvasHost } from './CanvasHost'
 import { CompositeSection } from './CompositeSection'
 import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
+import { DrawToolbar } from './DrawToolbar'
 
 const LANDMARKS: Array<[number, string]> = [
   [15, 'Left wrist'],
@@ -22,7 +23,6 @@ const LANDMARKS: Array<[number, string]> = [
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
   const inputRole = useSessionStore((s) => s.inputRole)
-  const showInStage = useSessionStore((s) => s.activeTab) === 'output' && p.showInputPreview
 
   useEffect(() => {
     p.setLogger((m) => useSessionStore.getState().logLine(m))
@@ -50,46 +50,9 @@ export function InputTab({ active }: { active: boolean }) {
             Enable your camera or load a video to preview &amp; draw on the input.
           </div>
         )}
-        <CanvasHost holds={p.active && !showInStage} />
-        {p.active && !showInStage && <OverlayCanvas source="input" />}
-      </div>
-      <div className="controls">
-        <label>
-          <input
-            type="checkbox"
-            disabled={!p.active}
-            checked={p.drawMode !== 'off'}
-            onChange={(e) => p.setDrawMode(e.target.checked ? 'brush' : 'off')}
-          />{' '}
-          Draw on input
-        </label>
-        <label>
-          color{' '}
-          <input
-            type="color"
-            value={p.drawColor}
-            disabled={!p.active}
-            onChange={(e) => p.setDrawColor(e.target.value)}
-          />
-        </label>
-        <label>
-          size{' '}
-          <input
-            type="range"
-            min={1}
-            max={60}
-            step={1}
-            value={p.drawSize}
-            disabled={!p.active}
-            onChange={(e) => p.setDrawSize(+e.target.value)}
-          />
-        </label>
-        <span className="dim" style={{ minWidth: 28 }}>
-          {p.drawSize}px
-        </span>
-        <button disabled={!p.active} onClick={() => p.clearDrawing()}>
-          Clear drawing
-        </button>
+        <CanvasHost holds={p.active} />
+        {p.active && <OverlayCanvas source="input" />}
+        {p.active && <DrawToolbar />}
       </div>
 
       <div className="section-label">Sources</div>

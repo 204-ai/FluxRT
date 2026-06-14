@@ -1,13 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { useSessionStore } from '../../state/sessionStore'
-import { usePipelineStore } from '../../state/pipelineStore'
 import { usePromptStore } from '../../state/promptStore'
 import { registerFocusable } from '../../state/focusRegistry'
 
 export function SessionControls() {
-  const showInputPreview = usePipelineStore((s) => s.showInputPreview)
-  const pipelineActive = usePipelineStore((s) => s.active)
-  const setShowInputPreview = usePipelineStore((s) => s.setShowInputPreview)
   const seed = usePromptStore((s) => s.seed)
   const steps = usePromptStore((s) => s.steps)
   const setSeed = usePromptStore((s) => s.setSeed)
@@ -55,15 +51,6 @@ export function SessionControls() {
           onBlur={(e) => setSteps(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && setSteps((e.target as HTMLInputElement).value)}
         />
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          disabled={!pipelineActive}
-          checked={showInputPreview}
-          onChange={(e) => setShowInputPreview(e.target.checked)}
-        />{' '}
-        Show input preview (left)
       </label>
     </div>
   )
