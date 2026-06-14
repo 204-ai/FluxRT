@@ -16,7 +16,11 @@ export function DrawToolbar() {
         className={'draw-fab' + (p.drawMode !== 'off' ? ' active' : '')}
         title="Drawing tools"
         aria-label="Open drawing tools"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          // Opening the toolbar selects the pencil so you can draw immediately.
+          setOpen(true)
+          p.setDrawMode('brush')
+        }}
       >
         ✏️
       </button>
