@@ -1074,6 +1074,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="FluxRT WebRTC server")
     parser.add_argument("--config", default="configs/stream_processor_config.json")
     parser.add_argument("--int8", action="store_true", help="Enable int8 quantization")
+    parser.add_argument(
+        "--tiny-vae", action="store_true", help="Enable TAEF2 tiny VAE (enable_tiny_vae)"
+    )
+    parser.add_argument(
+        "--flow-upscaler",
+        action="store_true",
+        help="Enable 2x latent flow upscaler (enable_flow_upscaler); pairs well with --tiny-vae",
+    )
     parser.add_argument("--camera", type=int, default=0, help="cv2 camera index")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
@@ -1139,20 +1147,26 @@ def main() -> None:
 
     config_path = args.config
 
-    # --interp overrides interpolation_exp. StreamProcessor sizes the shared
-    # frame buffer from this value in __init__, so it must be baked into the
-    # config the constructor reads. Write a patched temp config and pass that.
+    # Some flags must be baked into the config the StreamProcessor constructor
+    # reads (it sizes buffers / selects models from it in __init__), so collect
+    # any overrides and write them to a patched temp config the constructor uses.
+    if args.interp is not None and (args.interp < 0 or args.interp > 4):
+        parser.error("--interp must be in 0..4")
+    overrides: dict = {}
     if args.interp is not None:
-        if args.interp < 0 or args.interp > 4:
-            parser.error("--interp must be in 0..4")
+        overrides["interpolation_exp"] = args.interp
+    if args.tiny_vae:
+        overrides["enable_tiny_vae"] = True
+    if args.flow_upscaler:
+        overrides["enable_flow_upscaler"] = True
+    if overrides:
         import atexit
         import json as _json
         import tempfile
 
         with open(args.config) as f:
             cfg = _json.load(f)
-        prev = cfg.get("interpolation_exp")
-        cfg["interpolation_exp"] = args.interp
+        cfg.update(overrides)
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", prefix="fluxrt_cfg_", delete=False
         )
@@ -1161,10 +1175,7 @@ def main() -> None:
         config_path = tmp.name
         # Don't leave the patched temp config behind in /tmp on exit.
         atexit.register(lambda p=config_path: os.path.exists(p) and os.unlink(p))
-        log.info(
-            "interpolation_exp override: %s -> %d (2^%d = %d output frames/frame)",
-            prev, args.interp, args.interp, 2 ** args.interp,
-        )
+        log.info("config overrides from flags: %s", overrides)
 
     _load_saved_prompts()
     log.info("Loaded %d saved prompts from %s", len(saved_prompts), SAVED_PROMPTS_PATH)
