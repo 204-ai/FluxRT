@@ -85,10 +85,9 @@ export function InputTab({ active }: { active: boolean }) {
           </div>
           <span className="dim">{roleLabel}</span>
         </div>
+        <CompositeSection />
         <VideoSourceSection />
       </div>
-
-      <CompositeSection />
 
       <SensePanel />
     </section>

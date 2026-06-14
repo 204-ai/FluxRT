@@ -4,7 +4,6 @@ import { PromptPlayer } from './PromptPlayer'
 import { FeatureBar } from './FeatureBar'
 import { ReferencePanel } from './ReferencePanel'
 import { ComfyRow } from './ComfyRow'
-import { LipRow } from './LipRow'
 
 export function OutputTab({ active }: { active: boolean }) {
   return (
@@ -27,8 +26,6 @@ export function OutputTab({ active }: { active: boolean }) {
         <ReferencePanel />
         <ComfyRow />
       </section>
-
-      <LipRow />
     </section>
   )
 }

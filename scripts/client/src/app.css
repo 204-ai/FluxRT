@@ -1,5 +1,6 @@
 :root { color-scheme: dark; }
 body { margin: 0; background: #111; color: #eee; font: 14px/1.4 system-ui, sans-serif; }
+#root { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
 header { padding: 10px 14px; background: #1a1a1a; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 20; }
 .tabs { position: sticky; top: 41px; z-index: 19; }
@@ -21,12 +22,12 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .tab-panel.active { display: block; }
 
 /* ── split view: input (left) | divider | output (right) ── */
-.split-view { display: flex; align-items: stretch; }
+.split-view { display: flex; align-items: stretch; flex: 1 1 auto; min-height: 0; }
 .split-view > .tab-panel {
   display: block;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
-  max-height: calc(100vh - 41px - 40px); /* header + collapsed status bar */
 }
 .split-view > .tab-panel:first-child {   /* Input — left; width driven by the divider drag */
   flex: 0 0 auto;
@@ -136,7 +137,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 
 /* fixed footer status bar: pipeline stats + a 1-line log that expands to ~5 */
 .statusbar {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  flex: 0 0 auto;
   background: #151515; border-top: 1px solid #2a2a2a; color: #9aa;
   font: 11px/1.4 ui-monospace, monospace; padding: 4px 14px 6px; cursor: pointer;
 }
@@ -180,6 +181,17 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 .drop-zone:hover { border-color: #2a6cd4; color: #aaa; }
 .drop-zone.drag { border-color: #2a6cd4; background: #1a2433; color: #cde; }
+
+/* compositing mixer between the camera and video panels (vertical fader) */
+.mixer {
+  flex: 0 0 auto; align-self: stretch; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px; padding: 8px 2px;
+}
+.mixer-slider {
+  -webkit-appearance: slider-vertical; appearance: slider-vertical;
+  writing-mode: vertical-lr; direction: rtl; width: 22px; height: 96px;
+}
+.mixer-val { font-size: 10px; }
 
 /* ── facial-feature builder bar ── */
 #featBar { flex-wrap: nowrap; }
@@ -227,6 +239,7 @@ button.active { background: #1f7a3a; }
 /* compact seed/steps fields in the navbar */
 .nav-field { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #9aa; }
 .nav-field input { width: 56px; padding: 3px 5px; }
+.nav-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
 label { font-size: 12px; color: #aaa; display: flex; align-items: center; gap: 6px; }
 .dim { font-size: 11px; color: #888; }
 
