@@ -1,6 +1,6 @@
 # FluxRT Client (React + TS)
 
-Rewrite of the browser client (`scripts/webrtc_static/`) as a Vite + React 19 + TypeScript app with a composable media pipeline and on-device human sensing.
+The browser client: a Vite + React 19 + TypeScript app with a composable media pipeline and on-device human sensing. (Replaced the original vanilla-JS `webrtc_static/` client, now removed.)
 
 ## Build & serve
 
@@ -27,7 +27,7 @@ yarn vendor     # copy MediaPipe wasm + download .task models into public/ (once
 yarn build      # tsc + vite build -> dist/
 ```
 
-`run_webrtc.py` automatically serves `dist/` at `/` when it exists (assets at `/assets`, MediaPipe runtime at `/mediapipe`). The legacy vanilla client stays available at `/legacy` (and at `/` when no build exists). No Node needed on the GPU box if `dist/` is committed/copied.
+`run_webrtc.py` serves `dist/` at `/` (assets at `/assets`, MediaPipe runtime at `/mediapipe`); if no build exists, `/` returns 503 with the build command. No Node needed on the GPU box if `dist/` is committed/copied.
 
 ## Dev
 

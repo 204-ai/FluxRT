@@ -1,6 +1,6 @@
 // Hand/body marker effect — colored circle (+ optional fading trail) on a
-// chosen pose landmark. Port of input_processor.js step 2, except landmarks
-// now come from the shared vision analyzer via the bus (key 'pose') instead
+// chosen pose landmark. Landmarks
+// come from the shared vision analyzer via the bus (key 'pose') instead
 // of a bespoke PoseLandmarker. Detection runs on the COMPOSITE frame, which
 // already reflects the camera mirror — so the landmarks are in the same space
 // we render into. We use them 1:1 with no extra x-flip or left/right id swap,

@@ -879,6 +879,9 @@ class MainWindow(QMainWindow):
                     read_failures += 1
                     if read_failures > 10:
                         log(f"Video unreadable after rewind, stopping: {video_path}")
+                        # Surface it so the UI resets (Start button, status) like
+                        # the camera path does — otherwise it's stuck on "Running".
+                        self._sig.camera_error.emit()
                         break
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     next_t = time.time()

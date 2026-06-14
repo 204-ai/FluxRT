@@ -43,14 +43,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-# Directory holding the legacy static browser client (index.html, app.js,
-# app.css, input_processor.js). Served at /static, with /legacy returning its
-# index.html (and / too, if the new client build is absent).
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc_static")
-
-# New React/TS client (scripts/client). When a build exists, / serves it and
-# /legacy keeps the old client reachable. Build with: cd scripts/client &&
-# yarn && yarn vendor && yarn build
+# React/TS client (scripts/client) — the only browser client. Build with:
+# yarn --cwd scripts/client install && yarn --cwd scripts/client build
 CLIENT_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client", "dist")
 
 # ComfyUI API-format workflow templates patched + queued by /comfy/edit.
@@ -102,6 +96,9 @@ ref_version: int = 0
 input_owner_pc: Optional[RTCPeerConnection] = None
 input_owner_lock = threading.Lock()
 peer_input_active = threading.Event()
+# False under --no-server-camera: there is no local producer, so the input
+# handoff must not pretend a "server camera" resumes when peers leave.
+has_server_camera: bool = True
 # seq -> pc for every peer with a live video track; min(seq) is next in line.
 input_waiters: dict[int, RTCPeerConnection] = {}
 # Connection order, assigned per /offer — defines who "first connected" is.
@@ -210,6 +207,13 @@ def push_input_frame(frame_bgr: np.ndarray) -> None:
         latest_rgb = rgb
 
 
+def _decode_and_push(frame) -> None:
+    """Decode an av.VideoFrame to BGR and run it through the pipeline. Kept
+    separate so the CPU-bound decode (to_ndarray) runs in an executor thread,
+    never on the asyncio event loop."""
+    push_input_frame(frame.to_ndarray(format="bgr24"))
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Producer — local webcam frames. Pauses while a peer owns the input.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -300,8 +304,11 @@ async def consume_peer_input(track, pc: RTCPeerConnection, seq: int) -> None:
             # so the server camera doesn't flicker in during the handoff.
             if input_owner_pc is None and not input_waiters and peer_input_active.is_set():
                 peer_input_active.clear()
-                broadcast_ctrl("input:server")
-                log.info("No peer inputs left — server camera resumes")
+                if has_server_camera:
+                    broadcast_ctrl("input:server")
+                    log.info("No peer inputs left — server camera resumes")
+                else:
+                    log.info("No peer inputs left — no server camera; output holds the last frame")
 
 
 async def _pump_owner_frames(track, pc: RTCPeerConnection) -> None:
@@ -336,9 +343,9 @@ async def _pump_owner_frames(track, pc: RTCPeerConnection) -> None:
             frame, latest[0] = latest[0], None
             if frame is None:
                 continue
-            bgr = frame.to_ndarray(format="bgr24")
-            # Pipeline write/read is blocking — offload from event loop.
-            await loop.run_in_executor(None, push_input_frame, bgr)
+            # Decode + pipeline write/read are blocking/CPU-bound — offload the
+            # whole thing (including to_ndarray) so the event loop never stalls.
+            await loop.run_in_executor(None, _decode_and_push, frame)
     finally:
         reader.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -421,7 +428,6 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=_lifespan)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # New client build, when present: Vite assets + vendored MediaPipe wasm/models.
 _client_built = os.path.isfile(os.path.join(CLIENT_DIST, "index.html"))
@@ -435,11 +441,11 @@ if _client_built:
 @app.middleware("http")
 async def _no_cache_client(request: Request, call_next):
     """Force revalidation of the browser client. Without Cache-Control,
-    browsers heuristically cache /static/app.js and serve stale clients
-    after a server update (a LAN 304 roundtrip is free)."""
+    browsers heuristically cache the hashed assets / index and serve a stale
+    client after a server update (a LAN 304 roundtrip is free)."""
     response = await call_next(request)
     path = request.url.path
-    if path == "/" or path == "/legacy" or path.startswith(("/static", "/assets")):
+    if path == "/" or path.startswith("/assets"):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -447,7 +453,11 @@ async def _no_cache_client(request: Request, call_next):
 @app.post("/offer")
 async def offer(request: Request):
     body = await request.json()
-    offer_sdp = RTCSessionDescription(sdp=body["sdp"], type=body["type"])
+    sdp = body.get("sdp")
+    sdp_type = body.get("type")
+    if not sdp or not sdp_type:
+        raise HTTPException(status_code=400, detail="offer requires 'sdp' and 'type'")
+    offer_sdp = RTCSessionDescription(sdp=sdp, type=sdp_type)
 
     pc = RTCPeerConnection()
     pcs.add(pc)
@@ -536,6 +546,8 @@ async def offer(request: Request):
             elif msg.startswith("steps:"):
                 try:
                     steps = int(msg[len("steps:"):])
+                    if steps < 1 or steps > 8:
+                        raise ValueError("steps out of range")
                     current_steps = steps
                     sp.set_steps(steps)
                     safe_send(channel, f"ack:steps:{steps}")
@@ -848,6 +860,16 @@ async def comfy_edit(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Workflow template error: {exc}")
 
+    # The patch targets specific node ids from the exported graph — fail clearly
+    # if the template was re-exported/renumbered rather than KeyError-ing mid-run
+    # (after the snap was already uploaded to the comfy server).
+    for node_id in ("78", "111", "3"):
+        if node_id not in wf or "inputs" not in wf[node_id]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Workflow template missing node {node_id} — re-export qwen_edit_2509.api.json",
+            )
+
     seed = int.from_bytes(os.urandom(4), "big")
 
     try:
@@ -1010,14 +1032,15 @@ async def delete_saved_prompt(request: Request):
 
 @app.get("/")
 async def _index():
-    if _client_built:
-        return FileResponse(os.path.join(CLIENT_DIST, "index.html"))
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
-
-
-@app.get("/legacy")
-async def _legacy_index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    if not _client_built:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Client build not found. Build it with: "
+                "yarn --cwd scripts/client install && yarn --cwd scripts/client build"
+            ),
+        )
+    return FileResponse(os.path.join(CLIENT_DIST, "index.html"))
 
 
 @app.get("/healthz")
@@ -1029,7 +1052,13 @@ async def _health():
         "reference_enabled": _reference_enabled(),
         "reference_set": latest_reference_png is not None,
         "reference_version": ref_version,
-        "input_source": "peer" if peer_input_active.is_set() else "server",
+        "input_source": (
+            "peer"
+            if peer_input_active.is_set()
+            else "server"
+            if has_server_camera
+            else "none"
+        ),
         "input_waiters": len(input_waiters),
         "lip_enabled": _lip_enabled(),
         "lip_active": lip_active,
@@ -1207,7 +1236,7 @@ def main() -> None:
     sp.start()
 
     # Initialize parameter mirror from config + CLI overrides.
-    global current_prompt, current_seed, current_steps
+    global current_prompt, current_seed, current_steps, has_server_camera
     current_prompt = args.initial_prompt or sp.config.get("default_prompt", "")
     current_seed = int(sp.config.get("default_seed", 0))
     current_steps = int(sp.config.get("default_steps", 2))
@@ -1229,9 +1258,10 @@ def main() -> None:
 
     if args.no_server_camera:
         log.info("--no-server-camera: skipping local camera; waiting for peer input.")
-        # Mark the peer-input slot as needing a peer immediately so the
-        # producer (if anything else ever started it) would yield.
-        peer_input_active.set()
+        # No local producer exists — leave peer_input_active clear so a peer sets
+        # it on claim, and /healthz honestly reports 'none' until then (instead
+        # of a phantom 'peer'/'server' source).
+        has_server_camera = False
     else:
         producer_thread = threading.Thread(
             target=producer_loop, args=(args.camera,), daemon=True
