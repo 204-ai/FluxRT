@@ -76,13 +76,12 @@ export class CanvasBackend implements RailBackend {
   }
 
   private maybeTap(tsMs: number): void {
-    const tapSource = this.hiddenVideo ?? this.fileVideo
-    if (!tapSource || !this.tapCb || this.tapBusy || tsMs - this.lastTapMs < this.tapIntervalMs)
-      return
-    if (tapSource.readyState < 2 || tapSource.videoWidth === 0) return
+    if (!this.tapCb || this.tapBusy || tsMs - this.lastTapMs < this.tapIntervalMs) return
+    // Sample the COMPOSITE canvas so sensing reflects camera + video.
+    if (this.previewEl.width === 0) return
     this.lastTapMs = tsMs
     this.tapBusy = true
-    createImageBitmap(tapSource)
+    createImageBitmap(this.previewEl)
       .then((bitmap) => {
         this.tapBusy = false
         if (this.tapCb) this.tapCb(bitmap, tsMs)

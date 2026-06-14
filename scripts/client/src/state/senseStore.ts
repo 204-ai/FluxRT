@@ -12,10 +12,13 @@ import { useSessionStore } from './sessionStore'
 import type { HumanAnalysis, VisionResult } from '../vision/types'
 
 export type SenseSource = 'input' | 'output'
+/** How the sense visualisation appears over the input preview. */
+export type SenseOverlay = 'overlay' | 'only' | 'off'
 
 interface SenseState {
   enabled: boolean
   source: SenseSource
+  overlay: SenseOverlay
   status: string
   analysis: HumanAnalysis | null
 
@@ -28,6 +31,7 @@ interface SenseState {
 
   setEnabled(on: boolean): Promise<void>
   setSource(source: SenseSource): Promise<void>
+  setOverlay(mode: SenseOverlay): void
   setComposeEnabled(on: boolean): void
   setComposeTheme(theme: ComposeTheme): void
   setComposeMinGap(secs: number): void
@@ -107,6 +111,7 @@ function detach(): void {
 export const useSenseStore = create<SenseState>((set, get) => ({
   enabled: false,
   source: 'input',
+  overlay: 'overlay',
   status: '',
   analysis: null,
 
@@ -115,6 +120,10 @@ export const useSenseStore = create<SenseState>((set, get) => ({
   composeMinGapSecs: 5,
   composeKey: '',
   composePrompt: '',
+
+  setOverlay(mode) {
+    set({ overlay: mode })
+  },
 
   setComposeEnabled(on) {
     set({ composeEnabled: on })

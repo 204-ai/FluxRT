@@ -182,11 +182,12 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       const videoFrame = baseIsCamera ? retainedOverlay : frame
       compositor.drawComposite(cameraFrame, videoFrame, tsMs)
 
-      // Analyzer tap: sample the BASE source frame (pre-composite) at cadence.
+      // Analyzer tap: sample the COMPOSITE (camera + video) at cadence, so
+      // sensing reflects what's actually composited — not just the base layer.
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
         try {
-          const bitmap = await createImageBitmap(frame)
+          const bitmap = await createImageBitmap(canvas)
           post({ type: 'tap-frame', bitmap, tsMs }, [bitmap])
         } catch {
           /* frame raced close — skip */

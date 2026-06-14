@@ -10,10 +10,14 @@ import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
 import { SensePanel } from '../sense/SensePanel'
+import { useSenseStore } from '../../state/senseStore'
 
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
   const inputRole = useSessionStore((s) => s.inputRole)
+  const senseEnabled = useSenseStore((s) => s.enabled)
+  const senseOverlay = useSenseStore((s) => s.overlay)
+  const senseOnly = senseEnabled && senseOverlay === 'only'
 
   useEffect(() => {
     p.setLogger((m) => useSessionStore.getState().logLine(m))
@@ -40,8 +44,8 @@ export function InputTab({ active }: { active: boolean }) {
             Enable your camera or load a video to preview &amp; draw on the input.
           </div>
         )}
-        <CanvasHost holds={p.active} />
-        {p.active && <OverlayCanvas source="input" />}
+        <CanvasHost holds={p.active && !senseOnly} />
+        {p.active && senseOverlay !== 'off' && <OverlayCanvas source="input" />}
         {p.active && <DrawToolbar />}
       </div>
 

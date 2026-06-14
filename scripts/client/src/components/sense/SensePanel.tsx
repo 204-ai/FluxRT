@@ -3,7 +3,7 @@
 // engine (inputVision) and always sense the composite input — there is no
 // input/output source selector.
 
-import { useSenseStore } from '../../state/senseStore'
+import { useSenseStore, type SenseOverlay } from '../../state/senseStore'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { InfoPanel } from './InfoPanel'
 
@@ -19,9 +19,11 @@ const LANDMARKS: Array<[number, string]> = [
 
 export function SensePanel() {
   const enabled = useSenseStore((s) => s.enabled)
+  const overlay = useSenseStore((s) => s.overlay)
   const status = useSenseStore((s) => s.status)
   const analysis = useSenseStore((s) => s.analysis)
   const setEnabled = useSenseStore((s) => s.setEnabled)
+  const setOverlay = useSenseStore((s) => s.setOverlay)
   const camActive = usePipelineStore((s) => s.active)
   const p = usePipelineStore()
 
@@ -39,6 +41,16 @@ export function SensePanel() {
           />{' '}
           Sense human (detection, expression, behavior){camActive ? '' : ' — enable camera'}
         </label>
+        {enabled && (
+          <label className="dim" title="How the sense visualisation appears over the input preview">
+            show{' '}
+            <select value={overlay} onChange={(e) => setOverlay(e.target.value as SenseOverlay)}>
+              <option value="overlay">overlay</option>
+              <option value="only">only</option>
+              <option value="off">don't show</option>
+            </select>
+          </label>
+        )}
         <span className="dim">{status}</span>
       </div>
       {enabled && <ComposeControls />}
