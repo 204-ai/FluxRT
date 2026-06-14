@@ -132,20 +132,32 @@ export class StreamsBackend implements RailBackend {
 
   swapVideo(videoEl: HTMLVideoElement): void {
     if (!this.worker) return
-    // The element's previous captured track ended when its src changed; capture
-    // its NEW video track and hand a fresh readable to the worker. The output
-    // generator/track is left untouched, so the WebRTC stream keeps flowing.
-    const stream = videoEl.captureStream()
-    this.capturedStream = stream
-    const [track] = stream.getVideoTracks()
-    if (!track) {
-      this.onLog('swapVideo: no video track after re-capture')
-      return
+    const send = () => {
+      const w = this.worker
+      if (!w) return
+      // captureStream() returns the SAME MediaStream; on a src change the old
+      // track ends and a new one is added once the element presents frames.
+      // Pick the LIVE track — the just-ended old track may still be listed
+      // (and could be first), and binding the worker to it would stall it.
+      const stream = videoEl.captureStream()
+      this.capturedStream = stream
+      const tracks = stream.getVideoTracks()
+      const track = tracks.find((t) => t.readyState === 'live') ?? tracks[0]
+      if (!track) {
+        this.onLog('swapVideo: no live video track after re-capture')
+        return
+      }
+      const readable = new MediaStreamTrackProcessor({ track }).readable
+      w.postMessage({ type: 'swap-video', video: readable }, [readable as unknown as Transferable])
     }
-    const readable = new MediaStreamTrackProcessor({ track }).readable
-    this.worker.postMessage({ type: 'swap-video', video: readable }, [
-      readable as unknown as Transferable,
-    ])
+    // Wait for the new clip's FIRST presented frame so the re-captured stream
+    // actually has a live track before handing it to the worker; re-capturing
+    // immediately would grab the old, just-ended track and freeze the input.
+    if ('requestVideoFrameCallback' in videoEl) {
+      videoEl.requestVideoFrameCallback(() => send())
+    } else {
+      send()
+    }
   }
 
   async snapshot(type = 'image/png'): Promise<Blob> {
