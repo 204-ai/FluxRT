@@ -2,3 +2,6 @@ node_modules/
 dist/
 public/mediapipe/
 tsconfig.tsbuildinfo
+
+# This project uses yarn only — never commit npm's lockfile
+package-lock.json
