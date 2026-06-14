@@ -17,16 +17,20 @@ class StreamProcessor:
         self.resolution = self.config["resolution"]
         output_batch_size = 2 ** self.config["interpolation_exp"]
 
-        self.input_shared_tensor = SharedTensor(
-            (self.resolution["height"], self.resolution["width"], 3), create=True
-        )
+        height, width = self.resolution["height"], self.resolution["width"]
+        out_height, out_width = height, width
+        if self.config.get("enable_flow_upscaler", False):
+            out_height, out_width = out_height * 2, out_width * 2
+
+        self.input_shared_tensor = SharedTensor((height, width, 3), create=True)
         self.output_shared_tensor = SharedTensor(
-            (self.resolution["height"], self.resolution["width"], 3), create=True
+            (out_height, out_width, 3), create=True
         )
         self.output_batch_shared_tensor = SharedTensor(
-            (output_batch_size, self.resolution["height"], self.resolution["width"], 3),
-            create=True,
+            (output_batch_size, out_height, out_width, 3), create=True
         )
+
+        self.out_resolution = {"height": out_height, "width": out_width}
 
         multiprocessing.set_start_method("spawn", force=True)
 
@@ -100,6 +104,9 @@ class StreamProcessor:
 
     def get_resolution(self) -> dict:
         return self.resolution
+
+    def get_out_resolution(self) -> dict:
+        return self.out_resolution
 
     def is_ready(self) -> bool:
         return bool(self.frame_written.value)

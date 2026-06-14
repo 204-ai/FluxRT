@@ -11,6 +11,8 @@ RIFE-safetensors/
 LivePortrait/
 LivePortrait-code/
 loras/
+taef2/
+FlowUpscaler/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
