@@ -5,6 +5,8 @@ import { setRemoteTrackHandler, useSessionStore } from '../../state/sessionStore
 import { outputVision } from '../../state/runtime'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { RatingOverlay } from './RatingOverlay'
+import { FullscreenButton } from '../FullscreenButton'
+import { useViewerReveal } from '../../lib/useViewerReveal'
 
 export function Stage() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -16,6 +18,7 @@ export function Stage() {
   const stop = useSessionStore((s) => s.stop)
   const canStart = !starting && !connected && status !== 'connecting...'
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
+  const reveal = useViewerReveal()
 
   useEffect(() => {
     const v = videoRef.current
@@ -48,13 +51,17 @@ export function Stage() {
 
   return (
     <div className="stage">
-      <div className="remote-wrap overlay-anchor">
+      <div
+        className={'remote-wrap overlay-anchor' + (reveal.shown ? ' controls-shown' : '')}
+        {...reveal.pointerProps}
+      >
         <video id="v" ref={videoRef} autoPlay playsInline muted />
         <OverlayCanvas source="output" />
         <RatingOverlay />
+        <FullscreenButton label="output" />
         {connected ? (
           <button
-            className="play-overlay pause"
+            className="play-overlay pause viewer-chrome"
             title="Stop stream"
             aria-label="Stop stream"
             onClick={() => stop()}

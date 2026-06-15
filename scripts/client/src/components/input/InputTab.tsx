@@ -5,6 +5,7 @@ import { useEffect } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { CanvasHost } from './CanvasHost'
+import { FullscreenButton } from '../FullscreenButton'
 import { CompositeSection } from './CompositeSection'
 import { VideoSourceSection } from './VideoSourceSection'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
@@ -12,6 +13,7 @@ import { DrawToolbar } from './DrawToolbar'
 import { SensePanel } from '../sense/SensePanel'
 import { MetricsOverlay } from '../sense/MetricsOverlay'
 import { useSenseStore } from '../../state/senseStore'
+import { useViewerReveal } from '../../lib/useViewerReveal'
 
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
@@ -19,6 +21,7 @@ export function InputTab({ active }: { active: boolean }) {
   const senseEnabled = useSenseStore((s) => s.enabled)
   const senseOverlay = useSenseStore((s) => s.overlay)
   const senseOnly = senseEnabled && senseOverlay === 'only'
+  const reveal = useViewerReveal()
 
   useEffect(() => {
     p.setLogger((m) => useSessionStore.getState().logLine(m))
@@ -39,7 +42,11 @@ export function InputTab({ active }: { active: boolean }) {
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
-      <div id="inputView" className={'overlay-anchor' + (senseOnly ? ' sense-only' : '')}>
+      <div
+        id="inputView"
+        className={'overlay-anchor' + (senseOnly ? ' sense-only' : '') + (reveal.shown ? ' controls-shown' : '')}
+        {...reveal.pointerProps}
+      >
         {!p.active && (
           <div className="dim" style={{ padding: 24 }}>
             Enable your camera or load a video to preview &amp; draw on the input.
@@ -48,6 +55,7 @@ export function InputTab({ active }: { active: boolean }) {
         <CanvasHost holds={p.active} />
         {p.active && senseOverlay !== 'off' && <OverlayCanvas source="input" />}
         {p.active && <DrawToolbar />}
+        {p.active && <FullscreenButton label="input" />}
         {p.active && senseEnabled && senseOverlay !== 'off' && <MetricsOverlay />}
       </div>
 

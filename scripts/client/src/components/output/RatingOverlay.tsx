@@ -36,14 +36,14 @@ export function RatingOverlay() {
 
   if (!open) {
     return (
-      <button className="rate-fab" title="Rate this prompt" aria-label="Open scorecard" onClick={() => setOpen(true)}>
+      <button className="rate-fab viewer-chrome" title="Rate this prompt" aria-label="Open scorecard" onClick={() => setOpen(true)}>
         ⭐
       </button>
     )
   }
 
   return (
-    <div className="rate-widget" role="region" aria-label="Prompt scorecard">
+    <div className="rate-widget viewer-chrome" role="region" aria-label="Prompt scorecard">
       <div className="rate-head">
         <span className="dim">Score</span>
         <button className="rate-x" title="Collapse" aria-label="Collapse" onClick={() => setOpen(false)}>
