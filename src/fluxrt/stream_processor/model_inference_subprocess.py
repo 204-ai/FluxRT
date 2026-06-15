@@ -54,22 +54,24 @@ def slerp(a: torch.Tensor, b: torch.Tensor, t: float, eps: float = 1e-6) -> torc
     input dtype (the embeddings are bfloat16). Falls back to lerp when the two
     vectors are nearly colinear (sin(theta) -> 0).
     """
-    a32, b32 = a.float(), b.float()
-    af, bf = a32.flatten(), b32.flatten()
+    # Compute only the angle/weights in float32 (scalars — cheap, numerically
+    # stable). The flattened float32 copies used for the dot product are
+    # transient and freed immediately; the final blend is done in the input
+    # dtype (bfloat16) to avoid materializing a full-size float32 result every
+    # frame on the memory-tight prompt-travel hot path.
+    af, bf = a.flatten().float(), b.flatten().float()
     dot = (af @ bf) / (af.norm() * bf.norm() + eps)
     dot = dot.clamp(-1.0, 1.0)
     # Fall back to lerp when nearly colinear in EITHER direction. Near-parallel
     # (dot -> 1) slerp == lerp anyway; near-anti-parallel (dot -> -1) makes
     # sin(theta) -> 0, so the slerp divisor blows up — lerp is the safe path.
     if dot.abs() > 0.9995:
-        out = torch.lerp(a32, b32, t)
-    else:
-        theta = torch.acos(dot)
-        sin_theta = torch.sin(theta)
-        out = (torch.sin((1.0 - t) * theta) / sin_theta) * a32 + (
-            torch.sin(t * theta) / sin_theta
-        ) * b32
-    return out.to(a.dtype)
+        return torch.lerp(a, b, t)
+    theta = torch.acos(dot)
+    sin_theta = torch.sin(theta)
+    w_a = (torch.sin((1.0 - t) * theta) / sin_theta).to(a.dtype)
+    w_b = (torch.sin(t * theta) / sin_theta).to(a.dtype)
+    return w_a * a + w_b * b
 
 
 class ModelInferenceSubprocess:
