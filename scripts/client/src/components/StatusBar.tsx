@@ -6,6 +6,7 @@ import { useSessionStore } from '../state/sessionStore'
 
 export function StatusBar() {
   const perf = useSessionStore((s) => s.perf)
+  const outDims = useSessionStore((s) => s.outDims)
   const logText = useSessionStore((s) => s.logText)
   const [expanded, setExpanded] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
@@ -28,7 +29,7 @@ export function StatusBar() {
       title={expanded ? 'Click to collapse the log' : 'Click to expand the log'}
     >
       <div className="statusbar-stats">
-        {`pipe ${perf.pipe} (×interp ${perf.interp})  ·  recv ${perf.recv}  ·  proc ${perf.proc}  ·  vram ${perf.vram}`}
+        {`pipe ${perf.pipe} (×interp ${perf.interp})  ·  recv ${perf.recv}  ·  proc ${perf.proc}  ·  vram ${perf.vram}  ·  res ${outDims}`}
       </div>
       <pre className="statusbar-log" ref={logRef}>
         {logText}

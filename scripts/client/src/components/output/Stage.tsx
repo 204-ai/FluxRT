@@ -1,4 +1,5 @@
-// Output stage: remote AI video + output sense overlay + a resolution readout.
+// Output stage: remote AI video + output sense overlay. The output resolution
+// is reported into the footer stats (sessionStore.outDims), not as an overlay.
 
 import { useEffect, useRef, useState } from 'react'
 import { setRemoteTrackHandler, useSessionStore } from '../../state/sessionStore'
@@ -15,9 +16,7 @@ export function Stage() {
   const starting = useSessionStore((s) => s.starting)
   const status = useSessionStore((s) => s.status)
   const start = useSessionStore((s) => s.start)
-  const stop = useSessionStore((s) => s.stop)
   const canStart = !starting && !connected && status !== 'connecting...'
-  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
   const reveal = useViewerReveal()
   const [maximized, setMaximized] = useState(false)
 
@@ -25,9 +24,11 @@ export function Stage() {
     const v = videoRef.current
     if (!v) return
     // The received frame size IS the output resolution (already 2x when the
-    // server's flow upscaler is on).
+    // server's flow upscaler is on); surfaced in the footer stats.
     const updateDims = () =>
-      setDims(v.videoWidth && v.videoHeight ? { w: v.videoWidth, h: v.videoHeight } : null)
+      useSessionStore.setState({
+        outDims: v.videoWidth && v.videoHeight ? `${v.videoWidth}×${v.videoHeight}` : '—',
+      })
     setRemoteTrackHandler((stream) => {
       const has = stream.getTracks().length
       v.srcObject = has ? stream : null
@@ -36,7 +37,7 @@ export function Stage() {
         // instead of failing silently with a black stage.
         v.play().catch((err) => logLine('Autoplay blocked: ' + err.message))
       } else {
-        setDims(null)
+        useSessionStore.setState({ outDims: '—' })
       }
     })
     v.addEventListener('loadedmetadata', updateDims)
@@ -60,16 +61,9 @@ export function Stage() {
         <OverlayCanvas source="output" />
         <RatingOverlay />
         <FullscreenButton label="output" maximized={maximized} onToggle={() => setMaximized((v) => !v)} />
-        {connected ? (
-          <button
-            className="play-overlay pause viewer-chrome"
-            title="Stop stream"
-            aria-label="Stop stream"
-            onClick={() => stop()}
-          >
-            ⏸
-          </button>
-        ) : (
+        {/* Only the start (▶) button overlays the video, as the primary CTA;
+            stopping is done from the header's Stop control. */}
+        {!connected && (
           <button
             className="play-overlay"
             title="Start stream"
@@ -79,11 +73,6 @@ export function Stage() {
           >
             ▶
           </button>
-        )}
-        {dims && (
-          <div className="res-badge" title="Output resolution">
-            {dims.w}×{dims.h}
-          </div>
         )}
       </div>
     </div>
