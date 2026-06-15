@@ -26,9 +26,12 @@ interface PromptState {
   savedStatus: string
   loopRunning: boolean
   loopDelay: number
+  morph: boolean
+  morphFrames: number
 
   setPromptLocal(text: string): void
   sendPrompt(text: string): void
+  setMorph(on: boolean): void
   setSeed(v: string): void
   setSteps(v: string): void
   applyFeature(key: FeatureKey, phrase: string): void
@@ -68,6 +71,8 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   savedStatus: '',
   loopRunning: false,
   loopDelay: 10,
+  morph: false,
+  morphFrames: 48,
 
   setPromptLocal(text) {
     set({ prompt: text })
@@ -75,7 +80,21 @@ export const usePromptStore = create<PromptState>((set, get) => ({
 
   sendPrompt(text) {
     set({ prompt: text })
-    useSessionStore.getState().sendCtrl({ kind: 'prompt', text })
+    const { morph, morphFrames } = get()
+    if (morph) {
+      // Slerp morphing on: smoothly travel to the new prompt instead of
+      // hard-swapping. All prompt sources (editor, features, saved, autoloop)
+      // funnel through here, so the toggle covers them all.
+      useSessionStore
+        .getState()
+        .sendCtrl({ kind: 'promptTravel', text, frames: morphFrames, mode: 'slerp' })
+    } else {
+      useSessionStore.getState().sendCtrl({ kind: 'prompt', text })
+    }
+  },
+
+  setMorph(on) {
+    set({ morph: on })
   },
 
   setSeed(v) {
@@ -112,6 +131,8 @@ export const usePromptStore = create<PromptState>((set, get) => ({
     set({ featureState: {}, styleSelection: '' })
     const text = useSessionStore.getState().serverDefaultPrompt || ''
     set({ prompt: text })
+    // Reset is a hard snap back to the default, not a creative transition —
+    // always instant, even when slerp morphing is enabled for normal changes.
     if (text) useSessionStore.getState().sendCtrl({ kind: 'prompt', text })
   },
 

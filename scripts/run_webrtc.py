@@ -526,7 +526,35 @@ async def offer(request: Request):
             if not isinstance(msg, str):
                 return
             global current_prompt, current_seed, current_steps
-            if msg.startswith("prompt:"):
+            if msg.startswith("prompt-travel:"):
+                # Wire format (ctrlProtocol.ts): "prompt-travel:<frames>:<mode>:<text>".
+                # text may contain colons, so peel off exactly the two leading
+                # fields with maxsplit=2. Reject anything that doesn't match the
+                # contract (same frames>=1 / mode checks as POST /prompt-travel)
+                # rather than silently treating the prefix as prompt text.
+                parts = msg[len("prompt-travel:"):].split(":", 2)
+                if (
+                    len(parts) == 3
+                    and parts[0].isdigit()
+                    and int(parts[0]) >= 1
+                    and parts[1] in ("slerp", "lerp")
+                    and parts[2].strip()
+                ):
+                    frames, mode = int(parts[0]), parts[1]
+                    new_prompt = parts[2].strip()
+                    log.info(
+                        "Prompt travel: %r (frames=%d, mode=%s)",
+                        new_prompt,
+                        frames,
+                        mode,
+                    )
+                    current_prompt = new_prompt
+                    sp.start_prompt_travel(new_prompt, frames=frames, mode=mode)
+                    safe_send(channel, "ack:prompt")
+                    broadcast_ctrl(f"state:prompt:{new_prompt}")
+                else:
+                    safe_send(channel, "err:prompt-travel")
+            elif msg.startswith("prompt:"):
                 new_prompt = msg[len("prompt:"):].strip()
                 if new_prompt:
                     log.info("Prompt update: %r", new_prompt)
@@ -615,6 +643,61 @@ async def post_prompt(request: Request):
     log.info("Prompt set via API: %r", prompt)
     broadcast_ctrl(f"state:prompt:{prompt}")
     return JSONResponse({"ok": True, "prompt": prompt})
+
+
+@app.post("/prompt-travel")
+async def post_prompt_travel(request: Request):
+    """Smoothly morph from the current prompt to a target prompt.
+    Body: JSON {"prompt": "...", "frames": 48, "mode": "slerp"} OR raw
+    text/plain (the target prompt, with default frames/mode).
+    Query: ?prompt=...&frames=...&mode=... as an alternative."""
+    if not sp:
+        raise HTTPException(status_code=503, detail="StreamProcessor not ready")
+
+    prompt: str | None = None
+    frames_raw = 48
+    mode = "slerp"
+
+    q = request.query_params.get("prompt")
+    if q is not None:
+        prompt = q
+        frames_raw = request.query_params.get("frames", frames_raw)
+        mode = request.query_params.get("mode", mode)
+    else:
+        ctype = (request.headers.get("content-type") or "").lower()
+        if "application/json" in ctype:
+            try:
+                payload = await request.json()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Bad JSON: {exc}")
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=400, detail="Expected JSON object")
+            prompt = payload.get("prompt")
+            frames_raw = payload.get("frames", frames_raw)
+            mode = payload.get("mode", mode)
+        else:
+            prompt = (await request.body()).decode("utf-8", errors="replace")
+
+    if not prompt or not prompt.strip():
+        raise HTTPException(status_code=400, detail="Empty prompt")
+    try:
+        frames = int(frames_raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="frames must be an integer")
+    if frames < 1:
+        raise HTTPException(status_code=400, detail="frames must be >= 1")
+    if mode not in ("slerp", "lerp"):
+        raise HTTPException(status_code=400, detail="mode must be 'slerp' or 'lerp'")
+
+    prompt = prompt.strip()
+    global current_prompt
+    current_prompt = prompt
+    sp.start_prompt_travel(prompt, frames=frames, mode=mode)
+    log.info("Prompt travel via API: %r (frames=%d, mode=%s)", prompt, frames, mode)
+    broadcast_ctrl(f"state:prompt:{prompt}")
+    return JSONResponse(
+        {"ok": True, "prompt": prompt, "frames": frames, "mode": mode}
+    )
 
 
 @app.post("/seed")
