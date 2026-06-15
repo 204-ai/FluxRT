@@ -9,6 +9,15 @@ describe('encodeCtrl', () => {
     expect(encodeCtrl({ kind: 'seed', value: 52 })).toBe('seed:52')
     expect(encodeCtrl({ kind: 'steps', value: 4 })).toBe('steps:4')
   })
+
+  it('encodes prompt-travel and preserves colons in the prompt text', () => {
+    expect(
+      encodeCtrl({ kind: 'promptTravel', text: 'a cat, in the style of: noir', frames: 48, mode: 'slerp' }),
+    ).toBe('prompt-travel:48:slerp:a cat, in the style of: noir')
+    expect(encodeCtrl({ kind: 'promptTravel', text: 'sunset', frames: 24, mode: 'lerp' })).toBe(
+      'prompt-travel:24:lerp:sunset',
+    )
+  })
 })
 
 describe('decodeCtrl', () => {

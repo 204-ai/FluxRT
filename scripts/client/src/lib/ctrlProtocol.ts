@@ -4,6 +4,7 @@
 
 export type CtrlOut =
   | { kind: 'prompt'; text: string }
+  | { kind: 'promptTravel'; text: string; frames: number; mode: 'slerp' | 'lerp' }
   | { kind: 'seed'; value: number }
   | { kind: 'steps'; value: number }
 
@@ -24,6 +25,10 @@ export function encodeCtrl(msg: CtrlOut): string {
   switch (msg.kind) {
     case 'prompt':
       return 'prompt:' + msg.text
+    case 'promptTravel':
+      // Server parses "prompt-travel:<frames>:<mode>:<text>"; text may contain
+      // colons (server splits with maxsplit=2 so they're preserved).
+      return 'prompt-travel:' + msg.frames + ':' + msg.mode + ':' + msg.text
     case 'seed':
       return 'seed:' + msg.value
     case 'steps':

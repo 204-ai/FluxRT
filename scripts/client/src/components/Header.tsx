@@ -17,6 +17,8 @@ export function Header() {
   const steps = usePromptStore((s) => s.steps)
   const setSeed = usePromptStore((s) => s.setSeed)
   const setSteps = usePromptStore((s) => s.setSteps)
+  const morph = usePromptStore((s) => s.morph)
+  const setMorph = usePromptStore((s) => s.setMorph)
   const [lipBusy, setLipBusy] = useState(false)
 
   const canStart = !starting && !connected && status !== 'connecting...'
@@ -107,6 +109,19 @@ export function Header() {
           onKeyDown={(e) => e.key === 'Enter' && setSteps((e.target as HTMLInputElement).value)}
         />
       </label>
+      <button
+        className={'icon-btn morph' + (morph ? ' on' : '')}
+        aria-label="Toggle slerp prompt morphing"
+        aria-pressed={morph}
+        title={
+          morph
+            ? 'Slerp morphing ON — prompt changes morph smoothly'
+            : 'Slerp morphing OFF — prompt changes swap instantly'
+        }
+        onClick={() => setMorph(!morph)}
+      >
+        🌀
+      </button>
       <button
         className={'icon-btn lip' + (lipActive ? ' on' : '')}
         aria-label="Toggle lipsync"

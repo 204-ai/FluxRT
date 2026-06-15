@@ -87,6 +87,15 @@ class StreamProcessor:
     def set_prompt(self, prompt: str) -> None:
         self.model_inference_subprocess.set_param(name="prompt", value=prompt)
 
+    def start_prompt_travel(
+        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+    ) -> None:
+        """Smoothly morph from the current prompt to target_prompt over
+        `frames` generated frames (mode: "slerp" or "lerp")."""
+        self.model_inference_subprocess.start_prompt_travel(
+            target_prompt, frames, mode
+        )
+
     def set_steps(self, steps: int) -> None:
         self.model_inference_subprocess.set_param(name="steps", value=steps)
 
