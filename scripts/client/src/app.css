@@ -161,15 +161,17 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .fs-fab:hover { background: rgba(40, 40, 40, 0.95); }
 .fs-fab.active { background: #2a6cd4; }
 
-/* native fullscreen: fill the screen on black and letterbox the media so its
-   aspect ratio is preserved (no stretch). The overlays scale with the box. */
-#inputView:fullscreen, .remote-wrap:fullscreen {
-  width: 100vw; height: 100vh; margin: 0; border: 0; border-radius: 0; background: #000;
+/* "fullscreen" = fill the app viewport (NOT the OS screen): pin the viewer over
+   the page on black and letterbox its media so the aspect ratio is preserved
+   (no stretch). Toggled by FullscreenButton via the .viewport-max class. */
+#inputView.viewport-max, .remote-wrap.viewport-max {
+  position: fixed; inset: 0; z-index: 1000;
+  margin: 0; border: 0; border-radius: 0; background: #000;
   display: flex; align-items: center; justify-content: center;
 }
-#inputView:fullscreen canvas:not(.sense-overlay),
-#inputView:fullscreen video,
-.remote-wrap:fullscreen video {
+#inputView.viewport-max canvas:not(.sense-overlay),
+#inputView.viewport-max video,
+.remote-wrap.viewport-max video {
   width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;
 }
 

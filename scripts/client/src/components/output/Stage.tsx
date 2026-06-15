@@ -19,6 +19,7 @@ export function Stage() {
   const canStart = !starting && !connected && status !== 'connecting...'
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
   const reveal = useViewerReveal()
+  const [maximized, setMaximized] = useState(false)
 
   useEffect(() => {
     const v = videoRef.current
@@ -52,13 +53,13 @@ export function Stage() {
   return (
     <div className="stage">
       <div
-        className={'remote-wrap overlay-anchor' + (reveal.shown ? ' controls-shown' : '')}
+        className={'remote-wrap overlay-anchor' + (reveal.shown ? ' controls-shown' : '') + (maximized ? ' viewport-max' : '')}
         {...reveal.pointerProps}
       >
         <video id="v" ref={videoRef} autoPlay playsInline muted />
         <OverlayCanvas source="output" />
         <RatingOverlay />
-        <FullscreenButton label="output" />
+        <FullscreenButton label="output" maximized={maximized} onToggle={() => setMaximized((v) => !v)} />
         {connected ? (
           <button
             className="play-overlay pause viewer-chrome"
