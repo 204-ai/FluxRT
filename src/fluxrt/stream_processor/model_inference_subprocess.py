@@ -43,6 +43,35 @@ from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
 from fluxrt.stream_processor.flux_tiny_vae import DiffusersTAEF2Wrapper
 
 
+def slerp(a: torch.Tensor, b: torch.Tensor, t: float, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Spherical-linear interpolation between two prompt-embedding tensors.
+
+    `a` and `b` are treated as single flattened vectors. slerp keeps the
+    interpolant's norm roughly constant through the midpoint, which avoids the
+    washed-out / low-contrast middle that plain lerp can produce on conditioning
+    tensors. Computed in float32 for numerical stability, then cast back to the
+    input dtype (the embeddings are bfloat16). Falls back to lerp when the two
+    vectors are nearly colinear (sin(theta) -> 0).
+    """
+    a32, b32 = a.float(), b.float()
+    af, bf = a32.flatten(), b32.flatten()
+    dot = (af @ bf) / (af.norm() * bf.norm() + eps)
+    dot = dot.clamp(-1.0, 1.0)
+    # Fall back to lerp when nearly colinear in EITHER direction. Near-parallel
+    # (dot -> 1) slerp == lerp anyway; near-anti-parallel (dot -> -1) makes
+    # sin(theta) -> 0, so the slerp divisor blows up — lerp is the safe path.
+    if dot.abs() > 0.9995:
+        out = torch.lerp(a32, b32, t)
+    else:
+        theta = torch.acos(dot)
+        sin_theta = torch.sin(theta)
+        out = (torch.sin((1.0 - t) * theta) / sin_theta) * a32 + (
+            torch.sin(t * theta) / sin_theta
+        ) * b32
+    return out.to(a.dtype)
+
+
 class ModelInferenceSubprocess:
     def __init__(
         self,
@@ -95,6 +124,9 @@ class ModelInferenceSubprocess:
             "steps": self.config["default_steps"],
             "seed": self.config["default_seed"],
         }
+        # Active prompt-travel state, or None when no morph is in progress.
+        # Populated by _begin_prompt_travel(), advanced in process_main().
+        self._travel = None
 
     def load_models_without_quantization(self):
         device = self.device
@@ -246,7 +278,69 @@ class ModelInferenceSubprocess:
             max_sequence_length=512,
             text_encoder_out_layers=(9, 18, 27),
         )
+        # A direct prompt set cancels any in-progress morph.
+        self._travel = None
         self.update_controller.reset_cache()
+
+    def _begin_prompt_travel(self, payload: dict) -> None:
+        """
+        Worker-side handler: pre-encode the target prompt ONCE and arm the
+        travel state. Encoding (the text-encoder forward) is the expensive part,
+        so it must not run per frame — only the cheap blend does.
+        """
+        target_prompt = payload["prompt"]
+        frames = max(1, int(payload.get("frames", 48)))
+        mode = payload.get("mode", "slerp")
+        target_embeds, _ = self.pipe.encode_prompt(
+            prompt=target_prompt,
+            device=self.device,
+            num_images_per_prompt=1,
+            max_sequence_length=512,
+            text_encoder_out_layers=(9, 18, 27),
+        )
+        self._travel = {
+            "src": self.prompt_embeds,
+            "tgt": target_embeds,
+            "n": frames,
+            "i": 0,
+            "mode": mode,
+            "prompt": target_prompt,
+        }
+
+    def _advance_prompt_travel(self) -> None:
+        """
+        Called once per generated frame. Advances an in-progress morph by one
+        step: blends src->tgt embeddings and forces a full-frame execute so the
+        new conditioning actually reaches every pixel.
+        """
+        tv = self._travel
+        if tv is None:
+            return
+
+        # Advance first so the morph renders exactly tv["n"] frames, every one of
+        # them showing progress: the first frame is at t=1/n (not t=0, which
+        # would be the unchanged source) and the last is at t=n/n=1.0 (target).
+        tv["i"] += 1
+        t = tv["i"] / tv["n"]
+        if tv["mode"] == "lerp":
+            self.prompt_embeds = torch.lerp(tv["src"], tv["tgt"], t)
+        else:
+            self.prompt_embeds = slerp(tv["src"], tv["tgt"], t)
+
+        # Force the whole image to execute this frame. The spatial cache would
+        # otherwise skip static tokens and the interpolated prompt would never
+        # appear (text-only invalidation does not propagate to cached image
+        # tokens). Recompute text K/V too, but leave the reference-image cache
+        # intact so it is not re-encoded every frame.
+        self.update_controller.requires_reset = True
+        self.update_controller.text_is_valid = False
+
+        if tv["i"] >= tv["n"]:
+            # Final frame was rendered at t=1.0 above; snap exactly onto the
+            # target embeds and update tracked prompt state.
+            self.prompt_embeds = tv["tgt"]
+            self.process_state["prompt"] = tv["prompt"]
+            self._travel = None
 
     def init_shared_tensors(self):
         height, width = self.resolution["height"], self.resolution["width"]
@@ -356,6 +450,22 @@ class ModelInferenceSubprocess:
     def set_lip_transfer(self, enabled: bool) -> None:
         self.command_queue.put(("set_lip_transfer", enabled))
 
+    def start_prompt_travel(
+        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+    ) -> None:
+        """
+        Smoothly interpolate the conditioning from the current prompt to
+        `target_prompt` over `frames` generated frames. `mode` is "slerp" or
+        "lerp". Enqueues onto the command queue; handled in the inference
+        subprocess by _begin_prompt_travel / _advance_prompt_travel.
+        """
+        self.command_queue.put(
+            (
+                "start_prompt_travel",
+                {"prompt": target_prompt, "frames": int(frames), "mode": mode},
+            )
+        )
+
     def update_process_state(self) -> None:
         """
         Called by the internal process
@@ -396,6 +506,9 @@ class ModelInferenceSubprocess:
 
                 elif cmd == "set_lip_transfer":
                     self.lip_active = payload
+
+                elif cmd == "start_prompt_travel":
+                    self._begin_prompt_travel(payload)
 
         except Empty:
             pass
@@ -526,6 +639,7 @@ class ModelInferenceSubprocess:
         prev_time = time.time()
         while self.running.value:
             self.update_process_state()
+            self._advance_prompt_travel()
             original_frame = self.input_shared_tensor.to_numpy()
             original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
             frame = self.process_frame_with_pipeline(original_frame)
