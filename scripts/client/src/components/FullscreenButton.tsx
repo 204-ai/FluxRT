@@ -22,12 +22,13 @@ export function FullscreenButton({ label }: { label: string }) {
   const toggle = () => {
     const anchor = btnRef.current?.closest('.overlay-anchor') as HTMLElement | null
     if (!anchor) return
+    // Both calls reject if the gesture is stale; swallow rather than throwing an
+    // unhandled rejection. Guard requestFullscreen explicitly so unsupported
+    // browsers no-op instead of relying on optional-chaining subtleties.
     if (document.fullscreenElement === anchor) {
-      void document.exitFullscreen?.()
-    } else {
-      // requestFullscreen rejects if the gesture is stale or unsupported;
-      // swallow it rather than throwing an unhandled rejection.
-      anchor.requestFullscreen?.().catch(() => {})
+      void document.exitFullscreen?.().catch(() => {})
+    } else if (anchor.requestFullscreen) {
+      void anchor.requestFullscreen().catch(() => {})
     }
   }
 
