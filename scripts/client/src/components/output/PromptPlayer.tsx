@@ -3,9 +3,11 @@
 
 import { ratingLabel } from '../../lib/features'
 import { usePromptStore } from '../../state/promptStore'
+import { useFileDrop } from '../../lib/useFileDrop'
 
 export function PromptPlayer() {
   const p = usePromptStore()
+  const { open, inputProps } = useFileDrop((f) => void p.loadPromptsFromFile(f))
   return (
     <div className="controls prompt-player">
       <select
@@ -23,6 +25,15 @@ export function PromptPlayer() {
           </option>
         ))}
       </select>
+      <button
+        className="icon-btn"
+        title="Load prompts from a file — one prompt per line, or a JSON array"
+        aria-label="Load prompts from a file"
+        onClick={open}
+      >
+        📂
+      </button>
+      <input {...inputProps} accept=".txt,.json,text/plain,application/json" hidden />
       <button
         className="icon-btn"
         title="Apply a random saved prompt"
