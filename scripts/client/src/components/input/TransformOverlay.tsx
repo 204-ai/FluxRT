@@ -139,8 +139,9 @@ export function TransformOverlay() {
     }
   }, [measure, layoutLayer, active])
 
-  // Drop any in-flight drag listeners if the overlay unmounts mid-drag.
-  useEffect(() => () => cleanupRef.current?.(), [])
+  // End any in-flight drag when the framed layer changes or the overlay
+  // unmounts — its captured layer id would otherwise go stale.
+  useEffect(() => () => cleanupRef.current?.(), [layoutLayer])
 
   // If the framed layer disappears (e.g. video unloaded) switch to another
   // present layer or close the overlay.
