@@ -49,7 +49,7 @@ export function PromptPlayer() {
             if (!isNaN(i)) p.applySaved(i)
           }}
         >
-          <option value="">{`⭐ Saved (${p.savedPrompts.length})…`}</option>
+          <option value="">{`⭐ Saved (${filter === 'all' ? p.savedPrompts.length : visible.length})…`}</option>
           {visible.map(({ e, i }) => {
             const vi = verdictOf(e.prompt)
             const text = e.prompt.length > 80 ? e.prompt.slice(0, 80) + '…' : e.prompt
