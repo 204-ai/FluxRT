@@ -53,9 +53,10 @@ export function PromptPlayer() {
           {visible.map(({ e, i }) => {
             const vi = verdictOf(e.prompt)
             const text = e.prompt.length > 80 ? e.prompt.slice(0, 80) + '…' : e.prompt
+            // Every line leads with a rating icon: the triage verdict, or ○ when unrated.
             return (
               <option key={i} value={i}>
-                {`${vi ? VERDICT_ICON[vi] + ' ' : ''}${ratingLabel(e)}  ${text}`}
+                {`${vi ? VERDICT_ICON[vi] : '○'} ${ratingLabel(e)}  ${text}`}
               </option>
             )
           })}
