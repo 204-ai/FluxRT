@@ -208,13 +208,14 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .statusbar.expanded .statusbar-log { max-height: 7.25em; overflow: auto; }
 
 /* saved-prompt picker + player below the prompt input — picker row + info row */
-.prompt-player-wrap { display: flex; flex-direction: column; gap: 4px; }
-.prompt-player { flex-wrap: nowrap; }
+.prompt-player-wrap { display: flex; flex-direction: column; }
+.prompt-player { flex-wrap: nowrap; padding-bottom: 0; }
 .prompt-player .saved-pick { flex: 1 1 0; min-width: 0; }
 .prompt-player .loop-delay { width: 46px; }
 .prompt-player .icon-btn { font-size: 15px; }
-/* second line: rating filters + small info message */
-.sp-info { display: flex; align-items: center; gap: 8px; padding: 0 2px; }
+/* second line: rating filters + small info message. Left padding matches the
+   .controls 14px above so the filters line up with the picker/buttons. */
+.sp-info { display: flex; align-items: center; gap: 8px; padding: 6px 14px 10px; }
 .sp-filters { display: inline-flex; gap: 3px; flex: 0 0 auto; }
 .sp-filter {
   padding: 0 6px; height: 22px; min-width: 24px; font-size: 12px; line-height: 0;

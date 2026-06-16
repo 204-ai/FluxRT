@@ -1,9 +1,8 @@
 // Saved-prompt picker + autoplay player. Line 1: pick / load / shuffle / play.
 // Line 2: rating filters (👎/👍/❤️ from the localStorage triage) + a small info
-// message. Filters only narrow the dropdown; shuffle/autoplay still walk the
-// full saved list. Each option is prefixed with its triage verdict, if any.
+// message. The active filter narrows the dropdown AND scopes shuffle/autoplay
+// (held in promptStore). Each option is prefixed with its triage verdict, or ○.
 
-import { useState } from 'react'
 import { ratingLabel } from '../../lib/features'
 import { usePromptStore } from '../../state/promptStore'
 import { useRatingStore } from '../../state/ratingStore'
@@ -21,7 +20,7 @@ const FILTERS: { key: Verdict | 'all'; label: string }[] = [
 export function PromptPlayer() {
   const p = usePromptStore()
   const ratings = useRatingStore((s) => s.ratings)
-  const [filter, setFilter] = useState<Verdict | 'all'>('all')
+  const filter = p.ratingFilter
   const { open, inputProps } = useFileDrop((f) => void p.loadPromptsFromFile(f))
 
   const verdictOf = (prompt: string): Verdict | undefined => ratings[prompt.trim()]?.verdict
@@ -103,7 +102,7 @@ export function PromptPlayer() {
               className={'sp-filter' + (filter === f.key ? ' on' : '')}
               title={`Show ${f.label.toLowerCase()}`}
               aria-pressed={filter === f.key}
-              onClick={() => setFilter((cur) => (cur === f.key ? 'all' : f.key))}
+              onClick={() => p.setRatingFilter(filter === f.key ? 'all' : f.key)}
             >
               {f.key === 'all' ? 'All' : VERDICT_ICON[f.key]}
             </button>
