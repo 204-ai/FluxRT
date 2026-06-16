@@ -22,11 +22,24 @@ function LayerMix({ id, disabled }: { id: LayerId; disabled: boolean }) {
   const layer = usePipelineStore((s) => s.layers[id])
   const setLayerOpacity = usePipelineStore((s) => s.setLayerOpacity)
   const setLayerBlend = usePipelineStore((s) => s.setLayerBlend)
+  const layoutLayer = usePipelineStore((s) => s.layoutLayer)
+  const setLayoutLayer = usePipelineStore((s) => s.setLayoutLayer)
+  const framing = layoutLayer === id
   const pct = Math.round(layer.opacity * 100)
   const cycleBlend = () => setLayerBlend(id, BLENDS[(BLENDS.indexOf(layer.blend) + 1) % BLENDS.length])
 
   return (
     <div className="layer-mix">
+      <button
+        className={'icon-btn frame-btn' + (framing ? ' on' : '')}
+        title="Frame this layer — move, resize & crop on the preview"
+        aria-label={`${id} framing`}
+        aria-pressed={framing}
+        disabled={disabled}
+        onClick={() => setLayoutLayer(framing ? null : id)}
+      >
+        ◳
+      </button>
       <button
         className="icon-btn blend-btn"
         title={`Blend: ${layer.blend} (click to cycle)`}

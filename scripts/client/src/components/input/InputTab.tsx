@@ -6,6 +6,7 @@ import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { CanvasHost } from './CanvasHost'
 import { LayerStack } from './LayerStack'
+import { TransformOverlay } from './TransformOverlay'
 import { FullscreenButton } from '../FullscreenButton'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
@@ -56,6 +57,7 @@ export function InputTab({ active }: { active: boolean }) {
         )}
         <CanvasHost holds={p.active} />
         {p.active && senseOverlay !== 'off' && <OverlayCanvas source="input" />}
+        {p.active && <TransformOverlay />}
         {p.active && <DrawToolbar />}
         {p.active && (
           <FullscreenButton label="input" maximized={maximized} onToggle={() => setMaximized((v) => !v)} />
