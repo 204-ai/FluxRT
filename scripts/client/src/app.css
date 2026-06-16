@@ -207,12 +207,23 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 .statusbar.expanded .statusbar-log { max-height: 7.25em; overflow: auto; }
 
-/* saved-prompt picker + player below the prompt input — one compact line */
+/* saved-prompt picker + player below the prompt input — picker row + info row */
+.prompt-player-wrap { display: flex; flex-direction: column; gap: 4px; }
 .prompt-player { flex-wrap: nowrap; }
 .prompt-player .saved-pick { flex: 1 1 0; min-width: 0; }
 .prompt-player .loop-delay { width: 46px; }
-.prompt-player .sp-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prompt-player .icon-btn { font-size: 15px; }
+/* second line: rating filters + small info message */
+.sp-info { display: flex; align-items: center; gap: 8px; padding: 0 2px; }
+.sp-filters { display: inline-flex; gap: 3px; flex: 0 0 auto; }
+.sp-filter {
+  padding: 0 6px; height: 22px; min-width: 24px; font-size: 12px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #2a2a2a; color: #bbb; border: 1px solid #333; border-radius: 4px;
+}
+.sp-filter:hover { background: #3a3a3a; }
+.sp-filter.on { background: #2a6cd4; color: #fff; border-color: #3a7ce4; }
+.sp-info .sp-status { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* "drive prompt from sense" — compact inline row */
 .compose-row { flex-wrap: nowrap; }
