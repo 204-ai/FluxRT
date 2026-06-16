@@ -8,7 +8,7 @@ import { useRatingStore } from '../../state/ratingStore'
 import type { Verdict } from '../../lib/ratings'
 
 const VERDICTS: { v: Verdict; icon: string; label: string }[] = [
-  { v: 'skip', icon: '⏭', label: 'Skip' },
+  { v: 'skip', icon: '👎', label: 'Dislike' },
   { v: 'like', icon: '👍', label: 'Like' },
   { v: 'love', icon: '❤️', label: 'Love' },
 ]
