@@ -90,6 +90,8 @@ docs/_build/
 .pybuilder/
 target/
 output/
+# ...but not the React output-stage components dir, which `output/` above swallows.
+!scripts/client/src/components/output/
 
 # Jupyter Notebook
 .ipynb_checkpoints
