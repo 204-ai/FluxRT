@@ -49,6 +49,111 @@ export interface LayerOptions {
   /** 0..1 */
   opacity: number
   blend: BlendMode
+  /** OBS-style framing — move/resize/crop. Absent = legacy cover-fit (the
+   *  source center-cropped to fill the canvas), so an untouched layer is
+   *  unchanged. Materialized to identity on first edit. */
+  transform?: LayerTransform
+}
+
+/**
+ * OBS-style per-layer placement, all normalized to the OUTPUT canvas in [0..1].
+ * The source is first cover-fit to fill the canvas (the legacy baseline);
+ * `frame` then re-places that full content as a rect on the canvas, and `crop`
+ * trims fractions off each edge of the content (clipped within the frame).
+ * Identity (frame = full canvas, crop = 0) renders identically to the legacy
+ * cover-fit path — an untouched layer is visually unchanged.
+ */
+export interface LayerTransform {
+  /** Placement of the full (uncropped) cover-fit content, normalized 0..1. */
+  frame: { x: number; y: number; w: number; h: number }
+  /** Fractions trimmed off each content edge, 0..1 (left+right<1, top+bottom<1). */
+  crop: { left: number; top: number; right: number; bottom: number }
+}
+
+/** Fresh identity transform — fills the canvas, no crop (== legacy cover-fit). */
+export function identityTransform(): LayerTransform {
+  return { frame: { x: 0, y: 0, w: 1, h: 1 }, crop: { left: 0, top: 0, right: 0, bottom: 0 } }
+}
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v)
+
+/** Cover-fit (center-crop) destination rect: scale the source up to fill the
+ *  W×H canvas, centered — never stretched, never letterboxed. */
+export function coverRect(
+  W: number,
+  H: number,
+  w: number,
+  h: number,
+): { dx: number; dy: number; dw: number; dh: number } {
+  if (w <= 0 || h <= 0) return { dx: 0, dy: 0, dw: W, dh: H }
+  const scale = Math.max(W / w, H / h)
+  const dw = w * scale
+  const dh = h * scale
+  return { dx: (W - dw) / 2, dy: (H - dh) / 2, dw, dh }
+}
+
+/** Visible (destination) rect of a transformed layer, normalized 0..1 — the
+ *  frame inset by the crop. This is the on-screen box the UI manipulates. */
+export function layerDestRect(t: LayerTransform): { x: number; y: number; w: number; h: number } {
+  const f = t.frame
+  const cl = clamp01(t.crop.left)
+  const cr = clamp01(t.crop.right)
+  const ct = clamp01(t.crop.top)
+  const cb = clamp01(t.crop.bottom)
+  return {
+    x: f.x + cl * f.w,
+    y: f.y + ct * f.h,
+    w: Math.max(0, 1 - cl - cr) * f.w,
+    h: Math.max(0, 1 - ct - cb) * f.h,
+  }
+}
+
+export interface DrawRects {
+  sx: number
+  sy: number
+  sw: number
+  sh: number
+  dx: number
+  dy: number
+  dw: number
+  dh: number
+}
+
+/** Source + destination pixel rects for ctx.drawImage, given the canvas W×H,
+ *  the source w×h and an optional transform. Returns null when nothing is
+ *  drawable. With no transform this is the legacy cover-fit (whole source →
+ *  cover rect, clipped by the canvas). */
+export function layerDrawRects(
+  W: number,
+  H: number,
+  w: number,
+  h: number,
+  t?: LayerTransform,
+): DrawRects | null {
+  if (w <= 0 || h <= 0 || W <= 0 || H <= 0) return null
+  const cover = coverRect(W, H, w, h)
+  if (!t) return { sx: 0, sy: 0, sw: w, sh: h, dx: cover.dx, dy: cover.dy, dw: cover.dw, dh: cover.dh }
+
+  const cl = clamp01(t.crop.left)
+  const cr = clamp01(t.crop.right)
+  const ct = clamp01(t.crop.top)
+  const cb = clamp01(t.crop.bottom)
+  // Crop fractions are over the cover content, whose visible canvas span is the
+  // full canvas — map each fraction back to source px through the cover inverse.
+  const srcX = (frac: number) => ((frac * W - cover.dx) / cover.dw) * w
+  const srcY = (frac: number) => ((frac * H - cover.dy) / cover.dh) * h
+  const sx = srcX(cl)
+  const sw = srcX(1 - cr) - sx
+  const sy = srcY(ct)
+  const sh = srcY(1 - cb) - sy
+
+  const d = layerDestRect(t)
+  const dx = d.x * W
+  const dy = d.y * H
+  const dw = d.w * W
+  const dh = d.h * H
+  if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return null
+  return { sx, sy, sw, sh, dx, dy, dw, dh }
 }
 
 /** Mix settings for the whole stack. Layers are drawn back-to-front (feedback,

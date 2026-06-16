@@ -5,7 +5,7 @@
 import { create } from 'zustand'
 import { inputVision, rail, videoSource } from './runtime'
 import { getHealthz } from '../lib/api'
-import type { BlendMode, LayerId, LayerOptions } from '../pipeline/core/types'
+import type { BlendMode, LayerId, LayerOptions, LayerTransform } from '../pipeline/core/types'
 import { defaultComposite, hasVideoTrack } from '../pipeline/core/types'
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
@@ -40,6 +40,12 @@ interface PipelineState {
   drawColor: string
   drawSize: number
 
+  // OBS-style layer framing (move/resize/crop). `layoutLayer` is the layer being
+  // edited — null means the layout overlay is off (it doubles as mode + selection).
+  layoutLayer: LayerId | null
+  // Within layout: false = move/resize the frame, true = crop the content edges.
+  cropMode: boolean
+
   markerEnabled: boolean
   markerLandmark: number
   markerColor: string
@@ -69,6 +75,13 @@ interface PipelineState {
   setLayerBlend(id: LayerId, blend: BlendMode): void
   /** Wire the remote output stream in/out as the feedback layer (null = clear). */
   attachFeedback(stream: MediaStream | null): void
+
+  /** Select a layer to frame (move/resize/crop), or null to close the overlay.
+   *  Opening the overlay turns drawing off (they share the preview surface). */
+  setLayoutLayer(id: LayerId | null): void
+  setCropMode(on: boolean): void
+  /** Set a layer's framing transform live (null restores legacy cover-fit). */
+  setLayerTransform(id: LayerId, transform: LayerTransform | null): void
 
   setDrawMode(mode: DrawMode): void
   setDrawColor(c: string): void
@@ -155,6 +168,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     drawMode: 'off',
     drawColor: '#ffffff',
     drawSize: 6,
+
+    layoutLayer: null,
+    cropMode: false,
 
     markerEnabled: false,
     markerLandmark: 15,
@@ -264,7 +280,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
 
     stopPipeline() {
       rail.stop()
-      set({ active: false, drawMode: 'off' })
+      set({ active: false, drawMode: 'off', layoutLayer: null })
     },
 
     async loadVideoFile(file) {
@@ -402,8 +418,27 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       }
     },
 
+    setLayoutLayer(id) {
+      // Drawing and framing share the preview surface — entering one exits the
+      // other so pointer drags are never ambiguous.
+      if (id) set({ layoutLayer: id, drawMode: 'off' })
+      else set({ layoutLayer: null })
+    },
+    setCropMode(on) {
+      set({ cropMode: on })
+    },
+    setLayerTransform(id, transform) {
+      set((s) => ({
+        layers: { ...s.layers, [id]: { ...s.layers[id], transform: transform ?? undefined } },
+      }))
+      // Carry the value explicitly (incl. undefined) so the patch resets the
+      // compositor layer back to legacy cover-fit when cleared.
+      rail.setComposite({ [id]: { transform: transform ?? undefined } })
+    },
+
     setDrawMode(mode) {
-      set({ drawMode: mode })
+      // Drawing and framing are mutually exclusive on the shared preview.
+      set({ drawMode: mode, ...(mode !== 'off' ? { layoutLayer: null } : {}) })
       rail.configureDraw({ erase: mode === 'eraser' })
     },
     setDrawColor(c) {

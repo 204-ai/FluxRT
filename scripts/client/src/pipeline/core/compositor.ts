@@ -12,7 +12,7 @@ import type {
   EffectInit,
   LayerOptions,
 } from './types'
-import { defaultComposite, mergeComposite } from './types'
+import { defaultComposite, layerDrawRects, mergeComposite } from './types'
 import { createEffect } from '../effects/registry'
 
 type Layer = CanvasImageSource | VideoFrame
@@ -22,21 +22,6 @@ const BLEND_OP: Record<BlendMode, GlobalCompositeOperation> = {
   screen: 'screen',
   multiply: 'multiply',
   difference: 'difference',
-}
-
-/** Cover-fit (center-crop) destination rect: scale the source up to fill the
- *  W×H canvas, centered — never stretched, never letterboxed. */
-function coverRect(
-  W: number,
-  H: number,
-  w: number,
-  h: number,
-): { dx: number; dy: number; dw: number; dh: number } {
-  if (w <= 0 || h <= 0) return { dx: 0, dy: 0, dw: W, dh: H }
-  const scale = Math.max(W / w, H / h)
-  const dw = w * scale
-  const dh = h * scale
-  return { dx: (W - dw) / 2, dy: (H - dh) / 2, dw, dh }
 }
 
 function dimsOf(src: Layer): { w: number; h: number } {
@@ -80,25 +65,29 @@ export class Compositor {
     this.effects.find((e) => e.name === name)?.message?.(data)
   }
 
-  /** Draw one layer with its own opacity + blend. Cover-fit (center-crop) so a
-   *  source whose aspect differs from the output canvas is cropped, never
-   *  stretched (letterbox bars would feed black into the model and break
-   *  screen/multiply). `mirror` flips horizontally (selfie view, camera only). */
+  /** Draw one layer with its own opacity + blend. Geometry comes from the
+   *  layer's transform (OBS-style move/resize/crop); absent, it defaults to
+   *  cover-fit (center-crop) so a source whose aspect differs from the output
+   *  canvas is cropped, never stretched (letterbox bars would feed black into
+   *  the model and break screen/multiply). `mirror` flips the content
+   *  horizontally about its own box center (selfie view, camera only) — for the
+   *  full-canvas default box this is the legacy full-frame flip. */
   private drawLayer(src: Layer, opts: LayerOptions, mirror: boolean): void {
     if (opts.opacity <= 0) return
     const { ctx, width: W, height: H } = this
     const { w, h } = dimsOf(src)
-    const { dx, dy, dw, dh } = coverRect(W, H, w, h)
+    const r = layerDrawRects(W, H, w, h, opts.transform)
+    if (!r) return
     ctx.save()
     ctx.globalAlpha = opts.opacity
     ctx.globalCompositeOperation = BLEND_OP[opts.blend] ?? 'source-over'
     if (mirror) {
+      const cx = r.dx + r.dw / 2
+      ctx.translate(cx, 0)
       ctx.scale(-1, 1)
-      // In flipped space, an image spanning screen [dx, dx+dw] is drawn at -(dx+dw).
-      ctx.drawImage(src as CanvasImageSource, -(dx + dw), dy, dw, dh)
-    } else {
-      ctx.drawImage(src as CanvasImageSource, dx, dy, dw, dh)
+      ctx.translate(-cx, 0)
     }
+    ctx.drawImage(src as CanvasImageSource, r.sx, r.sy, r.sw, r.sh, r.dx, r.dy, r.dw, r.dh)
     ctx.restore()
   }
 

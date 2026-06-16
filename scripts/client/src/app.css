@@ -252,6 +252,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .layer-fader:hover:not(:disabled)::-webkit-slider-thumb { background: #fff; }
 .layer-fader:disabled { opacity: 0.4; cursor: not-allowed; }
 .blend-btn:disabled { opacity: 0.5; }
+.frame-btn { width: 26px; height: 26px; font-size: 13px; line-height: 0; }
 
 /* minimal drop / upload zone (shared: video source + reference image) */
 .drop-zone {
@@ -424,3 +425,58 @@ input[type=color] { width: 42px; height: 28px; padding: 0; border: 1px solid #33
 .meter-track { flex: 1; height: 6px; background: #2a2a2a; border-radius: 3px; overflow: hidden; }
 .meter-fill { height: 100%; background: linear-gradient(90deg, #50aaff, #00ffaa); border-radius: 3px; transition: width 120ms linear; }
 .meter-value { width: 26px; text-align: right; color: #888; }
+
+/* ── OBS-style layer framing overlay (input preview) ──
+   Absolutely positioned over #inputView (.overlay-anchor). The container itself
+   is click-through; only the box, its handles and the mini-toolbar capture
+   pointer events so the rest of the preview stays interactive. */
+.layout-overlay { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+
+/* faint context rect — the frame while cropping, the crop region while moving */
+.layout-ghost {
+  position: absolute; box-sizing: border-box;
+  border: 1px dashed rgba(255, 255, 255, 0.35); pointer-events: none;
+}
+
+/* the active, editable box */
+.layout-box {
+  position: absolute; box-sizing: border-box;
+  border: 1.5px solid #2a6cd4; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.layout-box.crop { border-color: #f5c518; border-style: dashed; }
+
+/* full-box drag target for moving (sits under the handles) */
+.layout-move { position: absolute; inset: 0; pointer-events: auto; cursor: move; }
+
+/* resize/crop handles */
+.layout-handle {
+  position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  background: #2a6cd4; border: 1px solid #fff; border-radius: 2px;
+  pointer-events: auto; touch-action: none;
+}
+.layout-box.crop .layout-handle { background: #f5c518; }
+.h-nw { left: 0; top: 0; cursor: nwse-resize; }
+.h-n  { left: 50%; top: 0; cursor: ns-resize; }
+.h-ne { left: 100%; top: 0; cursor: nesw-resize; }
+.h-e  { left: 100%; top: 50%; cursor: ew-resize; }
+.h-se { left: 100%; top: 100%; cursor: nwse-resize; }
+.h-s  { left: 50%; top: 100%; cursor: ns-resize; }
+.h-sw { left: 0; top: 100%; cursor: nesw-resize; }
+.h-w  { left: 0; top: 50%; cursor: ew-resize; }
+
+/* mini-toolbar, pinned bottom-center of the preview */
+.layout-bar {
+  position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 7;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap; max-width: calc(100% - 16px);
+  padding: 5px 6px; pointer-events: auto;
+  background: rgba(18, 18, 18, 0.92); border: 1px solid #2a2a2a; border-radius: 8px;
+}
+.layout-bar .tool {
+  height: 26px; padding: 0 8px; font-size: 11px; line-height: 0; background: #2a2a2a;
+  color: #ddd; border: 1px solid #333; border-radius: 5px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.layout-bar .tool:hover { background: #3a3a3a; }
+.layout-bar .tool.active { background: #2a6cd4; border-color: #2a6cd4; color: #fff; }
+.layout-sep { width: 1px; align-self: stretch; margin: 1px 2px; background: #333; }
