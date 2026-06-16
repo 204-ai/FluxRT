@@ -125,6 +125,11 @@ export function TransformOverlay() {
     setStage({ left: pr.left - cr.left, top: pr.top - cr.top, width: pr.width, height: pr.height })
   }, [])
 
+  // The `active` dep is load-bearing: rail.previewEl is not React state and gets
+  // a fresh identity whenever Rail.start() builds a new backend. A full restart
+  // toggles active (overlay remounts → observer rebinds to the new element);
+  // hot-swaps keep the same backend/previewEl. If a future change rebuilds the
+  // backend without toggling active, re-bind the observer to the element here.
   useLayoutEffect(() => {
     measure()
     const cont = containerRef.current
