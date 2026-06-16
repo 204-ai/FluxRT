@@ -154,6 +154,9 @@ export function TransformOverlay() {
     if (!stage || !layoutLayer) return
     e.preventDefault()
     e.stopPropagation()
+    // Tear down any in-flight drag (e.g. a second touch) before starting a new
+    // one, so its window listeners can't leak.
+    cleanupRef.current?.()
     const layer = layoutLayer
     const crop = cropMode
     const startTransform = layers[layer]?.transform ?? identityTransform()
