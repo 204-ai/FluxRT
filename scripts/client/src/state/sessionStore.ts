@@ -96,7 +96,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
     pc.ontrack = (e) => {
       logLine('Track received')
-      onRemoteTrack(e.streams[0])
+      const stream = e.streams[0]
+      onRemoteTrack(stream)
+      // Feed the diffusion output back into the input compositor as the bottom
+      // (feedback) layer — an output→server→input loop the user mixes with a fader.
+      usePipelineStore.getState().attachFeedback(stream)
     }
     pc.oniceconnectionstatechange = () => {
       if (!pc) return
@@ -183,6 +187,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Camera pipeline keeps running — bound to the Input-tab toggle, not the
     // connection, so preview + drawing survive a disconnect/reconnect.
     onRemoteTrack(new MediaStream())
+    // The output is gone — hot-remove the feedback layer from the live pipeline.
+    usePipelineStore.getState().attachFeedback(null)
     lastRecvFps = '—'
     lastFrames = null
     lastT = null

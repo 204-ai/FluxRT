@@ -34,14 +34,30 @@ export interface CanvasEffect<Cfg = Record<string, unknown>> {
 export type RailBackendKind = 'streams' | 'canvas'
 
 export type BlendMode = 'normal' | 'screen' | 'multiply' | 'difference'
-export type LayerOrder = 'camera-over' | 'video-over'
 
-export interface CompositeOptions {
-  order: LayerOrder
-  /** Opacity of the top layer, 0..1. */
+/** The compositing layers, listed front-to-back — the panel stacks them top to
+ *  bottom in this order. Camera is frontmost; feedback (the previous output fed
+ *  back in) is the backmost field the front layers paint over. */
+export type LayerId = 'camera' | 'video' | 'feedback'
+
+/** Per-layer mix: every layer blends onto the accumulated result beneath it
+ *  with its own opacity + blend — not just the top one. */
+export interface LayerOptions {
+  /** 0..1 */
   opacity: number
   blend: BlendMode
 }
+
+/** Mix settings for the whole stack. Layers are drawn back-to-front (feedback,
+ *  then video, then camera) over an opaque base, so the panel's top row is on top. */
+export interface CompositeOptions {
+  camera: LayerOptions
+  video: LayerOptions
+  feedback: LayerOptions
+}
+
+/** A live tweak to one or more layers — each layer's fields are optional. */
+export type CompositePatch = Partial<Record<LayerId, Partial<LayerOptions>>>
 
 /**
  * Input layers for a rail session. At least one must be non-null. The camera
@@ -79,7 +95,10 @@ export interface RailBackend {
   start(opts: RailStartOptions, sources: SourceSet): Promise<void>
   stop(): void
   setMirror(on: boolean): void
-  setComposite(patch: Partial<CompositeOptions>): void
+  setComposite(patch: CompositePatch): void
+  /** Set (or clear, with null) the feedback layer — the remote output stream
+   *  fed back in. Hot add/remove in place, like the video overlay; no restart. */
+  setFeedback(stream: MediaStream | null): void
   configureEffect(name: string, patch: Record<string, unknown>): void
   effectMessage(name: string, data: unknown): void
   busPush(key: string, value: unknown): void

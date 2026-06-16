@@ -5,7 +5,7 @@
 // — Chrome-only, but so is this backend.
 
 import type {
-  CompositeOptions,
+  CompositePatch,
   EffectInit,
   RailBackend,
   RailStartOptions,
@@ -21,6 +21,10 @@ export class StreamsBackend implements RailBackend {
   private worker: Worker | null = null
   private generator: MediaStreamTrackGenerator<VideoFrame> | null = null
   private capturedStream: MediaStream | null = null
+  // Our CLONE of the remote output track fed to the feedback valve — one
+  // MediaStreamTrackProcessor is allowed per track, so we never process the
+  // shared remote track directly. We own (and stop) the clone.
+  private feedbackTrack: MediaStreamTrack | null = null
   private tapCb: TapCallback | null = null
   private onLog: (m: string) => void
 
@@ -101,6 +105,14 @@ export class StreamsBackend implements RailBackend {
       }
     })
     this.capturedStream = null
+    if (this.feedbackTrack) {
+      try {
+        this.feedbackTrack.stop()
+      } catch {
+        /* already stopped */
+      }
+      this.feedbackTrack = null
+    }
     this.previewEl.srcObject = null
     this.tapCb = null
   }
@@ -109,8 +121,43 @@ export class StreamsBackend implements RailBackend {
     this.worker?.postMessage({ type: 'mirror', on })
   }
 
-  setComposite(patch: Partial<CompositeOptions>): void {
+  setComposite(patch: CompositePatch): void {
     this.worker?.postMessage({ type: 'composite', patch })
+  }
+
+  setFeedback(stream: MediaStream | null): void {
+    if (!this.worker) return
+    const src = stream?.getVideoTracks()[0] ?? null
+    if (!src) {
+      // Hot-remove: tell the worker to drop the feedback valve and release our
+      // clone. The remote track itself belongs to the peer connection.
+      if (this.feedbackTrack) {
+        this.worker.postMessage({ type: 'clear-feedback' })
+        try {
+          this.feedbackTrack.stop()
+        } catch {
+          /* already stopped */
+        }
+        this.feedbackTrack = null
+      }
+      return
+    }
+    // Clone so we own an MSTP-eligible track (one processor per track; the
+    // remote track also feeds the output <video>, and a later restart needs a
+    // fresh clone for the new worker). Drop any previous clone we were feeding.
+    if (this.feedbackTrack) {
+      try {
+        this.feedbackTrack.stop()
+      } catch {
+        /* already stopped */
+      }
+    }
+    const clone = src.clone()
+    this.feedbackTrack = clone
+    const readable = new MediaStreamTrackProcessor({ track: clone }).readable
+    this.worker.postMessage({ type: 'set-feedback', video: readable }, [
+      readable as unknown as Transferable,
+    ])
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {

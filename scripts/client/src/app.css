@@ -168,23 +168,52 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* compact side-by-side input source panels (camera | video) — always horizontal */
-.source-panels { display: flex; gap: 8px; padding: 8px 14px; align-items: flex-start; }
-.src-panel {
-  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px;
-  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;
+/* ── compact "layers" panel: camera / video / feedback (top row = frontmost) ── */
+.layer-stack { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px; }
+.layer-row {
+  display: flex; align-items: center; gap: 8px;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;
 }
-.src-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
-.src-panel .controls { padding: 0; background: transparent; gap: 6px; }
-.src-row { align-items: center; }
-.src-row .icon-btn, .transport .icon-btn { font-size: 15px; }
-.device-pick { flex: 1 1 120px; min-width: 0; }
-.src-panel .file-name { flex: 1 1 60px; max-width: none; }
+/* the video row stacks its transport on a second full-width line */
+.video-row { flex-direction: column; align-items: stretch; gap: 6px; }
+.video-row .layer-line { display: flex; align-items: center; gap: 8px; }
+.video-row .controls { padding: 0; background: transparent; }
+.layer-name {
+  flex: 0 0 56px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #888;
+}
+.layer-src { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.layer-src .icon-btn { font-size: 15px; }
+.device-pick { flex: 1 1 90px; min-width: 0; }
+.mirror-lbl { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; }
+.feedback-hint { font-size: 11px; font-style: italic; }
+.layer-foot { font-size: 10px; padding: 0 2px; }
+.transport .icon-btn { font-size: 15px; }
 .transport { width: 100%; align-items: center; gap: 6px; }
 .transport .seek { flex: 1 1 auto; min-width: 50px; }
 .transport .time-readout { min-width: auto; font-size: 10px; }
 .transport .rate { padding: 3px 4px; }
 .icon-btn.on { background: #1f7a3a; color: #fff; }
+
+/* per-layer mix: blend-mode button in front of a minimal fader */
+.layer-mix { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.blend-btn { width: 36px; height: 26px; font-size: 10px; line-height: 1; text-transform: uppercase; }
+.layer-pct { flex: 0 0 30px; font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+.layer-fader {
+  width: 88px; height: 16px; -webkit-appearance: none; appearance: none;
+  background: transparent; cursor: pointer;
+}
+.layer-fader::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: #3a3a3a; }
+.layer-fader::-moz-range-track { height: 3px; border-radius: 2px; background: #3a3a3a; }
+.layer-fader::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; margin-top: -5px;
+  width: 13px; height: 13px; border-radius: 50%; background: #d4d4d4; border: 1px solid #111;
+}
+.layer-fader::-moz-range-thumb {
+  width: 13px; height: 13px; border-radius: 50%; background: #d4d4d4; border: 1px solid #111;
+}
+.layer-fader:hover:not(:disabled)::-webkit-slider-thumb { background: #fff; }
+.layer-fader:disabled { opacity: 0.4; cursor: not-allowed; }
+.blend-btn:disabled { opacity: 0.5; }
 
 /* minimal drop / upload zone (shared: video source + reference image) */
 .drop-zone {
@@ -194,17 +223,6 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 .drop-zone:hover { border-color: #2a6cd4; color: #aaa; }
 .drop-zone.drag { border-color: #2a6cd4; background: #1a2433; color: #cde; }
-
-/* compositing mixer between the camera and video panels (vertical fader) */
-.mixer {
-  flex: 0 0 auto; align-self: stretch; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 6px; padding: 8px 2px;
-}
-.mixer-slider {
-  -webkit-appearance: slider-vertical; appearance: slider-vertical;
-  writing-mode: vertical-lr; direction: rtl; width: 22px; height: 96px;
-}
-.mixer-val { font-size: 10px; }
 
 /* dense detection-metrics overlay over the input preview (overlay/only modes) */
 .metrics-fab,

@@ -6,7 +6,13 @@
 import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
-import type { CompositeOptions, RailBackend, RailBackendKind, TapCallback } from './core/types'
+import type {
+  CompositeOptions,
+  CompositePatch,
+  RailBackend,
+  RailBackendKind,
+  TapCallback,
+} from './core/types'
 import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
@@ -59,7 +65,14 @@ export class Rail {
   private mirrored = false
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
-  private composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
+  private composite: CompositeOptions = {
+    camera: { opacity: 1, blend: 'normal' },
+    video: { opacity: 1, blend: 'normal' },
+    feedback: { opacity: 1, blend: 'normal' },
+  }
+  // The remote output stream fed back in as the bottom layer. Remembered so a
+  // pipeline restart (camera/video toggle) re-attaches it to the new backend.
+  private feedbackStream: MediaStream | null = null
   // Draw ops recorded so a pipeline restart (which rebuilds the draw layer from
   // scratch) can replay the strokes instead of wiping the user's drawing. Each
   // stroke is preceded by a 'cfg' marker capturing its color/size at draw time.
@@ -153,6 +166,9 @@ export class Rail {
       // Replay left the layer's config at the last stroke's — restore the live one.
       this.backend.configureEffect('drawLayer', this.drawConfig)
     }
+    // Re-attach the feedback layer (remote output) onto the freshly-built backend
+    // so a source-set restart keeps the output→input loop alive across it.
+    if (this.feedbackStream) this.backend.setFeedback(this.feedbackStream)
     // A (re)start builds a brand-new output track; notify so the session can
     // replaceTrack on its live sender (a restart otherwise strands the peer
     // connection on the old, ended track — frozen remote output).
@@ -223,9 +239,18 @@ export class Rail {
     this.backend?.setMirror(on)
   }
 
-  setComposite(patch: Partial<CompositeOptions>): void {
-    Object.assign(this.composite, patch)
+  setComposite(patch: CompositePatch): void {
+    for (const id of ['camera', 'video', 'feedback'] as const) {
+      if (patch[id]) Object.assign(this.composite[id], patch[id])
+    }
     this.backend?.setComposite(patch)
+  }
+
+  /** Set or clear the feedback layer — the remote output stream fed back into
+   *  the input compositor. Remembered so a pipeline restart re-attaches it. */
+  setFeedback(stream: MediaStream | null): void {
+    this.feedbackStream = stream && stream.getVideoTracks().length ? stream : null
+    this.backend?.setFeedback(this.feedbackStream)
   }
 
   configureMarker(patch: Partial<MarkerConfig>): void {

@@ -5,7 +5,7 @@
 // drawn straight from its element (Safari lacks HTMLMediaElement.captureStream).
 
 import { Compositor } from '../core/compositor'
-import type { CompositeOptions, RailBackend, RailStartOptions, SourceSet, TapCallback } from '../core/types'
+import type { CompositePatch, RailBackend, RailStartOptions, SourceSet, TapCallback } from '../core/types'
 
 export class CanvasBackend implements RailBackend {
   readonly kind = 'canvas' as const
@@ -14,6 +14,8 @@ export class CanvasBackend implements RailBackend {
 
   private hiddenVideo: HTMLVideoElement | null = null
   private fileVideo: HTMLVideoElement | null = null
+  // Hidden <video> playing the remote output stream, drawn as the feedback layer.
+  private feedbackVideo: HTMLVideoElement | null = null
   private compositor: Compositor | null = null
   private rafId = 0
   private rvfcId = 0
@@ -54,16 +56,17 @@ export class CanvasBackend implements RailBackend {
     const onFrame = () => {
       if (!this.running || !this.compositor) return
       const tsMs = performance.now()
-      this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, tsMs)
+      this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, this.feedbackVideo, tsMs)
       this.maybeTap(tsMs)
       schedule()
     }
     const schedule = () => {
       if (!this.running) return
-      // rVFC doesn't fire on a paused video — with a file layer, drive by rAF
-      // so seek-while-paused and live composite tweaks still redraw.
+      // rVFC doesn't fire on a paused video — with a file or feedback layer,
+      // drive by rAF so seek-while-paused and live composite tweaks still redraw.
       if (
         !this.fileVideo &&
+        !this.feedbackVideo &&
         this.hiddenVideo &&
         'requestVideoFrameCallback' in HTMLVideoElement.prototype
       ) {
@@ -107,6 +110,10 @@ export class CanvasBackend implements RailBackend {
       this.hiddenVideo.srcObject = null
       this.hiddenVideo = null
     }
+    if (this.feedbackVideo) {
+      this.feedbackVideo.srcObject = null
+      this.feedbackVideo = null
+    }
     this.fileVideo = null
     this.compositor?.disposeEffects()
     this.compositor = null
@@ -117,8 +124,30 @@ export class CanvasBackend implements RailBackend {
     if (this.compositor) this.compositor.mirrored = on
   }
 
-  setComposite(patch: Partial<CompositeOptions>): void {
+  setComposite(patch: CompositePatch): void {
     this.compositor?.setComposite(patch)
+  }
+
+  setFeedback(stream: MediaStream | null): void {
+    if (!stream || stream.getVideoTracks().length === 0) {
+      // Hot-remove: drop the feedback <video>; the next onFrame composites
+      // without it. The output canvas / captureStream track is untouched.
+      if (this.feedbackVideo) {
+        this.feedbackVideo.srcObject = null
+        this.feedbackVideo = null
+      }
+      return
+    }
+    // Hot-add (or re-point): a hidden <video> on the remote stream, drawn every
+    // frame as the bottom layer. Multiple elements may share one MediaStream.
+    if (!this.feedbackVideo) {
+      const v = document.createElement('video')
+      v.muted = true
+      v.playsInline = true
+      this.feedbackVideo = v
+    }
+    this.feedbackVideo.srcObject = stream
+    void this.feedbackVideo.play().catch(() => {})
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {

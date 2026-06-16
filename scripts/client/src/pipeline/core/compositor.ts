@@ -3,7 +3,15 @@
 // for the streams backend, on the main thread for the canvas fallback.
 
 import { AnalyzerBus } from './bus'
-import type { BlendMode, CanvasEffect, CompositeOptions, Ctx2D, EffectInit } from './types'
+import type {
+  BlendMode,
+  CanvasEffect,
+  CompositeOptions,
+  CompositePatch,
+  Ctx2D,
+  EffectInit,
+  LayerOptions,
+} from './types'
 import { createEffect } from '../effects/registry'
 
 type Layer = CanvasImageSource | VideoFrame
@@ -45,7 +53,11 @@ export class Compositor {
   readonly bus = new AnalyzerBus()
   private effects: CanvasEffect[] = []
   mirrored = false
-  composite: CompositeOptions = { order: 'camera-over', opacity: 0.5, blend: 'normal' }
+  composite: CompositeOptions = {
+    camera: { opacity: 1, blend: 'normal' },
+    video: { opacity: 1, blend: 'normal' },
+    feedback: { opacity: 1, blend: 'normal' },
+  }
 
   constructor(
     private ctx: Ctx2D,
@@ -59,8 +71,12 @@ export class Compositor {
     for (const e of this.effects) e.init?.(this.width, this.height)
   }
 
-  setComposite(patch: Partial<CompositeOptions>): void {
-    Object.assign(this.composite, patch)
+  setComposite(patch: CompositePatch): void {
+    // Per-layer merge — a flat Object.assign would drop the untouched field
+    // (e.g. a blend-only patch must keep the layer's opacity).
+    for (const id of ['camera', 'video', 'feedback'] as const) {
+      if (patch[id]) Object.assign(this.composite[id], patch[id])
+    }
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {
@@ -71,17 +87,19 @@ export class Compositor {
     this.effects.find((e) => e.name === name)?.message?.(data)
   }
 
-  /** Mirror applies to the camera layer only (selfie view). Cover-fit
-   *  (center-crop) so a camera whose aspect differs from the output canvas is
-   *  cropped, never stretched. */
-  private drawCamera(src: Layer, alpha: number, blend: GlobalCompositeOperation): void {
+  /** Draw one layer with its own opacity + blend. Cover-fit (center-crop) so a
+   *  source whose aspect differs from the output canvas is cropped, never
+   *  stretched (letterbox bars would feed black into the model and break
+   *  screen/multiply). `mirror` flips horizontally (selfie view, camera only). */
+  private drawLayer(src: Layer, opts: LayerOptions, mirror: boolean): void {
+    if (opts.opacity <= 0) return
     const { ctx, width: W, height: H } = this
     const { w, h } = dimsOf(src)
     const { dx, dy, dw, dh } = coverRect(W, H, w, h)
     ctx.save()
-    ctx.globalAlpha = alpha
-    ctx.globalCompositeOperation = blend
-    if (this.mirrored) {
+    ctx.globalAlpha = opts.opacity
+    ctx.globalCompositeOperation = BLEND_OP[opts.blend] ?? 'source-over'
+    if (mirror) {
       ctx.scale(-1, 1)
       // In flipped space, an image spanning screen [dx, dx+dw] is drawn at -(dx+dw).
       ctx.drawImage(src as CanvasImageSource, -(dx + dw), dy, dw, dh)
@@ -91,38 +109,24 @@ export class Compositor {
     ctx.restore()
   }
 
-  /** Video layer: cover-fit (center-crop) — letterbox bars would feed black
-   *  into the model and break screen/multiply blends. */
-  private drawVideo(src: Layer, alpha: number, blend: GlobalCompositeOperation): void {
+  /** Composite the layer stack back-to-front — feedback (bottom) → video →
+   *  camera (top) — each with its own opacity + blend, over an opaque base so
+   *  the output frame is never semi-transparent (transparency encodes as black
+   *  upstream and breaks screen/multiply). Any layer may be null/absent. */
+  drawComposite(
+    camera: Layer | null,
+    video: Layer | null,
+    feedback: Layer | null,
+    tsMs: number,
+  ): void {
     const { ctx, width: W, height: H } = this
-    const { w, h } = dimsOf(src)
-    const { dx, dy, dw, dh } = coverRect(W, H, w, h)
-    ctx.save()
-    ctx.globalAlpha = alpha
-    ctx.globalCompositeOperation = blend
-    ctx.drawImage(src as CanvasImageSource, dx, dy, dw, dh)
-    ctx.restore()
-  }
-
-  drawComposite(camera: Layer | null, video: Layer | null, tsMs: number): void {
-    const { ctx, width: W, height: H } = this
-    if (camera && video) {
-      const { order, opacity, blend } = this.composite
-      const op = BLEND_OP[blend] ?? 'source-over'
-      if (order === 'camera-over') {
-        this.drawVideo(video, 1, 'source-over')
-        this.drawCamera(camera, opacity, op)
-      } else {
-        this.drawCamera(camera, 1, 'source-over')
-        this.drawVideo(video, opacity, op)
-      }
-    } else if (camera) {
-      this.drawCamera(camera, 1, 'source-over')
-    } else if (video) {
-      this.drawVideo(video, 1, 'source-over')
-    } else {
-      ctx.clearRect(0, 0, W, H)
-    }
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.globalAlpha = 1
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, W, H)
+    if (feedback) this.drawLayer(feedback, this.composite.feedback, false)
+    if (video) this.drawLayer(video, this.composite.video, false)
+    if (camera) this.drawLayer(camera, this.composite.camera, this.mirrored)
     const info = { width: W, height: H, tsMs }
     for (const e of this.effects) e.render(ctx, info, this.bus)
   }

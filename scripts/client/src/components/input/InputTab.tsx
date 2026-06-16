@@ -5,8 +5,7 @@ import { useEffect } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { CanvasHost } from './CanvasHost'
-import { CompositeSection } from './CompositeSection'
-import { VideoSourceSection } from './VideoSourceSection'
+import { LayerStack } from './LayerStack'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { DrawToolbar } from './DrawToolbar'
 import { SensePanel } from '../sense/SensePanel'
@@ -15,7 +14,6 @@ import { useSenseStore } from '../../state/senseStore'
 
 export function InputTab({ active }: { active: boolean }) {
   const p = usePipelineStore()
-  const inputRole = useSessionStore((s) => s.inputRole)
   const senseEnabled = useSenseStore((s) => s.enabled)
   const senseOverlay = useSenseStore((s) => s.overlay)
   const senseOnly = senseEnabled && senseOverlay === 'only'
@@ -29,13 +27,6 @@ export function InputTab({ active }: { active: boolean }) {
     return () => navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  const roleLabel =
-    inputRole === 'you'
-      ? 'input: you (steering)'
-      : inputRole === 'peer'
-        ? 'input: peer (other client)'
-        : 'input: server'
 
   return (
     <section className={'tab-panel' + (active ? ' active' : '')}>
@@ -51,49 +42,7 @@ export function InputTab({ active }: { active: boolean }) {
         {p.active && senseEnabled && senseOverlay !== 'off' && <MetricsOverlay />}
       </div>
 
-      <div className="source-panels">
-        <div className="src-panel">
-          <div className="src-title">Camera</div>
-          <div className="controls src-row">
-            {/* Selecting a camera auto-enables it; "Camera off" disables. */}
-            <select
-              className="device-pick"
-              value={p.camEnabled ? p.deviceId || 'default' : ''}
-              onChange={(e) => {
-                const v = e.target.value
-                if (v === '') {
-                  void p.disableCam()
-                  return
-                }
-                const id = v === 'default' ? '' : v
-                usePipelineStore.setState({ deviceId: id })
-                if (p.camEnabled) void p.setDevice(id)
-                else void p.enableCam()
-              }}
-            >
-              <option value="">Camera off</option>
-              <option value="default">Default camera</option>
-              {p.devices.map((d) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
-            <label className="dim" title="Mirror the camera (selfie view)">
-              <input
-                type="checkbox"
-                checked={p.mirror}
-                disabled={!p.camEnabled}
-                onChange={(e) => p.setMirror(e.target.checked)}
-              />{' '}
-              Mirror
-            </label>
-          </div>
-          <span className="dim">{roleLabel}</span>
-        </div>
-        <CompositeSection />
-        <VideoSourceSection />
-      </div>
+      <LayerStack />
 
       <SensePanel />
     </section>
