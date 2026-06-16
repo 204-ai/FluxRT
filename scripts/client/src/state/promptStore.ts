@@ -11,7 +11,9 @@ import {
 } from '../lib/features'
 import { deletePrompt, getSavedPrompts, savePrompt, type SavedPrompt } from '../lib/api'
 import { parsePromptsFile } from '../lib/promptsFile'
+import type { Verdict } from '../lib/ratings'
 import { useSessionStore } from './sessionStore'
+import { useRatingStore } from './ratingStore'
 
 interface PromptState {
   prompt: string
@@ -28,6 +30,7 @@ interface PromptState {
   loopDelay: number
   morph: boolean
   morphFrames: number
+  ratingFilter: Verdict | 'all'
 
   setPromptLocal(text: string): void
   sendPrompt(text: string): void
@@ -42,6 +45,7 @@ interface PromptState {
   loadPromptsFromFile(file: File): Promise<void>
   applySaved(i: number): void
   shuffleSelect(): void
+  setRatingFilter(f: Verdict | 'all'): void
   saveCurrent(): Promise<void>
   deleteCurrent(): Promise<void>
   setLoopDelay(secs: number): void
@@ -51,10 +55,27 @@ interface PromptState {
 let loopTimer = 0
 let loopIdx = -1
 
+/** Indices into savedPrompts that match the active rating filter (all when off).
+ *  Reads the triage verdicts from ratingStore lazily — only at call time, so the
+ *  import cycle with ratingStore never bites during module init. */
+function filteredIndices(s: PromptState): number[] {
+  if (s.ratingFilter === 'all') return s.savedPrompts.map((_, i) => i)
+  const { ratings } = useRatingStore.getState()
+  const out: number[] = []
+  s.savedPrompts.forEach((e, i) => {
+    if (ratings[e.prompt.trim()]?.verdict === s.ratingFilter) out.push(i)
+  })
+  return out
+}
+
 function loopTick(): void {
   const s = usePromptStore.getState()
-  if (!s.savedPrompts.length) return
-  loopIdx = (loopIdx + 1) % s.savedPrompts.length
+  const pool = filteredIndices(s)
+  if (!pool.length) return
+  // Advance to the next pool entry after the current one. If the current pick
+  // isn't in the pool (filter changed mid-loop), indexOf → -1 → start at pool[0].
+  const pos = pool.indexOf(loopIdx)
+  loopIdx = pool[(pos + 1) % pool.length]
   s.applySaved(loopIdx)
 }
 
@@ -73,6 +94,7 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   loopDelay: 10,
   morph: false,
   morphFrames: 48,
+  ratingFilter: 'all',
 
   setPromptLocal(text) {
     set({ prompt: text })
@@ -187,15 +209,23 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   },
 
   shuffleSelect() {
-    const list = get().savedPrompts
-    if (!list.length) {
-      set({ savedStatus: 'no saved prompts to shuffle' })
+    const s = get()
+    const pool = filteredIndices(s)
+    if (!pool.length) {
+      set({ savedStatus: s.savedPrompts.length ? 'no prompts match the filter' : 'no saved prompts to shuffle' })
       return
     }
-    let i = Math.floor(Math.random() * list.length)
+    let pick = pool[Math.floor(Math.random() * pool.length)]
     // Avoid repeating the current pick when there's more than one to choose from.
-    if (list.length > 1 && i === loopIdx) i = (i + 1) % list.length
-    get().applySaved(i)
+    if (pool.length > 1 && pick === loopIdx) {
+      const pos = pool.indexOf(pick)
+      pick = pool[(pos + 1) % pool.length]
+    }
+    get().applySaved(pick)
+  },
+
+  setRatingFilter(f) {
+    set({ ratingFilter: f })
   },
 
   async saveCurrent() {
@@ -249,15 +279,16 @@ export const usePromptStore = create<PromptState>((set, get) => ({
       useSessionStore.getState().logLine('Autoloop stopped')
       return
     }
-    if (!s.savedPrompts.length) {
-      set({ savedStatus: 'no saved prompts to loop' })
+    const pool = filteredIndices(s)
+    if (!pool.length) {
+      set({ savedStatus: s.savedPrompts.length ? 'no prompts match the filter' : 'no saved prompts to loop' })
       return
     }
     loopTimer = window.setInterval(loopTick, s.loopDelay * 1000)
     set({ loopRunning: true })
     useSessionStore
       .getState()
-      .logLine(`Autoloop started: ${s.savedPrompts.length} prompts, every ${s.loopDelay}s`)
+      .logLine(`Autoloop started: ${pool.length} prompts, every ${s.loopDelay}s`)
     loopTick() // apply the first one immediately
   },
 }))
