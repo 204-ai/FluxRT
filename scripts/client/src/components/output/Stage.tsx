@@ -6,6 +6,7 @@ import { setRemoteTrackHandler, useSessionStore } from '../../state/sessionStore
 import { outputVision } from '../../state/runtime'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
 import { RatingOverlay } from './RatingOverlay'
+import { RatingBar } from './RatingBar'
 import { FullscreenButton } from '../FullscreenButton'
 import { useViewerReveal } from '../../lib/useViewerReveal'
 
@@ -60,6 +61,7 @@ export function Stage() {
         <video id="v" ref={videoRef} autoPlay playsInline muted />
         <OverlayCanvas source="output" />
         <RatingOverlay />
+        <RatingBar />
         <FullscreenButton label="output" maximized={maximized} onToggle={() => setMaximized((v) => !v)} />
         {/* Only the start (▶) button overlays the video, as the primary CTA;
             stopping is done from the header's Stop control. */}
