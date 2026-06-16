@@ -45,6 +45,28 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .canvas-host { display: contents; }
 .sense-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 
+/* ── viewer chrome (the floating icon overlays: draw / metrics / rate /
+   fullscreen) ──
+   Keep the input & output previews clean — chrome is hidden until the user
+   hovers the viewer (desktop) or taps it (touch, via the .controls-shown flag
+   from useViewerReveal). Keyboard focus reveals it too so it stays reachable.
+   Flip opacity AND pointer-events together (never animate pointer-events) so a
+   faded-out control can't catch a click — mirrors the old play-overlay rule.
+   NOTE: this class OWNS pointer-events for the chrome, so the individual
+   control rules below must NOT also declare it — an equal-specificity
+   `pointer-events: auto` later in the file would win and leave a hidden
+   (opacity:0) control clickable. The non-chrome start button (.play-overlay
+   without .viewer-chrome) is a native <button>, clickable by default. */
+.viewer-chrome { opacity: 0; pointer-events: none; transition: opacity 0.12s ease; }
+/* a toggled-on control (drawing / fullscreen) stays faintly visible while
+   hidden so the active mode is still discoverable at a glance */
+.viewer-chrome.active { opacity: 0.5; }
+.overlay-anchor:focus-within .viewer-chrome,
+.overlay-anchor.controls-shown .viewer-chrome { opacity: 1; pointer-events: auto; }
+@media (hover: hover) {
+  .overlay-anchor:hover .viewer-chrome { opacity: 1; pointer-events: auto; }
+}
+
 /* ── floating drawing toolbar over the input preview ── */
 /* Absolutely positioned inside #inputView (.overlay-anchor) so expanding it
    never resizes/reflows the preview. Kept inset in the top-left corner so
@@ -52,7 +74,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
    draw canvas underneath. */
 .draw-fab,
 .draw-widget {
-  position: absolute; top: 8px; left: 8px; z-index: 5; pointer-events: auto;
+  position: absolute; top: 8px; left: 8px; z-index: 5;
   background: rgba(18, 18, 18, 0.9); border: 1px solid #2a2a2a; border-radius: 6px;
 }
 .draw-fab {
@@ -92,7 +114,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
    never resizes/reflows the output video. */
 .rate-fab,
 .rate-widget {
-  position: absolute; top: 8px; right: 8px; z-index: 5; pointer-events: auto;
+  position: absolute; top: 8px; right: 8px; z-index: 5;
   background: rgba(18, 18, 18, 0.92); border: 1px solid #2a2a2a; border-radius: 6px;
 }
 .rate-fab {
@@ -120,25 +142,41 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .rate-btn { padding: 4px 8px; font-size: 12px; }
 .rate-status { line-height: 1.3; }
 
-/* output resolution readout (bottom-left of the output video) */
-.res-badge {
-  position: absolute; left: 8px; bottom: 8px; z-index: 5; pointer-events: none;
-  padding: 2px 6px; font: 11px/1.2 ui-monospace, monospace;
-  background: rgba(18, 18, 18, 0.8); color: #9aa; border-radius: 4px;
+/* fullscreen toggle, pinned bottom-left of the input preview / output stage.
+   Collapsed icon button (like the draw/rate FABs); turns blue while active. */
+.fs-fab {
+  position: absolute; left: 8px; bottom: 8px; z-index: 6;
+  width: 30px; height: 30px; padding: 0; font-size: 15px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(18, 18, 18, 0.9); color: #ddd; border: 1px solid #2a2a2a; border-radius: 6px;
+}
+.fs-fab:hover { background: rgba(40, 40, 40, 0.95); }
+.fs-fab.active { background: #2a6cd4; }
+
+/* "fullscreen" = fill the app viewport (NOT the OS screen): pin the viewer over
+   the page on black and letterbox its media so the aspect ratio is preserved
+   (no stretch). Toggled by FullscreenButton via the .viewport-max class. */
+#inputView.viewport-max, .remote-wrap.viewport-max {
+  position: fixed; inset: 0; z-index: 1000;
+  margin: 0; border: 0; border-radius: 0; background: #000;
+  display: flex; align-items: center; justify-content: center;
+}
+#inputView.viewport-max canvas:not(.sense-overlay),
+#inputView.viewport-max video,
+.remote-wrap.viewport-max video {
+  width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;
 }
 
-/* centered play / pause control over the output video */
+/* centered start (▶) control over the output video */
 .play-overlay {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4;
   width: 64px; height: 64px; padding: 0; border-radius: 50%; font-size: 26px; line-height: 0;
   display: inline-flex; align-items: center; justify-content: center;
   background: rgba(0, 0, 0, 0.55); color: #fff; border: 1px solid rgba(255, 255, 255, 0.3);
-  cursor: pointer; pointer-events: auto;
+  cursor: pointer;
 }
 .play-overlay:hover:not(:disabled) { background: rgba(0, 0, 0, 0.78); }
 .play-overlay:disabled { opacity: 0.4; cursor: default; }
-.play-overlay.pause { opacity: 0; pointer-events: none; transition: opacity 0.12s; }
-.remote-wrap:hover .play-overlay.pause { opacity: 1; pointer-events: auto; }
 
 /* fixed footer status bar: pipeline stats + a 1-line log that expands to ~5 */
 .statusbar {
@@ -209,7 +247,7 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 /* dense detection-metrics overlay over the input preview (overlay/only modes) */
 .metrics-fab,
 .metrics-overlay {
-  position: absolute; top: 8px; right: 8px; z-index: 6; pointer-events: auto;
+  position: absolute; top: 8px; right: 8px; z-index: 6;
   background: rgba(18, 18, 18, 0.9); border: 1px solid #2a2a2a; border-radius: 6px;
 }
 .metrics-fab {

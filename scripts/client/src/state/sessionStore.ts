@@ -41,6 +41,7 @@ interface SessionState {
   lipActive: boolean
   serverDefaultPrompt: string
   perf: PerfStats
+  outDims: string
 
   logLine(msg: string): void
   start(): Promise<void>
@@ -80,6 +81,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   lipActive: false,
   serverDefaultPrompt: '',
   perf: { pipe: '—', interp: '—', proc: '—', vram: '—', recv: '—' },
+  outDims: '—',
 
   logLine(msg) {
     const t = new Date().toLocaleTimeString()

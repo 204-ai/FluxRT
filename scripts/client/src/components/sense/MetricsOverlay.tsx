@@ -12,7 +12,7 @@ export function MetricsOverlay() {
   if (!open) {
     return (
       <button
-        className="metrics-fab"
+        className="metrics-fab viewer-chrome"
         title="Show detection metrics"
         aria-label="Show detection metrics"
         onClick={() => setOpen(true)}
@@ -23,7 +23,7 @@ export function MetricsOverlay() {
   }
 
   return (
-    <div className="metrics-overlay" role="region" aria-label="Detection metrics">
+    <div className="metrics-overlay viewer-chrome" role="region" aria-label="Detection metrics">
       <div className="metrics-head">
         <span className="dim">metrics</span>
         <button
