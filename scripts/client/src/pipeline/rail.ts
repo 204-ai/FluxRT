@@ -13,6 +13,7 @@ import type {
   RailBackendKind,
   TapCallback,
 } from './core/types'
+import { defaultComposite, hasVideoTrack, mergeComposite } from './core/types'
 import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
@@ -65,11 +66,7 @@ export class Rail {
   private mirrored = false
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
-  private composite: CompositeOptions = {
-    camera: { opacity: 1, blend: 'normal' },
-    video: { opacity: 1, blend: 'normal' },
-    feedback: { opacity: 1, blend: 'normal' },
-  }
+  private composite: CompositeOptions = defaultComposite()
   // The remote output stream fed back in as the bottom layer. Remembered so a
   // pipeline restart (camera/video toggle) re-attaches it to the new backend.
   private feedbackStream: MediaStream | null = null
@@ -167,8 +164,17 @@ export class Rail {
       this.backend.configureEffect('drawLayer', this.drawConfig)
     }
     // Re-attach the feedback layer (remote output) onto the freshly-built backend
-    // so a source-set restart keeps the output→input loop alive across it.
-    if (this.feedbackStream) this.backend.setFeedback(this.feedbackStream)
+    // so a source-set restart keeps the output→input loop alive across it. Guard:
+    // a stale/ended remote track (track.clone / MSTP can throw) must NOT abort the
+    // start and tear down the whole input pipeline — just drop the feedback layer.
+    if (this.feedbackStream) {
+      try {
+        this.backend.setFeedback(this.feedbackStream)
+      } catch (e) {
+        this.onLog('feedback re-attach failed: ' + (e instanceof Error ? e.message : e))
+        this.feedbackStream = null
+      }
+    }
     // A (re)start builds a brand-new output track; notify so the session can
     // replaceTrack on its live sender (a restart otherwise strands the peer
     // connection on the old, ended track — frozen remote output).
@@ -240,16 +246,14 @@ export class Rail {
   }
 
   setComposite(patch: CompositePatch): void {
-    for (const id of ['camera', 'video', 'feedback'] as const) {
-      if (patch[id]) Object.assign(this.composite[id], patch[id])
-    }
+    mergeComposite(this.composite, patch)
     this.backend?.setComposite(patch)
   }
 
   /** Set or clear the feedback layer — the remote output stream fed back into
    *  the input compositor. Remembered so a pipeline restart re-attaches it. */
   setFeedback(stream: MediaStream | null): void {
-    this.feedbackStream = stream && stream.getVideoTracks().length ? stream : null
+    this.feedbackStream = hasVideoTrack(stream) ? stream : null
     this.backend?.setFeedback(this.feedbackStream)
   }
 

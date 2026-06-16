@@ -12,6 +12,7 @@ import type {
   EffectInit,
   LayerOptions,
 } from './types'
+import { defaultComposite, mergeComposite } from './types'
 import { createEffect } from '../effects/registry'
 
 type Layer = CanvasImageSource | VideoFrame
@@ -53,11 +54,7 @@ export class Compositor {
   readonly bus = new AnalyzerBus()
   private effects: CanvasEffect[] = []
   mirrored = false
-  composite: CompositeOptions = {
-    camera: { opacity: 1, blend: 'normal' },
-    video: { opacity: 1, blend: 'normal' },
-    feedback: { opacity: 1, blend: 'normal' },
-  }
+  composite: CompositeOptions = defaultComposite()
 
   constructor(
     private ctx: Ctx2D,
@@ -72,11 +69,7 @@ export class Compositor {
   }
 
   setComposite(patch: CompositePatch): void {
-    // Per-layer merge — a flat Object.assign would drop the untouched field
-    // (e.g. a blend-only patch must keep the layer's opacity).
-    for (const id of ['camera', 'video', 'feedback'] as const) {
-      if (patch[id]) Object.assign(this.composite[id], patch[id])
-    }
+    mergeComposite(this.composite, patch)
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {

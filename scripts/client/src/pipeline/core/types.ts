@@ -35,10 +35,13 @@ export type RailBackendKind = 'streams' | 'canvas'
 
 export type BlendMode = 'normal' | 'screen' | 'multiply' | 'difference'
 
-/** The compositing layers, listed front-to-back — the panel stacks them top to
- *  bottom in this order. Camera is frontmost; feedback (the previous output fed
- *  back in) is the backmost field the front layers paint over. */
-export type LayerId = 'camera' | 'video' | 'feedback'
+/** The compositing layers in stack order, front → back — the panel stacks them
+ *  top to bottom in this order. Camera is frontmost; feedback (the previous
+ *  output fed back in) is the backmost field the front layers paint over. Single
+ *  source of truth: the layer type, default factory, and merge loop all derive
+ *  from this, so adding/reordering a layer is one edit. */
+export const LAYER_IDS = ['camera', 'video', 'feedback'] as const
+export type LayerId = (typeof LAYER_IDS)[number]
 
 /** Per-layer mix: every layer blends onto the accumulated result beneath it
  *  with its own opacity + blend — not just the top one. */
@@ -50,14 +53,35 @@ export interface LayerOptions {
 
 /** Mix settings for the whole stack. Layers are drawn back-to-front (feedback,
  *  then video, then camera) over an opaque base, so the panel's top row is on top. */
-export interface CompositeOptions {
-  camera: LayerOptions
-  video: LayerOptions
-  feedback: LayerOptions
-}
+export type CompositeOptions = Record<LayerId, LayerOptions>
 
 /** A live tweak to one or more layers — each layer's fields are optional. */
 export type CompositePatch = Partial<Record<LayerId, Partial<LayerOptions>>>
+
+/** Fresh default mix — every layer fully visible (opacity 1, normal blend), the
+ *  standard layers-panel default. Returns a new object each call so each holder
+ *  (compositor, rail, store) mutates its own copy. */
+export function defaultComposite(): CompositeOptions {
+  return {
+    camera: { opacity: 1, blend: 'normal' },
+    video: { opacity: 1, blend: 'normal' },
+    feedback: { opacity: 1, blend: 'normal' },
+  }
+}
+
+/** Apply a patch in place, per layer — a flat Object.assign would drop the
+ *  untouched field (a blend-only patch must keep the layer's opacity). */
+export function mergeComposite(target: CompositeOptions, patch: CompositePatch): void {
+  for (const id of LAYER_IDS) {
+    const p = patch[id]
+    if (p) Object.assign(target[id], p)
+  }
+}
+
+/** True when a stream carries at least one video track usable as a layer. */
+export function hasVideoTrack(stream: MediaStream | null | undefined): boolean {
+  return !!stream && stream.getVideoTracks().length > 0
+}
 
 /**
  * Input layers for a rail session. At least one must be non-null. The camera

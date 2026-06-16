@@ -297,8 +297,8 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       const videoFrame = baseIsCamera ? retainedOverlay : frame
       compositor.drawComposite(cameraFrame, videoFrame, retainedFeedback, tsMs)
 
-      // Analyzer tap: sample the COMPOSITE (camera + video) at cadence, so
-      // sensing reflects what's actually composited — not just the base layer.
+      // Analyzer tap: sample the full COMPOSITE (all layers, incl. feedback) at
+      // cadence, so sensing reflects what's actually composited — not just the base.
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
         try {

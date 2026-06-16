@@ -6,6 +6,7 @@
 
 import { Compositor } from '../core/compositor'
 import type { CompositePatch, RailBackend, RailStartOptions, SourceSet, TapCallback } from '../core/types'
+import { hasVideoTrack } from '../core/types'
 
 export class CanvasBackend implements RailBackend {
   readonly kind = 'canvas' as const
@@ -20,6 +21,7 @@ export class CanvasBackend implements RailBackend {
   private rafId = 0
   private rvfcId = 0
   private running = false
+  private composeErrored = false
   private tapCb: TapCallback | null = null
   private tapIntervalMs = 0
   private lastTapMs = 0
@@ -56,17 +58,29 @@ export class CanvasBackend implements RailBackend {
     const onFrame = () => {
       if (!this.running || !this.compositor) return
       const tsMs = performance.now()
-      this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, this.feedbackVideo, tsMs)
-      this.maybeTap(tsMs)
+      try {
+        this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, this.feedbackVideo, tsMs)
+        this.maybeTap(tsMs)
+      } catch (err) {
+        // One bad frame (e.g. a source element transiently in an invalid state)
+        // must never kill the loop — that would freeze the output/captureStream
+        // for good. Keep scheduling; warn once so a persistent fault is visible.
+        if (!this.composeErrored) {
+          this.composeErrored = true
+          console.warn('canvas composite frame failed (loop kept alive):', err)
+        }
+      }
       schedule()
     }
     const schedule = () => {
       if (!this.running) return
-      // rVFC doesn't fire on a paused video — with a file or feedback layer,
-      // drive by rAF so seek-while-paused and live composite tweaks still redraw.
+      // rVFC doesn't fire on a paused video — with a file layer, drive by rAF so
+      // seek-while-paused and live composite tweaks still redraw. A live feedback
+      // stream needs no rAF: it's redrawn at the camera's rVFC cadence (matching
+      // the worker, where the camera base drives the loop), and rAF would freeze
+      // the output while the tab is backgrounded.
       if (
         !this.fileVideo &&
-        !this.feedbackVideo &&
         this.hiddenVideo &&
         'requestVideoFrameCallback' in HTMLVideoElement.prototype
       ) {
@@ -129,7 +143,7 @@ export class CanvasBackend implements RailBackend {
   }
 
   setFeedback(stream: MediaStream | null): void {
-    if (!stream || stream.getVideoTracks().length === 0) {
+    if (!hasVideoTrack(stream)) {
       // Hot-remove: drop the feedback <video>; the next onFrame composites
       // without it. The output canvas / captureStream track is untouched.
       if (this.feedbackVideo) {

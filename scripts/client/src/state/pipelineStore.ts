@@ -6,6 +6,7 @@ import { create } from 'zustand'
 import { inputVision, rail, videoSource } from './runtime'
 import { getHealthz } from '../lib/api'
 import type { BlendMode, LayerId, LayerOptions } from '../pipeline/core/types'
+import { defaultComposite, hasVideoTrack } from '../pipeline/core/types'
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
 
@@ -148,11 +149,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     videoLoop: true,
     videoRate: 1,
 
-    layers: {
-      camera: { opacity: 1, blend: 'normal' },
-      video: { opacity: 1, blend: 'normal' },
-      feedback: { opacity: 1, blend: 'normal' },
-    },
+    layers: defaultComposite(),
     feedbackAvailable: false,
 
     drawMode: 'off',
@@ -393,7 +390,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       rail.setComposite({ [id]: { blend } })
     },
     attachFeedback(stream) {
-      const ok = !!stream && stream.getVideoTracks().length > 0
+      const ok = hasVideoTrack(stream)
       // Contain any failure (e.g. track.clone / MSTP) so wiring the feedback
       // layer can never break the remote-track handler or the live output.
       try {
