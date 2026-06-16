@@ -5,7 +5,8 @@
 // drawn straight from its element (Safari lacks HTMLMediaElement.captureStream).
 
 import { Compositor } from '../core/compositor'
-import type { CompositeOptions, RailBackend, RailStartOptions, SourceSet, TapCallback } from '../core/types'
+import type { CompositePatch, RailBackend, RailStartOptions, SourceSet, TapCallback } from '../core/types'
+import { hasVideoTrack } from '../core/types'
 
 export class CanvasBackend implements RailBackend {
   readonly kind = 'canvas' as const
@@ -14,10 +15,13 @@ export class CanvasBackend implements RailBackend {
 
   private hiddenVideo: HTMLVideoElement | null = null
   private fileVideo: HTMLVideoElement | null = null
+  // Hidden <video> playing the remote output stream, drawn as the feedback layer.
+  private feedbackVideo: HTMLVideoElement | null = null
   private compositor: Compositor | null = null
   private rafId = 0
   private rvfcId = 0
   private running = false
+  private composeErrored = false
   private tapCb: TapCallback | null = null
   private tapIntervalMs = 0
   private lastTapMs = 0
@@ -54,14 +58,27 @@ export class CanvasBackend implements RailBackend {
     const onFrame = () => {
       if (!this.running || !this.compositor) return
       const tsMs = performance.now()
-      this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, tsMs)
-      this.maybeTap(tsMs)
+      try {
+        this.compositor.drawComposite(this.hiddenVideo, this.fileVideo, this.feedbackVideo, tsMs)
+        this.maybeTap(tsMs)
+      } catch (err) {
+        // One bad frame (e.g. a source element transiently in an invalid state)
+        // must never kill the loop — that would freeze the output/captureStream
+        // for good. Keep scheduling; warn once so a persistent fault is visible.
+        if (!this.composeErrored) {
+          this.composeErrored = true
+          console.warn('canvas composite frame failed (loop kept alive):', err)
+        }
+      }
       schedule()
     }
     const schedule = () => {
       if (!this.running) return
-      // rVFC doesn't fire on a paused video — with a file layer, drive by rAF
-      // so seek-while-paused and live composite tweaks still redraw.
+      // rVFC doesn't fire on a paused video — with a file layer, drive by rAF so
+      // seek-while-paused and live composite tweaks still redraw. A live feedback
+      // stream needs no rAF: it's redrawn at the camera's rVFC cadence (matching
+      // the worker, where the camera base drives the loop), and rAF would freeze
+      // the output while the tab is backgrounded.
       if (
         !this.fileVideo &&
         this.hiddenVideo &&
@@ -107,6 +124,10 @@ export class CanvasBackend implements RailBackend {
       this.hiddenVideo.srcObject = null
       this.hiddenVideo = null
     }
+    if (this.feedbackVideo) {
+      this.feedbackVideo.srcObject = null
+      this.feedbackVideo = null
+    }
     this.fileVideo = null
     this.compositor?.disposeEffects()
     this.compositor = null
@@ -117,8 +138,30 @@ export class CanvasBackend implements RailBackend {
     if (this.compositor) this.compositor.mirrored = on
   }
 
-  setComposite(patch: Partial<CompositeOptions>): void {
+  setComposite(patch: CompositePatch): void {
     this.compositor?.setComposite(patch)
+  }
+
+  setFeedback(stream: MediaStream | null): void {
+    if (!hasVideoTrack(stream)) {
+      // Hot-remove: drop the feedback <video>; the next onFrame composites
+      // without it. The output canvas / captureStream track is untouched.
+      if (this.feedbackVideo) {
+        this.feedbackVideo.srcObject = null
+        this.feedbackVideo = null
+      }
+      return
+    }
+    // Hot-add (or re-point): a hidden <video> on the remote stream, drawn every
+    // frame as the bottom layer. Multiple elements may share one MediaStream.
+    if (!this.feedbackVideo) {
+      const v = document.createElement('video')
+      v.muted = true
+      v.playsInline = true
+      this.feedbackVideo = v
+    }
+    this.feedbackVideo.srcObject = stream
+    void this.feedbackVideo.play().catch(() => {})
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {

@@ -5,7 +5,8 @@
 import { create } from 'zustand'
 import { inputVision, rail, videoSource } from './runtime'
 import { getHealthz } from '../lib/api'
-import type { BlendMode, LayerOrder } from '../pipeline/core/types'
+import type { BlendMode, LayerId, LayerOptions } from '../pipeline/core/types'
+import { defaultComposite, hasVideoTrack } from '../pipeline/core/types'
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
 
@@ -30,9 +31,10 @@ interface PipelineState {
   videoLoop: boolean
   videoRate: number
 
-  compositeOrder: LayerOrder
-  compositeOpacity: number
-  compositeBlend: BlendMode
+  // Per-layer mix for the camera / video / feedback stack (front → back).
+  layers: Record<LayerId, LayerOptions>
+  // The feedback layer is live only while a remote output stream is connected.
+  feedbackAvailable: boolean
 
   drawMode: DrawMode
   drawColor: string
@@ -63,9 +65,10 @@ interface PipelineState {
   setVideoLoop(on: boolean): void
   setVideoRate(r: number): void
 
-  setCompositeOrder(order: LayerOrder): void
-  setCompositeOpacity(opacity: number): void
-  setCompositeBlend(blend: BlendMode): void
+  setLayerOpacity(id: LayerId, opacity: number): void
+  setLayerBlend(id: LayerId, blend: BlendMode): void
+  /** Wire the remote output stream in/out as the feedback layer (null = clear). */
+  attachFeedback(stream: MediaStream | null): void
 
   setDrawMode(mode: DrawMode): void
   setDrawColor(c: string): void
@@ -146,9 +149,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     videoLoop: true,
     videoRate: 1,
 
-    compositeOrder: 'camera-over',
-    compositeOpacity: 0.5,
-    compositeBlend: 'normal',
+    layers: defaultComposite(),
+    feedbackAvailable: false,
 
     drawMode: 'off',
     drawColor: '#ffffff',
@@ -379,17 +381,25 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       videoSource.setRate(r)
     },
 
-    setCompositeOrder(order) {
-      set({ compositeOrder: order })
-      rail.setComposite({ order })
+    setLayerOpacity(id, opacity) {
+      set((s) => ({ layers: { ...s.layers, [id]: { ...s.layers[id], opacity } } }))
+      rail.setComposite({ [id]: { opacity } })
     },
-    setCompositeOpacity(opacity) {
-      set({ compositeOpacity: opacity })
-      rail.setComposite({ opacity })
+    setLayerBlend(id, blend) {
+      set((s) => ({ layers: { ...s.layers, [id]: { ...s.layers[id], blend } } }))
+      rail.setComposite({ [id]: { blend } })
     },
-    setCompositeBlend(blend) {
-      set({ compositeBlend: blend })
-      rail.setComposite({ blend })
+    attachFeedback(stream) {
+      const ok = hasVideoTrack(stream)
+      // Contain any failure (e.g. track.clone / MSTP) so wiring the feedback
+      // layer can never break the remote-track handler or the live output.
+      try {
+        rail.setFeedback(ok ? stream : null)
+        set({ feedbackAvailable: ok })
+      } catch (e) {
+        get().log('Feedback layer setup failed: ' + (e instanceof Error ? e.message : e))
+        set({ feedbackAvailable: false })
+      }
     },
 
     setDrawMode(mode) {

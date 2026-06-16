@@ -13,7 +13,7 @@
 // stall the camera — the open-frame counter guards against regressions.
 
 import { Compositor } from '../core/compositor'
-import type { CompositeOptions, EffectInit } from '../core/types'
+import type { CompositeOptions, CompositePatch, EffectInit } from '../core/types'
 
 type InMsg =
   | {
@@ -28,7 +28,7 @@ type InMsg =
       effects: EffectInit[]
     }
   | { type: 'mirror'; on: boolean }
-  | { type: 'composite'; patch: Partial<CompositeOptions> }
+  | { type: 'composite'; patch: CompositePatch }
   | { type: 'effect-config'; name: string; patch: Record<string, unknown> }
   | { type: 'effect-msg'; name: string; data: unknown }
   | { type: 'bus'; key: string; value: unknown }
@@ -37,6 +37,8 @@ type InMsg =
   | { type: 'swap-video'; video: ReadableStream<VideoFrame> }
   | { type: 'swap-camera'; video: ReadableStream<VideoFrame> }
   | { type: 'clear-video' }
+  | { type: 'set-feedback'; video: ReadableStream<VideoFrame> }
+  | { type: 'clear-feedback' }
 
 let compositor: Compositor | null = null
 let running = false
@@ -47,13 +49,20 @@ let wake: (() => void) | null = null
 let requestVideoSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
 let requestCameraSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
 let requestOverlayClear: (() => void) | null = null
+let requestFeedbackSet: ((readable: ReadableStream<VideoFrame>) => void) | null = null
+let requestFeedbackClear: (() => void) | null = null
 
 function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
 }
 
 /** Eager-read valve: always consume, keep only the newest frame. */
-function startValve(readable: ReadableStream<VideoFrame>) {
+interface Valve {
+  reader: ReadableStreamDefaultReader<VideoFrame>
+  pending: VideoFrame | null
+  take(): VideoFrame | null
+}
+function startValve(readable: ReadableStream<VideoFrame>): Valve {
   const valve = {
     reader: readable.getReader(),
     pending: null as VideoFrame | null,
@@ -106,11 +115,23 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   const baseIsCamera = camera !== null
   let base = startValve(baseIsCamera ? camera! : video!)
   let overlay = camera && video ? startValve(video) : null
-  // Steady-state holds one extra open frame for the retained overlay; recomputed
-  // when a camera-only pipeline gains/loses an overlay at runtime. Declared
-  // before the swap/clear closures that mutate it (no use-before-init).
-  let leakThreshold = 4 + (overlay ? 1 : 0)
   let retainedOverlay: VideoFrame | null = null
+  // The feedback layer (remote output stream) arrives after init via
+  // set-feedback — it's always a standalone layer, never the base/overlay.
+  // Retained across passes like the overlay so it keeps compositing between its
+  // own (possibly slower) frames.
+  // Typed-null init (not a bare `null` literal) so control-flow analysis keeps
+  // the `Valve | null` union across the closures below — matching `overlay`.
+  let feedback = null as Valve | null
+  let retainedFeedback: VideoFrame | null = null
+  // Steady-state holds one extra open frame per retained overlay/feedback;
+  // recomputed when a layer is added/removed at runtime. Declared before the
+  // swap/clear closures that call it (no use-before-init).
+  let leakThreshold = 4
+  const recomputeLeak = () => {
+    leakThreshold = 4 + (overlay ? 1 : 0) + (feedback ? 1 : 0)
+  }
+  recomputeLeak()
 
   // Hot-swap the video-file input without restarting: cancel the old video
   // valve and start a fresh one on the re-captured readable. The video is the
@@ -139,7 +160,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     else overlay = fresh
     // A camera-only pipeline gaining its first video overlay now retains one
     // extra frame in steady state — widen the leak guard to match init.
-    leakThreshold = 4 + (overlay ? 1 : 0)
+    recomputeLeak()
   }
 
   // Hot-swap the camera: it's always the `base` valve when a camera is present.
@@ -183,7 +204,58 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       openFrames--
       retainedOverlay = null
     }
-    leakThreshold = 4
+    recomputeLeak()
+  }
+
+  // Hot-add / re-point the feedback layer (remote output stream). Mirrors
+  // requestVideoSwap's valve handling but is always a standalone overlay layer.
+  requestFeedbackSet = (readable) => {
+    if (!running) {
+      void readable.cancel().catch(() => {})
+      return
+    }
+    if (feedback) {
+      try {
+        void feedback.reader.cancel()
+      } catch {
+        /* already done */
+      }
+      if (feedback.pending) {
+        feedback.pending.close()
+        openFrames--
+        feedback.pending = null
+      }
+    }
+    if (retainedFeedback) {
+      retainedFeedback.close()
+      openFrames--
+      retainedFeedback = null
+    }
+    feedback = startValve(readable)
+    recomputeLeak()
+  }
+
+  // Hot-remove the feedback layer (mirror of requestOverlayClear).
+  requestFeedbackClear = () => {
+    if (feedback) {
+      try {
+        void feedback.reader.cancel()
+      } catch {
+        /* already done */
+      }
+      if (feedback.pending) {
+        feedback.pending.close()
+        openFrames--
+        feedback.pending = null
+      }
+      feedback = null
+    }
+    if (retainedFeedback) {
+      retainedFeedback.close()
+      openFrames--
+      retainedFeedback = null
+    }
+    recomputeLeak()
   }
 
   try {
@@ -209,13 +281,24 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         }
       }
 
+      if (feedback) {
+        const fresh = feedback.take()
+        if (fresh) {
+          if (retainedFeedback) {
+            retainedFeedback.close()
+            openFrames--
+          }
+          retainedFeedback = fresh
+        }
+      }
+
       const tsMs = frame.timestamp / 1000
       const cameraFrame = baseIsCamera ? frame : null
       const videoFrame = baseIsCamera ? retainedOverlay : frame
-      compositor.drawComposite(cameraFrame, videoFrame, tsMs)
+      compositor.drawComposite(cameraFrame, videoFrame, retainedFeedback, tsMs)
 
-      // Analyzer tap: sample the COMPOSITE (camera + video) at cadence, so
-      // sensing reflects what's actually composited — not just the base layer.
+      // Analyzer tap: sample the full COMPOSITE (all layers, incl. feedback) at
+      // cadence, so sensing reflects what's actually composited — not just the base.
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
         try {
@@ -241,7 +324,9 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     requestVideoSwap = null
     requestCameraSwap = null
     requestOverlayClear = null
-    for (const v of [base, overlay]) {
+    requestFeedbackSet = null
+    requestFeedbackClear = null
+    for (const v of [base, overlay, feedback]) {
       if (!v) continue
       try {
         v.reader.cancel()
@@ -252,6 +337,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       v.pending = null
     }
     retainedOverlay?.close()
+    retainedFeedback?.close()
     try {
       await writer.close()
     } catch {
@@ -298,6 +384,12 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       break
     case 'clear-video':
       requestOverlayClear?.()
+      break
+    case 'set-feedback':
+      requestFeedbackSet?.(m.video)
+      break
+    case 'clear-feedback':
+      requestFeedbackClear?.()
       break
   }
 }
