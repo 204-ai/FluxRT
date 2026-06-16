@@ -89,9 +89,11 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
-output/
-# ...but not the React output-stage components dir, which `output/` above swallows.
-!scripts/client/src/components/output/
+
+# Script run artifacts (e.g. run_face_reenactment.py --output-dir). Anchored to
+# repo root with a leading slash: an unanchored `output/` matches a dir of that
+# name at ANY depth and silently swallowed scripts/client/src/components/output/.
+/output/
 
 # Jupyter Notebook
 .ipynb_checkpoints
