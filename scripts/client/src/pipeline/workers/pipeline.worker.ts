@@ -409,11 +409,13 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
 
       const out = new VideoFrame(canvas, { timestamp: tsOut })
 
-      // Stream the composite to the depth worker every frame; it drop-and-replaces
-      // and runs as fast as it can (continuous = smooth, like the realtime demo).
-      // clone() is a cheap refcount, not a pixel copy — coalesces the capture.
-      if (depthWorker) {
-        const dframe = out.clone()
+      // Feed depth the SOURCE (base) frame — NOT the composite output. The output
+      // includes the depth layer itself (in Replace mode it IS the depth map), so
+      // feeding it back would loop (depth-of-depth) and diverge after a few frames.
+      // The realtime demo likewise runs depth on the raw video. clone() is a cheap
+      // refcount; the depth worker drop-and-replaces and closes it.
+      if (depthWorker && baseFrame) {
+        const dframe = baseFrame.clone()
         depthWorker.postMessage({ type: 'frame', frame: dframe, tsMs }, [dframe])
       }
 
