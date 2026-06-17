@@ -1,16 +1,12 @@
-// Detail / inspector pane for the SELECTED clip. Selecting a clip in the layer
-// stack drives this; it shows the clip's kind-specific details + quick controls
-// (transport for video, mirror for camera, framing for any). Dispatches by clip
-// kind so a new kind (P4: screen; later: image/shader) is one more branch — or,
-// eventually, a registry-provided editor.
+// Detail / inspector pane for the SELECTED clip — kind-dispatched controls:
+// camera device + mirror, video transport, feedback/screen status, plus framing.
 
-import { useShallow } from 'zustand/react/shallow'
 import { fmtTime, usePipelineStore } from '../../state/pipelineStore'
 import { findClip, type Clip } from '../../state/layerModel'
-import { VIDEO_LAYER } from '../../pipeline/core/types'
 import { CLIP_ICON, clipMeta } from '../../pipeline/core/clipKinds'
 
-/** Frame-on-preview toggle (move/resize/crop the layer via TransformOverlay). */
+const RATES = [0.25, 0.5, 1, 1.5, 2]
+
 function FrameButton({ layerId }: { layerId: string }) {
   const layoutLayer = usePipelineStore((s) => s.layoutLayer)
   const setLayoutLayer = usePipelineStore((s) => s.setLayoutLayer)
@@ -27,90 +23,73 @@ function FrameButton({ layerId }: { layerId: string }) {
   )
 }
 
-/** Transport row driven by either the seeded video store fields or an added
- *  clip's extraVideo state — whichever backs this clip. */
-function VideoDetail({ clip }: { clip: Clip }) {
-  const isSeeded = useIsSeededVideoSelected()
-  // useShallow: a plain object selector returns a fresh ref every call, which
-  // makes useSyncExternalStore loop (React #185). Shallow-compare keeps it stable.
-  const seeded = usePipelineStore(
-    useShallow((s) => ({
-      meta: s.videoMeta,
-      duration: s.videoDuration,
-      currentTime: s.videoCurrentTime,
-      playing: s.videoPlaying,
-      loaded: s.videoLoaded,
-    })),
-  )
-  const extra = usePipelineStore((s) => s.extraVideo[clip.id])
-  const toggleSeeded = usePipelineStore((s) => s.toggleVideoPlay)
-  const seekSeeded = usePipelineStore((s) => s.seekVideo)
-  const toggleExtra = usePipelineStore((s) => s.toggleExtraVideoPlay)
-  const seekExtra = usePipelineStore((s) => s.seekExtraVideo)
-
-  if (isSeeded) {
-    if (!seeded.loaded) return <span className="dim">No video loaded — drop one on the Video layer.</span>
-    return (
-      <>
-        <div className="dim clip-detail-meta">{seeded.meta}</div>
-        <div className="controls transport">
-          <button className="icon-btn" title={seeded.playing ? 'Pause' : 'Play'} onClick={() => toggleSeeded()}>
-            {seeded.playing ? '⏸' : '▶'}
-          </button>
-          <input
-            className="seek"
-            type="range"
-            min={0}
-            max={seeded.duration || 0}
-            step={0.1}
-            value={seeded.currentTime}
-            onChange={(e) => seekSeeded(+e.target.value)}
-          />
-          <span className="time-readout">
-            {fmtTime(seeded.currentTime)}/{fmtTime(seeded.duration)}
-          </span>
-        </div>
-      </>
-    )
-  }
-  if (!extra) return <span className="dim">Video unavailable.</span>
+function CameraDetail({ clip }: { clip: Clip }) {
+  const devices = usePipelineStore((s) => s.devices)
+  const setClipDevice = usePipelineStore((s) => s.setClipDevice)
+  const setClipMirror = usePipelineStore((s) => s.setClipMirror)
   return (
-    <div className="controls transport">
-      <button className="icon-btn" title={extra.playing ? 'Pause' : 'Play'} onClick={() => toggleExtra(clip.id)}>
-        {extra.playing ? '⏸' : '▶'}
-      </button>
-      <input
-        className="seek"
-        type="range"
-        min={0}
-        max={extra.duration || 0}
-        step={0.1}
-        value={extra.currentTime}
-        onChange={(e) => seekExtra(clip.id, +e.target.value)}
-      />
-      <span className="time-readout">
-        {fmtTime(extra.currentTime)}/{fmtTime(extra.duration)}
-      </span>
+    <div className="clip-detail-row">
+      <select
+        className="device-pick"
+        value={clip.deviceId || 'default'}
+        onChange={(e) => void setClipDevice(clip.id, e.target.value === 'default' ? '' : e.target.value)}
+      >
+        <option value="default">Default camera</option>
+        {devices.map((d) => (
+          <option key={d.deviceId} value={d.deviceId}>
+            {d.label}
+          </option>
+        ))}
+      </select>
+      <label className="mirror-lbl" title="Mirror (selfie view)">
+        <input type="checkbox" checked={clip.mirror} onChange={(e) => setClipMirror(clip.id, e.target.checked)} /> Mirror
+      </label>
     </div>
   )
 }
 
-/** True when the selected clip is the seeded video layer's clip. */
-function useIsSeededVideoSelected(): boolean {
-  return usePipelineStore((s) => {
-    const found = s.selectedClipId ? findClip(s.layers, s.selectedClipId) : null
-    return found?.layer.id === VIDEO_LAYER
-  })
-}
-
-function CameraDetail() {
-  const mirror = usePipelineStore((s) => s.mirror)
-  const camEnabled = usePipelineStore((s) => s.camEnabled)
-  const setMirror = usePipelineStore((s) => s.setMirror)
+function VideoDetail({ clip }: { clip: Clip }) {
+  const v = usePipelineStore((s) => s.videoState[clip.id])
+  const toggle = usePipelineStore((s) => s.toggleVideoPlay)
+  const seek = usePipelineStore((s) => s.seekVideo)
+  const setLoop = usePipelineStore((s) => s.setVideoLoop)
+  const setRate = usePipelineStore((s) => s.setVideoRate)
+  if (!v) return <span className="dim">video unavailable</span>
   return (
-    <label className="mirror-lbl" title="Mirror the camera (selfie view)">
-      <input type="checkbox" checked={mirror} disabled={!camEnabled} onChange={(e) => setMirror(e.target.checked)} /> Mirror
-    </label>
+    <>
+      <div className="dim clip-detail-meta">{v.meta}</div>
+      <div className="controls transport">
+        <button className="icon-btn" title={v.playing ? 'Pause' : 'Play'} onClick={() => toggle(clip.id)}>
+          {v.playing ? '⏸' : '▶'}
+        </button>
+        <input
+          className="seek"
+          type="range"
+          min={0}
+          max={v.duration || 0}
+          step={0.1}
+          value={v.currentTime}
+          onChange={(e) => seek(clip.id, +e.target.value)}
+        />
+        <span className="time-readout">
+          {fmtTime(v.currentTime)}/{fmtTime(v.duration)}
+        </span>
+        <button
+          className={'icon-btn' + (v.loop ? ' on' : '')}
+          title="Loop"
+          onClick={() => setLoop(clip.id, !v.loop)}
+        >
+          🔁
+        </button>
+        <select className="rate" value={v.rate} onChange={(e) => setRate(clip.id, +e.target.value)}>
+          {RATES.map((r) => (
+            <option key={r} value={r}>
+              {r}×
+            </option>
+          ))}
+        </select>
+      </div>
+    </>
   )
 }
 
@@ -120,10 +99,10 @@ function FeedbackDetail() {
 }
 
 function ClipDetailBody({ clip }: { clip: Clip }) {
-  if (clip.kind === 'camera') return <CameraDetail />
+  if (clip.kind === 'camera') return <CameraDetail clip={clip} />
   if (clip.kind === 'video') return <VideoDetail clip={clip} />
   if (clip.kind === 'feedback') return <FeedbackDetail />
-  if (clip.kind === 'screen') return <span className="dim">screen share — live overlay</span>
+  if (clip.kind === 'screen') return <span className="dim">screen share — live</span>
   return <span className="dim">no details for this clip</span>
 }
 

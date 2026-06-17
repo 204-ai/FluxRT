@@ -10,12 +10,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { usePipelineStore } from '../../state/pipelineStore'
 import { rail } from '../../state/runtime'
 import type { LayerId, LayerTransform } from '../../pipeline/core/types'
-import { CAMERA_LAYER, FEEDBACK_LAYER, identityTransform, layerDestRect, VIDEO_LAYER } from '../../pipeline/core/types'
-import { layerById } from '../../state/layerModel'
+import { identityTransform, layerDestRect } from '../../pipeline/core/types'
+import { activeClip, layerById } from '../../state/layerModel'
 
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
 const HANDLES: Handle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
-const LAYER_LABEL: Record<LayerId, string> = { camera: 'Camera', video: 'Video', feedback: 'Feedback' }
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
 
@@ -97,9 +96,6 @@ export function TransformOverlay() {
   const cropMode = usePipelineStore((s) => s.cropMode)
   const active = usePipelineStore((s) => s.active)
   const layers = usePipelineStore((s) => s.layers)
-  const camEnabled = usePipelineStore((s) => s.camEnabled)
-  const videoLoaded = usePipelineStore((s) => s.videoLoaded)
-  const feedbackAvailable = usePipelineStore((s) => s.feedbackAvailable)
   const setLayoutLayer = usePipelineStore((s) => s.setLayoutLayer)
   const setCropMode = usePipelineStore((s) => s.setCropMode)
 
@@ -107,16 +103,13 @@ export function TransformOverlay() {
   const cleanupRef = useRef<(() => void) | null>(null)
   const [stage, setStage] = useState<Stage | null>(null)
 
-  // A layer is "present" (framable) when its source is live. Seeded layers gate
-  // on their flags; added layers (video / screen) are live once in the stack.
+  // A layer is framable when the pipeline is live and it has an active clip.
   const isPresent = (id: LayerId): boolean => {
-    if (id === CAMERA_LAYER) return camEnabled
-    if (id === VIDEO_LAYER) return videoLoaded
-    if (id === FEEDBACK_LAYER) return feedbackAvailable
-    return !!layerById(layers, id)
+    const layer = layerById(layers, id)
+    return active && !!layer && !!activeClip(layer)
   }
   const presentLayers = layers.filter((l) => isPresent(l.id)).map((l) => l.id)
-  const labelOf = (id: LayerId): string => LAYER_LABEL[id] ?? layerById(layers, id)?.name ?? id
+  const labelOf = (id: LayerId): string => layerById(layers, id)?.name ?? id
 
   // Measure the preview element's rect relative to our container so the box
   // tracks the actual displayed media (works maximized/letterboxed too).
@@ -159,7 +152,7 @@ export function TransformOverlay() {
     if (!layoutLayer) return
     if (!active || !isPresent(layoutLayer)) setLayoutLayer(presentLayers[0] ?? null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutLayer, active, camEnabled, videoLoaded, feedbackAvailable, layers])
+  }, [layoutLayer, active, layers])
 
   const beginDrag = (handle: Handle | 'move') => (e: React.PointerEvent) => {
     if (!stage || !layoutLayer) return

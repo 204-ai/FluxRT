@@ -91,6 +91,8 @@ export type CompositeOp =
   | { op: 'add'; layer: LayerRender; index?: number }
   | { op: 'remove'; id: LayerId }
   | { op: 'reorder'; order: LayerId[] }
+  // Replace the whole composite — the reconciler's "make the stack match this".
+  | { op: 'replace'; layers: Composite }
 
 // --- Migration seed -------------------------------------------------------
 // Stable ids for the three legacy layers. The store/UI still seed exactly these
@@ -171,6 +173,10 @@ export function applyCompositeOp(target: Composite, op: CompositeOp): void {
       target.push(...next)
       break
     }
+    case 'replace':
+      target.length = 0
+      target.push(...op.layers.map((l) => ({ ...l })))
+      break
   }
 }
 

@@ -225,6 +225,11 @@ export class Rail {
     this.backend?.setComposite(op)
   }
 
+  /** Replace the whole composite (the reconciler's "match this stack"). */
+  setCompositeAll(composite: Composite): void {
+    this.setComposite({ op: 'replace', layers: composite })
+  }
+
   /** Set or clear the feedback layer — the remote output stream fed back into
    *  the input compositor. Remembered so a pipeline restart re-attaches it. */
   setFeedback(stream: MediaStream | null): void {

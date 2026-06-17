@@ -31,9 +31,7 @@ export function InputTab({ active }: { active: boolean }) {
 
   useEffect(() => {
     p.setLogger((m) => useSessionStore.getState().logLine(m))
-    const onDeviceChange = () => {
-      if (usePipelineStore.getState().camEnabled) void usePipelineStore.getState().refreshCameras()
-    }
+    const onDeviceChange = () => void usePipelineStore.getState().refreshCameras()
     navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange)
     return () => navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -53,7 +51,7 @@ export function InputTab({ active }: { active: boolean }) {
       >
         {!p.active && (
           <div className="dim" style={{ padding: 24 }}>
-            Enable your camera or load a video to preview &amp; draw on the input.
+            Click a cell in the composition grid below and pick a source (camera, video, screen…) to begin.
           </div>
         )}
         <CanvasHost holds={p.active} />
