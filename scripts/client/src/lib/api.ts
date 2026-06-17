@@ -1,5 +1,9 @@
 // Typed fetch wrappers for every FastAPI endpoint the client uses.
 // Server contract: scripts/run_webrtc.py.
+// Every URL goes through api() so a configured remote backend (serverBase) is
+// honored — empty base = same origin (dev proxy / bundled client).
+
+import { api } from './serverBase'
 
 export interface Healthz {
   peers: number
@@ -37,7 +41,7 @@ async function jsonOrDetail(r: Response): Promise<never> {
 }
 
 export async function postOffer(desc: RTCSessionDescription): Promise<RTCSessionDescriptionInit> {
-  const r = await fetch('/offer', {
+  const r = await fetch(api('/offer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sdp: desc.sdp, type: desc.type }),
@@ -47,19 +51,19 @@ export async function postOffer(desc: RTCSessionDescription): Promise<RTCSession
 }
 
 export async function getHealthz(): Promise<Healthz> {
-  const r = await fetch('/healthz', { cache: 'no-store' })
+  const r = await fetch(api('/healthz'), { cache: 'no-store' })
   if (!r.ok) throw new Error('healthz ' + r.status)
   return r.json()
 }
 
 export async function getSavedPrompts(): Promise<SavedPrompt[]> {
-  const r = await fetch('/prompts')
+  const r = await fetch(api('/prompts'))
   const j = await r.json()
   return j.prompts || []
 }
 
 export async function savePrompt(entry: SavedPrompt): Promise<void> {
-  const r = await fetch('/prompts', {
+  const r = await fetch(api('/prompts'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(entry),
@@ -68,12 +72,12 @@ export async function savePrompt(entry: SavedPrompt): Promise<void> {
 }
 
 export async function deletePrompt(prompt: string): Promise<boolean> {
-  const r = await fetch('/prompts?prompt=' + encodeURIComponent(prompt), { method: 'DELETE' })
+  const r = await fetch(api('/prompts?prompt=' + encodeURIComponent(prompt)), { method: 'DELETE' })
   return r.ok
 }
 
 export async function uploadReference(file: Blob): Promise<{ version: number; size: [number, number] }> {
-  const r = await fetch('/reference', {
+  const r = await fetch(api('/reference'), {
     method: 'POST',
     headers: { 'Content-Type': file.type || 'application/octet-stream' },
     body: file,
@@ -83,23 +87,23 @@ export async function uploadReference(file: Blob): Promise<{ version: number; si
 }
 
 export async function clearReference(): Promise<{ version?: number }> {
-  const r = await fetch('/reference', { method: 'DELETE' })
+  const r = await fetch(api('/reference'), { method: 'DELETE' })
   if (!r.ok) return {}
   return r.json().catch(() => ({}))
 }
 
 export function referenceImageUrl(): string {
-  return '/reference?t=' + Date.now()
+  return api('/reference?t=' + Date.now())
 }
 
 export async function getComfyServers(): Promise<ComfyServer[]> {
-  const r = await fetch('/comfy/servers')
+  const r = await fetch(api('/comfy/servers'))
   const j = await r.json()
   return j.servers || []
 }
 
 export async function comfyPull(server: string): Promise<{ version: number; filename: string }> {
-  const r = await fetch('/comfy/pull?server=' + encodeURIComponent(server), { method: 'POST' })
+  const r = await fetch(api('/comfy/pull?server=' + encodeURIComponent(server)), { method: 'POST' })
   if (!r.ok) await jsonOrDetail(r)
   return r.json()
 }
@@ -110,7 +114,7 @@ export async function comfyEdit(
   png: Blob,
 ): Promise<{ version: number; filename: string }> {
   const r = await fetch(
-    '/comfy/edit?server=' + encodeURIComponent(server) + '&prompt=' + encodeURIComponent(prompt),
+    api('/comfy/edit?server=' + encodeURIComponent(server) + '&prompt=' + encodeURIComponent(prompt)),
     { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: png },
   )
   if (!r.ok) await jsonOrDetail(r)
@@ -119,7 +123,7 @@ export async function comfyEdit(
 
 /** REST prompt fallback — works without an open ctrl DataChannel. */
 export async function postPromptRest(text: string): Promise<void> {
-  const r = await fetch('/prompt', {
+  const r = await fetch(api('/prompt'), {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: text,
@@ -128,7 +132,7 @@ export async function postPromptRest(text: string): Promise<void> {
 }
 
 export async function setLipTransfer(on: boolean): Promise<{ lip_active: boolean }> {
-  const r = await fetch('/lip-transfer?on=' + (on ? 'true' : 'false'), { method: 'POST' })
+  const r = await fetch(api('/lip-transfer?on=' + (on ? 'true' : 'false')), { method: 'POST' })
   if (!r.ok) await jsonOrDetail(r)
   return r.json()
 }

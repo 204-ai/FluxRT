@@ -36,9 +36,16 @@ import cv2
 import httpx
 import numpy as np
 import uvicorn
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import (
+    RTCConfiguration,
+    RTCIceServer,
+    RTCPeerConnection,
+    RTCSessionDescription,
+    VideoStreamTrack,
+)
 from aiortc.mediastreams import MediaStreamError
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -429,6 +436,36 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=_lifespan)
 
+# Cross-origin: the web client can run anywhere now (a local `vite dev`, a static
+# host) and connect to this backend directly. Allow its origin(s) — set
+# FLUXRT_CORS_ORIGINS (comma-separated) to lock down; default "*" (no credentials
+# are used, so "*" is valid).
+_cors_origins = [o.strip() for o in os.environ.get("FLUXRT_CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins or ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _rtc_config() -> RTCConfiguration:
+    """ICE servers for NAT traversal so a remote client can reach this backend.
+    STUN by default; add TURN via FLUXRT_TURN_URL (+ _USER/_PASS) when the backend
+    is behind NAT — host candidates alone aren't reachable across networks."""
+    servers = [RTCIceServer(urls=os.environ.get("FLUXRT_STUN", "stun:stun.l.google.com:19302"))]
+    turn = os.environ.get("FLUXRT_TURN_URL")
+    if turn:
+        servers.append(
+            RTCIceServer(
+                urls=turn,
+                username=os.environ.get("FLUXRT_TURN_USER"),
+                credential=os.environ.get("FLUXRT_TURN_PASS"),
+            )
+        )
+    return RTCConfiguration(iceServers=servers)
+
+
 # Ensure ES-module (.mjs) and wasm are served with a script/wasm MIME — Python's
 # mimetypes historically maps .mjs to text/plain, which breaks dynamic import()
 # (and onnxruntime-web's jsep loader) with "Failed to fetch dynamically imported
@@ -478,7 +515,7 @@ async def offer(request: Request):
         raise HTTPException(status_code=400, detail="offer requires 'sdp' and 'type'")
     offer_sdp = RTCSessionDescription(sdp=sdp, type=sdp_type)
 
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(_rtc_config())
     pcs.add(pc)
     # Connection order decides who steers the input (lowest live seq wins).
     seq = next(_peer_seq)

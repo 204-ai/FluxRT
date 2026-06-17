@@ -3,6 +3,7 @@ import { useSessionStore } from '../state/sessionStore'
 import { usePromptStore } from '../state/promptStore'
 import { registerFocusable } from '../state/focusRegistry'
 import { setLipTransfer } from '../lib/api'
+import { serverBase, setServerBase } from '../lib/serverBase'
 
 export function Header() {
   const status = useSessionStore((s) => s.status)
@@ -20,6 +21,7 @@ export function Header() {
   const morph = usePromptStore((s) => s.morph)
   const setMorph = usePromptStore((s) => s.setMorph)
   const [lipBusy, setLipBusy] = useState(false)
+  const [server, setServer] = useState(serverBase())
 
   const canStart = !starting && !connected && status !== 'connecting...'
 
@@ -61,6 +63,23 @@ export function Header() {
       <span id="status" className={statusCls}>
         {status}
       </span>
+
+      <label
+        className="nav-field"
+        title="Backend server URL — blank = same origin (dev proxy / bundled). e.g. https://my-backend:8765. Set before Start; cross-origin needs CORS on the backend."
+      >
+        server
+        <input
+          type="text"
+          placeholder="same origin"
+          value={server}
+          disabled={connected || starting}
+          onChange={(e) => setServer(e.target.value)}
+          onBlur={(e) => setServerBase(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && setServerBase((e.target as HTMLInputElement).value)}
+          style={{ width: 170 }}
+        />
+      </label>
 
       <button
         className="icon-btn start"
