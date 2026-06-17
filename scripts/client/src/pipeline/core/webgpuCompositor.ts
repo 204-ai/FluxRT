@@ -33,6 +33,7 @@ import type {
 } from './types'
 import { applyCompositeOp, defaultComposite, layerDrawRects } from './types'
 import { createEffect } from '../effects/registry'
+import { depthModeNum } from '../effects/depthStub'
 import type { GpuContext } from './gpu'
 import type { FrameMap } from './compositor'
 
@@ -169,6 +170,21 @@ fn overlay_fs(in: VSOut) -> @location(0) vec4<f32> {
   let b = textureSampleLevel(accumTex, samp, in.uv, 0.0).rgb;
   let o = textureSampleLevel(overlayTex, samp, in.uv, 0.0); // straight alpha
   return vec4<f32>(mix(b, o.rgb, o.a), 1.0);
+}
+
+// ---- depth effect (samples a GPU depth map produced by the ort-web session) -
+struct Depth { params: vec4<f32> }; // strength, mode(0 fog/1 replace/2 mask), near, far
+@group(0) @binding(9) var depthTex: texture_2d<f32>;
+@group(0) @binding(10) var<uniform> DU: Depth;
+@fragment
+fn depth_fs(in: VSOut) -> @location(0) vec4<f32> {
+  let c = textureSampleLevel(accumTex, samp, in.uv, 0.0).rgb;
+  let d = textureSampleLevel(depthTex, samp, in.uv, 0.0).r; // 0=far, 1=near
+  let m = DU.params.y;
+  var outc = mix(vec3<f32>(0.05, 0.06, 0.1), c, d);  // mode 0 fog: far → fog colour
+  if (m >= 0.5 && m < 1.5) { outc = vec3<f32>(d); }   // mode 1 replace: show depth map
+  else if (m >= 1.5) { outc = c * step(0.4, d); }     // mode 2 mask: keep near, cut far
+  return vec4<f32>(mix(c, outc, DU.params.x), 1.0);
 }
 
 // ---- final blit: accum → canvas --------------------------------------------
@@ -321,10 +337,18 @@ export class WebGpuCompositor {
   private layerUniforms: GPUBuffer
   private fxUniforms: GPUBuffer
   private blurUniforms: GPUBuffer
+  private depthUniforms: GPUBuffer
   private scratch = new Float32Array(12)
   private fxScratch = new Float32Array(20)
   private blurScratch = new Float32Array(8)
+  private depthScratch = new Float32Array(4)
   private diag = 0
+  // GPU depth map (r8unorm) written by setDepthData from the ort-web session;
+  // undefined until the first inference lands (depth layer reuse-last / skips).
+  private depthDataTex: GPUTexture | null = null
+  private depthDataView: GPUTextureView | null = null
+  private depthW = 0
+  private depthH = 0
   // Cache the composed colour matrix + blur radius per effect layer; recompute
   // only when its filter string changes (keyed by layer id, not string, so an
   // animated hue-rotate doesn't grow the map unboundedly).
@@ -341,6 +365,7 @@ export class WebGpuCompositor {
   private blurLayout: GPUBindGroupLayout
   private mixLayout: GPUBindGroupLayout
   private overlayLayout: GPUBindGroupLayout
+  private depthLayout: GPUBindGroupLayout
   private blitLayout: GPUBindGroupLayout
   private layerPipeline: GPURenderPipeline
   private blendPipeline: GPURenderPipeline
@@ -349,6 +374,7 @@ export class WebGpuCompositor {
   private blurPipeline: GPURenderPipeline
   private mixPipeline: GPURenderPipeline
   private overlayPipeline: GPURenderPipeline
+  private depthPipeline: GPURenderPipeline
   private blitPipeline: GPURenderPipeline
 
   private accumA!: GPUTexture
@@ -387,6 +413,10 @@ export class WebGpuCompositor {
     // Two slices per effect layer (horizontal + vertical blur direction).
     this.blurUniforms = this.device.createBuffer({
       size: UNIFORM_STRIDE * MAX_LAYERS * 2,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.depthUniforms = this.device.createBuffer({
+      size: UNIFORM_STRIDE * MAX_LAYERS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     // 2D canvas the global effects (marker/drawLayer) render onto each frame.
@@ -439,6 +469,14 @@ export class WebGpuCompositor {
         { binding: 8, visibility: F, texture: { sampleType: 'float' } },
       ],
     })
+    this.depthLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 1, visibility: F, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: F, texture: { sampleType: 'float' } },
+        { binding: 9, visibility: F, texture: { sampleType: 'float' } },
+        { binding: 10, visibility: F, buffer: { type: 'uniform' } },
+      ],
+    })
     this.blitLayout = this.device.createBindGroupLayout({
       entries: [
         { binding: 1, visibility: F, sampler: { type: 'filtering' } },
@@ -467,6 +505,7 @@ export class WebGpuCompositor {
     this.blurPipeline = pipe(this.blurLayout, 'fullscreen_vs', 'blur_fs', ACCUM_FORMAT, 'triangle-list')
     this.mixPipeline = pipe(this.mixLayout, 'fullscreen_vs', 'fxmix_fs', ACCUM_FORMAT, 'triangle-list')
     this.overlayPipeline = pipe(this.overlayLayout, 'fullscreen_vs', 'overlay_fs', ACCUM_FORMAT, 'triangle-list')
+    this.depthPipeline = pipe(this.depthLayout, 'fullscreen_vs', 'depth_fs', ACCUM_FORMAT, 'triangle-list')
     this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
 
     this.allocTargets()
@@ -559,6 +598,37 @@ export class WebGpuCompositor {
     this.device.queue.writeBuffer(this.blurUniforms, slot * UNIFORM_STRIDE, this.blurScratch)
   }
 
+  /** Upload a new depth map (from the ort-web DepthSession) onto the GPU depth
+   *  texture, (re)creating it if the dims changed. Called at the depth cadence
+   *  (~5fps), not per composite frame; between calls the depth layer reuses it. */
+  setDepthData(data: Uint8Array, w: number, h: number): void {
+    if (!this.depthDataTex || this.depthW !== w || this.depthH !== h) {
+      this.depthDataTex?.destroy()
+      this.depthDataTex = this.device.createTexture({
+        size: { width: w, height: h },
+        format: 'r8unorm',
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+      })
+      this.depthDataView = this.depthDataTex.createView()
+      this.depthW = w
+      this.depthH = h
+    }
+    this.device.queue.writeTexture(
+      { texture: this.depthDataTex },
+      data,
+      { bytesPerRow: w, rowsPerImage: h },
+      { width: w, height: h },
+    )
+  }
+
+  private writeDepth(slot: number, strength: number, mode: number): void {
+    this.depthScratch[0] = strength
+    this.depthScratch[1] = mode
+    this.depthScratch[2] = 0
+    this.depthScratch[3] = 1
+    this.device.queue.writeBuffer(this.depthUniforms, slot * UNIFORM_STRIDE, this.depthScratch)
+  }
+
   /** One full-screen pass: pipeline + bind group entries → target view. */
   private fsPass(
     encoder: GPUCommandEncoder,
@@ -600,6 +670,11 @@ export class WebGpuCompositor {
       offset: slot * UNIFORM_STRIDE,
       size: BLUR_UNIFORM_BYTES,
     })
+    const depthUni = (slot: number): GPUBufferBinding => ({
+      buffer: this.depthUniforms,
+      offset: slot * UNIFORM_STRIDE,
+      size: 16,
+    })
 
     // Seed the accumulator with opaque black.
     encoder
@@ -613,6 +688,7 @@ export class WebGpuCompositor {
     let layerSlot = 0
     let fxSlot = 0
     let blurSlot = 0
+    let depthSlot = 0
     let drawn = 0
     // Composite is ordered front→back; iterate in reverse to draw back-to-front.
     for (let i = this.composite.length - 1; i >= 0; i--) {
@@ -620,7 +696,23 @@ export class WebGpuCompositor {
       if (layer.opacity <= 0) continue
 
       if (layer.effectName) {
-        if (layer.effectName !== 'shader' || fxSlot >= MAX_LAYERS) continue // only 'shader' ported
+        if (layer.effectName === 'depth') {
+          // No depth data yet → skip (reuse-last is free: the texture persists).
+          if (!this.depthDataView || depthSlot >= MAX_LAYERS) continue
+          const dcfg = (layer.effectConfig ?? {}) as Record<string, unknown>
+          this.writeDepth(depthSlot, layer.opacity, depthModeNum(dcfg.mode))
+          this.fsPass(encoder, this.accumView(writeTex), this.depthPipeline, this.depthLayout, [
+            { binding: 1, resource: this.sampler },
+            { binding: 3, resource: this.accumView(readTex) },
+            { binding: 9, resource: this.depthDataView },
+            { binding: 10, resource: depthUni(depthSlot) },
+          ])
+          ;[readTex, writeTex] = [writeTex, readTex]
+          depthSlot++
+          drawn++
+          continue
+        }
+        if (layer.effectName !== 'shader' || fxSlot >= MAX_LAYERS) continue // 'shader'/'depth' ported
         const filter = (layer.effectConfig?.filter as string | undefined) ?? 'none'
         let cached = this.fxCache.get(layer.id)
         if (!cached || cached.filter !== filter) {
@@ -803,9 +895,11 @@ export class WebGpuCompositor {
     this.layerUniforms.destroy()
     this.fxUniforms.destroy()
     this.blurUniforms.destroy()
+    this.depthUniforms.destroy()
     this.accumA.destroy()
     this.accumB.destroy()
     this.layerTex.destroy()
     this.overlayTex.destroy()
+    this.depthDataTex?.destroy()
   }
 }

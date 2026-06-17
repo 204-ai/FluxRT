@@ -38,7 +38,8 @@ const MAX_VIDEO_EDGE = 1280
 /** Opt-in flags read from localStorage, applied at pipeline (re)start. Toggle in
  *  the console then restart the pipeline:
  *    localStorage.fluxrt_profile = '1'  // per-frame composite/tap timing → onLog
- *    localStorage.fluxrt_webgpu  = '1'  // WebGPU compositor (streams backend) */
+ *    localStorage.fluxrt_webgpu  = '1'  // WebGPU compositor (streams backend)
+ *    localStorage.fluxrt_depth   = '1'  // Depth Anything V2 pass (needs webgpu + vendored model) */
 function lsFlag(key: string): boolean {
   try {
     return typeof localStorage !== 'undefined' && localStorage.getItem(key) === '1'
@@ -152,6 +153,7 @@ export class Rail {
         ],
         profile: lsFlag('fluxrt_profile'),
         webgpu: lsFlag('fluxrt_webgpu'),
+        depth: lsFlag('fluxrt_depth'),
       },
       { base },
     )

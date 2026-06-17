@@ -6,11 +6,14 @@ import type { CanvasEffect } from '../core/types'
 import { createMarkerEffect } from './marker'
 import { createDrawLayerEffect } from './drawLayer'
 import { createShaderEffect } from './shader'
+import { createDepthStub } from './depthStub'
 
 const FACTORIES: Record<string, (config?: Record<string, unknown>) => CanvasEffect<any>> = {
   marker: (c) => createMarkerEffect(c),
   drawLayer: (c) => createDrawLayerEffect(c),
   shader: (c) => createShaderEffect(c),
+  // 2D no-op; the WebGPU compositor renders depth from the ort-web DepthSession.
+  depth: (c) => createDepthStub(c),
 }
 
 export function createEffect(name: string, config?: Record<string, unknown>): CanvasEffect<any> {

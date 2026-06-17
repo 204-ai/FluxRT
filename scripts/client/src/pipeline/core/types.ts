@@ -316,6 +316,9 @@ export interface RailStartOptions {
   /** Opt into the WebGPU compositor (streams backend only; probed, falls back to
    *  2D on any failure). Default off — shipping behavior is the 2D canvas. */
   webgpu?: boolean
+  /** Opt into the Depth Anything V2 pass (requires the WebGPU compositor + the
+   *  vendored ONNX model). Default off. A `depth` effect layer renders the map. */
+  depth?: boolean
 }
 
 export interface EffectInit {

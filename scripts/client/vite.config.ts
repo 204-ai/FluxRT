@@ -19,6 +19,9 @@ const proxied = [
 export default defineConfig({
   plugins: [react()],
   build: { outDir: 'dist' },
+  // ES-format workers so the pipeline worker can code-split its dynamic import()
+  // of onnxruntime-web (lazy-loaded only when the depth pass is enabled).
+  worker: { format: 'es' },
   server: {
     proxy: Object.fromEntries(
       proxied.map((p) => [p, { target, changeOrigin: true }]),

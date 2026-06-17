@@ -16,7 +16,8 @@
 
 import { Compositor, type FrameMap } from '../core/compositor'
 import { WebGpuCompositor } from '../core/webgpuCompositor'
-import { getGpuContext } from '../core/gpu'
+import { getGpuContext, setGpuLostHandler } from '../core/gpu'
+import { DepthSession } from '../core/depthSession'
 import type { Composite, CompositeOp, EffectInit, LayerId } from '../core/types'
 
 interface LayerInit {
@@ -36,6 +37,7 @@ type InMsg =
       effects: EffectInit[]
       profile?: boolean
       webgpu?: boolean
+      depth?: boolean
     }
   | { type: 'composite'; op: CompositeOp }
   | { type: 'effect-config'; name: string; patch: Record<string, unknown> }
@@ -160,6 +162,27 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   post({ type: 'info', text: `compositor: ${compositorMode}` })
   compositor.setComposite(msg.composite)
   compositor.setEffects(msg.effects)
+
+  // Depth Anything V2 (WebGPU + ort-web). Loaded ASYNC and fire-and-forget so the
+  // composite loop starts immediately; depth kicks in once the model is ready. A
+  // `depth` effect layer samples the map. Only on the WebGPU compositor.
+  const webgpuComp = comp instanceof WebGpuCompositor ? comp : null
+  // Ref object (not a bare `let`): the session is assigned inside an async
+  // callback, which TS would otherwise narrow the `let` away from.
+  const depthRef: { s: DepthSession | null } = { s: null }
+  if (msg.depth && webgpuComp) {
+    void DepthSession.create().then((s) => {
+      depthRef.s = s
+      post(s ? { type: 'info', text: 'depth: ready' } : { type: 'error', message: 'depth: failed to load' })
+    })
+    setGpuLostHandler(() => {
+      depthRef.s?.dispose()
+      depthRef.s = null
+    })
+  }
+  const DEPTH_EVERY_N = 6 // ~5fps depth under a 30fps composite
+  let depthCount = 0
+  let depthBusy = false
 
   const writer = writable.getWriter()
   running = !stopRequested // a stop during async init must not start the loop
@@ -356,6 +379,24 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         }
       }
 
+      // Depth cadence: every Nth frame, snapshot the composite and run DAv2 OFF
+      // the loop (skip ticks while a run is in flight). The depth texture persists
+      // between runs, so the depth layer reuses the last map on intervening frames.
+      if (depthRef.s && webgpuComp && ++depthCount % DEPTH_EVERY_N === 0 && !depthBusy) {
+        const ds = depthRef.s
+        depthBusy = true
+        const snap = new VideoFrame(canvas, { timestamp: tsOut })
+        void ds
+          .run(snap)
+          .then((r) => {
+            if (r) webgpuComp.setDepthData(r.data, r.w, r.h)
+          })
+          .finally(() => {
+            snap.close()
+            depthBusy = false
+          })
+      }
+
       const out = new VideoFrame(canvas, { timestamp: tsOut })
       if (baseFrame) {
         baseFrame.close()
@@ -394,6 +435,9 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     baseSetter = null
     visionPort?.close()
     visionPort = null
+    depthRef.s?.dispose()
+    depthRef.s = null
+    setGpuLostHandler(null)
     for (const slot of slots.values()) {
       try {
         slot.valve.reader.cancel()
