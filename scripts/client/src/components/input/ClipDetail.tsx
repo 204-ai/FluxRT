@@ -4,6 +4,7 @@
 // kind so a new kind (P4: screen; later: image/shader) is one more branch — or,
 // eventually, a registry-provided editor.
 
+import { useShallow } from 'zustand/react/shallow'
 import { fmtTime, usePipelineStore } from '../../state/pipelineStore'
 import { findClip, type Clip } from '../../state/layerModel'
 import { VIDEO_LAYER } from '../../pipeline/core/types'
@@ -30,14 +31,17 @@ function FrameButton({ layerId }: { layerId: string }) {
  *  clip's extraVideo state — whichever backs this clip. */
 function VideoDetail({ clip }: { clip: Clip }) {
   const isSeeded = useIsSeededVideoSelected()
-  const seeded = usePipelineStore((s) => ({
-    name: s.videoName,
-    meta: s.videoMeta,
-    duration: s.videoDuration,
-    currentTime: s.videoCurrentTime,
-    playing: s.videoPlaying,
-    loaded: s.videoLoaded,
-  }))
+  // useShallow: a plain object selector returns a fresh ref every call, which
+  // makes useSyncExternalStore loop (React #185). Shallow-compare keeps it stable.
+  const seeded = usePipelineStore(
+    useShallow((s) => ({
+      meta: s.videoMeta,
+      duration: s.videoDuration,
+      currentTime: s.videoCurrentTime,
+      playing: s.videoPlaying,
+      loaded: s.videoLoaded,
+    })),
+  )
   const extra = usePipelineStore((s) => s.extraVideo[clip.id])
   const toggleSeeded = usePipelineStore((s) => s.toggleVideoPlay)
   const seekSeeded = usePipelineStore((s) => s.seekVideo)
