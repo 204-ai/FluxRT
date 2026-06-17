@@ -48,20 +48,6 @@ function videoDims(el: HTMLVideoElement): { width: number; height: number } {
   return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
 }
 
-/** Canvas dims forced to a target aspect (the server's output aspect), keeping
- *  the source height; the source is cover-cropped into this by the compositor. */
-function aspectDims(srcHeight: number, aspect: number): { width: number; height: number } {
-  let h = srcHeight || 720
-  let w = h * aspect
-  const long = Math.max(w, h)
-  if (long > MAX_VIDEO_EDGE) {
-    const scale = MAX_VIDEO_EDGE / long
-    w *= scale
-    h *= scale
-  }
-  return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
-}
-
 export class Rail {
   private backend: RailBackend | null = null
   private markerConfig: Partial<MarkerConfig> = {}
@@ -102,9 +88,10 @@ export class Rail {
   }
 
   /** Start the pipeline on an already-acquired BASE source (the store owns
-   *  getUserMedia/getDisplayMedia/file). Dims come from the base; every other
-   *  clip hot-attaches afterward via setLayerSource. */
-  async start(base: BaseSource, targetAspect?: number | null): Promise<{ label: string }> {
+   *  getUserMedia/getDisplayMedia/file). Output dims come from `outDims` when
+   *  given (the server's output resolution → preview matches output), else from
+   *  the base source; every other clip hot-attaches afterward via setLayerSource. */
+  async start(base: BaseSource, outDims?: { width: number; height: number } | null): Promise<{ label: string }> {
     if (this.backend) this.stop()
 
     let label: string
@@ -124,12 +111,14 @@ export class Rail {
       throw new Error('no base source')
     }
 
-    // Force the output aspect to match the server's generation aspect; the
-    // source is cover-cropped into it (no stretch/letterbox). Dims are fixed at
-    // start and never derive from a single layer's liveness, so activating or
-    // deactivating a clip can never change them and force a restart.
-    if (targetAspect && targetAspect > 0) {
-      ;({ width, height } = aspectDims(height, targetAspect))
+    // Pin the output canvas to the server's generation resolution when known —
+    // the input composite (and the frames sent upstream) then match the output's
+    // aspect AND resolution exactly; sources are cover-cropped into it (no stretch
+    // / letterbox). Dims are fixed at start and never derive from a single layer's
+    // liveness, so activating/deactivating a clip can't change them.
+    if (outDims && outDims.width > 0 && outDims.height > 0) {
+      width = outDims.width
+      height = outDims.height
     }
 
     const kind = detectBackend()

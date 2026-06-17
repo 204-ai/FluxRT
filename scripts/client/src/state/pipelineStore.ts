@@ -146,7 +146,9 @@ export { fmtTime }
 const clipStreams = new Map<ClipId, MediaStream>() // camera / screen streams per clip
 const videoDetachers = new Map<ClipId, () => void>() // per-video-clip <video> listeners
 let feedbackStream: MediaStream | null = null
-let targetAspect: number | null = null
+// The server's output resolution (from /healthz) — the input composite canvas is
+// pinned to it so the preview matches the output's aspect AND resolution exactly.
+let targetResolution: { width: number; height: number } | null = null
 let aspectFetched = false
 
 // Reconciler memo: the base layer driving cadence, and what source each layer is
@@ -227,14 +229,21 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     // Prefer a cadence-capable base (camera/video/screen); else any source.
     const base = bindings.find((b) => clipMeta(b.kind).canBeBase) ?? bindings[0]
 
-    // Fetch the server's output aspect fire-and-forget — NEVER block the start on
-    // it (the /healthz proxy hangs when no server is up, which froze the preview).
-    // It applies on the next (re)start; until then the source's own dims are used.
+    // Fetch the server's output resolution fire-and-forget — NEVER block the start
+    // on it (the /healthz proxy hangs when no server is up, which froze the
+    // preview). When it resolves, pin the canvas to that resolution and restart so
+    // the preview matches the output; with no server the source's dims are used.
     if (!aspectFetched) {
       aspectFetched = true
       void getHealthz()
         .then((h) => {
-          if (h.resolution && h.resolution.height > 0) targetAspect = h.resolution.width / h.resolution.height
+          if (!h.resolution || h.resolution.height <= 0 || h.resolution.width <= 0) return
+          targetResolution = { width: h.resolution.width, height: h.resolution.height }
+          // Re-pin a running pipeline to the server resolution.
+          if (rail.active) {
+            currentBaseLayerId = null
+            void syncPipeline()
+          }
         })
         .catch(() => {})
     }
@@ -246,7 +255,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       const baseSource = baseSourceFor(base.layerId)
       if (!baseSource) return
       try {
-        await rail.start(baseSource, targetAspect)
+        await rail.start(baseSource, targetResolution)
       } catch (e) {
         get().log('Pipeline start failed: ' + (e instanceof Error ? e.message : e))
         return

@@ -67,8 +67,11 @@ function camConstraints(deviceId: string): MediaStreamConstraints {
   }
 }
 
-/** Acquire a camera MediaStream for a clip — clones the device's shared track.
- *  Re-acquiring for the same clip releases its prior clone first. */
+/** Acquire a camera MediaStream for a clip. The FIRST clip on a device gets the
+ *  raw device stream (a MediaStreamTrackProcessor needs the real capture track —
+ *  cloned tracks can yield no frames); additional clips on the same device get a
+ *  clone so the webcam can back several clips. Re-acquiring for the same clip
+ *  releases its prior handle first. */
 export async function acquireCamera(clipId: string, deviceId: string): Promise<MediaStream> {
   const key = deviceId || ''
   let base = deviceStreams.get(key)
@@ -78,12 +81,17 @@ export async function acquireCamera(clipId: string, deviceId: string): Promise<M
     deviceRefs.set(key, deviceRefs.get(key) ?? new Set())
   }
   releaseCamera(clipId)
+  const refs = deviceRefs.get(key)!
   const track = base.getVideoTracks()[0]
   if (!track) throw new Error('camera has no video track')
+  cloneDevice.set(clipId, key)
+  refs.add(clipId)
+  if (refs.size === 1) {
+    // Sole consumer → hand over the raw capture stream (MSTP-friendly).
+    return base
+  }
   const clone = track.clone()
   cameraClones.set(clipId, clone)
-  cloneDevice.set(clipId, key)
-  deviceRefs.get(key)!.add(clipId)
   return new MediaStream([clone])
 }
 
