@@ -34,6 +34,7 @@ import {
   makeClip,
   newEmptyLayer,
 } from './layerModel'
+import { loadComposition, saveComposition } from './persistence'
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
 
@@ -335,7 +336,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     })
   }
 
-  const initialLayers = [newEmptyLayer('Layer 1')]
+  // Restore a saved composition (structure only; sources re-acquire on activate)
+  // or start with one empty layer.
+  const initialLayers = loadComposition() ?? [newEmptyLayer('Layer 1')]
 
   return {
     layers: initialLayers,
@@ -450,10 +453,29 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     async activateCell(layerId, cellId) {
       const layer = layerById(get().layers, layerId)
       const cell = layer?.cells.find((c) => c.id === cellId)
+      const clip = cell?.clip
       set((s) => ({
         layers: s.layers.map((l) => (l.id === layerId ? { ...l, activeCellId: cellId } : l)),
-        selectedClipId: cell?.clip?.id ?? s.selectedClipId,
+        selectedClipId: clip?.id ?? s.selectedClipId,
       }))
+      // Re-acquire a camera/screen source that isn't live yet (e.g. a clip
+      // restored from a previous session). Video/image need a re-pick (needsFile).
+      if (clip && !clipStreams.get(clip.id)) {
+        try {
+          if (clip.kind === 'camera') {
+            clipStreams.set(clip.id, await acquireCamera(clip.id, clip.deviceId || ''))
+          } else if (clip.kind === 'screen') {
+            const getDisplay = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices)
+            if (getDisplay) {
+              const stream = await getDisplay({ video: true, audio: false })
+              clipStreams.set(clip.id, stream)
+              stream.getVideoTracks()[0]?.addEventListener('ended', () => void get().removeClip(layerId, cellId))
+            }
+          }
+        } catch (e) {
+          get().log('Re-activate failed: ' + (e instanceof Error ? e.message : e))
+        }
+      }
       await syncPipeline()
     },
 
@@ -710,6 +732,14 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       rail.configureMarker({ trailLen: n })
     },
   }
+})
+
+// Persist the composition structure (debounced) whenever the grid changes.
+let saveTimer: ReturnType<typeof setTimeout> | undefined
+usePipelineStore.subscribe((state, prev) => {
+  if (state.layers === prev.layers) return
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => saveComposition(usePipelineStore.getState().layers), 500)
 })
 
 let cellN = 0
