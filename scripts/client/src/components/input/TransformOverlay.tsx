@@ -91,6 +91,24 @@ function cropEdit(start: LayerTransform, handle: Handle, dnx: number, dny: numbe
   return { frame: { ...start.frame }, crop: c }
 }
 
+/** Crop mode, dragging inside the box: PAN the image under a FIXED crop window —
+ *  the window stays put on canvas, a different part of the content shows, bounded
+ *  by the content edges (Photoshop-CC crop behavior). The frame is re-anchored to
+ *  keep the visible (dest) rect fixed while the crop fractions slide. */
+function cropPan(start: LayerTransform, dnx: number, dny: number): LayerTransform {
+  const fw = start.frame.w || 1
+  const fh = start.frame.h || 1
+  const winW = Math.max(0, 1 - start.crop.left - start.crop.right)
+  const winH = Math.max(0, 1 - start.crop.top - start.crop.bottom)
+  const left = clamp(start.crop.left - dnx / fw, 0, 1 - winW)
+  const top = clamp(start.crop.top - dny / fh, 0, 1 - winH)
+  const right = 1 - winW - left
+  const bottom = 1 - winH - top
+  const x = start.frame.x + (start.crop.left - left) * fw // keep dest x/y fixed
+  const y = start.frame.y + (start.crop.top - top) * fh
+  return { frame: { x, y, w: fw, h: fh }, crop: { left, top, right, bottom } }
+}
+
 export function TransformOverlay() {
   const layoutLayer = usePipelineStore((s) => s.layoutLayer)
   const cropMode = usePipelineStore((s) => s.cropMode)
@@ -102,6 +120,7 @@ export function TransformOverlay() {
 
   const containerRef = useRef<HTMLDivElement>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
+  const stageRef = useRef<Stage | null>(null)
   const [stage, setStage] = useState<Stage | null>(null)
 
   // A layer is framable when the pipeline is live and it has an active clip.
@@ -121,7 +140,13 @@ export function TransformOverlay() {
     const cr = cont.getBoundingClientRect()
     const pr = prev.getBoundingClientRect()
     if (pr.width === 0 || pr.height === 0) return
-    setStage({ left: pr.left - cr.left, top: pr.top - cr.top, width: pr.width, height: pr.height })
+    const next = { left: pr.left - cr.left, top: pr.top - cr.top, width: pr.width, height: pr.height }
+    const cur = stageRef.current
+    // Skip the state update (re-render) when nothing moved — lets us re-measure
+    // every frame cheaply without churn.
+    if (cur && cur.left === next.left && cur.top === next.top && cur.width === next.width && cur.height === next.height) return
+    stageRef.current = next
+    setStage(next)
   }, [])
 
   // The `active` dep is load-bearing: rail.previewEl is not React state and gets
@@ -142,6 +167,22 @@ export function TransformOverlay() {
       window.removeEventListener('resize', measure)
     }
   }, [measure, layoutLayer, active, previewEpoch])
+
+  // While framing, re-measure every frame. The ResizeObserver only catches SIZE
+  // changes; the preview can also MOVE (controls revealing, the layer-stack below
+  // changing height, fullscreen toggle, scroll) without resizing — which left the
+  // box misaligned with the video. measure() skips the state update when nothing
+  // changed, so this is cheap.
+  useEffect(() => {
+    if (!layoutLayer || !active) return
+    let raf = 0
+    const tick = () => {
+      measure()
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [layoutLayer, active, measure])
 
   // End any in-flight drag when the framed layer changes or the overlay
   // unmounts — its captured layer id would otherwise go stale.
@@ -177,7 +218,7 @@ export function TransformOverlay() {
       const dnx = (ev.clientX - startX) / st.width
       const dny = (ev.clientY - startY) / st.height
       let next: LayerTransform
-      if (handle === 'move') next = moveFrame(start, dnx, dny)
+      if (handle === 'move') next = crop ? cropPan(start, dnx, dny) : moveFrame(start, dnx, dny)
       else if (crop) next = cropEdit(start, handle, dnx, dny)
       else next = resizeFrame(start, handle, dnx, dny, ev.shiftKey)
       usePipelineStore.getState().setLayerTransform(layer, next)
@@ -213,7 +254,12 @@ export function TransformOverlay() {
       {/* the active, editable box */}
       {activePx && (
         <div className={'layout-box' + (cropMode ? ' crop' : '')} style={activePx}>
-          <div className="layout-move" onPointerDown={beginDrag('move')} />
+          <div
+            className="layout-move"
+            style={cropMode ? { cursor: 'grab' } : undefined}
+            title={cropMode ? 'Drag to pan the image inside the crop' : 'Drag to move the layer'}
+            onPointerDown={beginDrag('move')}
+          />
           {HANDLES.map((h) => (
             <div key={h} className={'layout-handle h-' + h} onPointerDown={beginDrag(h)} />
           ))}
