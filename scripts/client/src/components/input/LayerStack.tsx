@@ -141,8 +141,8 @@ function ClipCell({ layer, cell }: { layer: Layer; cell: Cell }) {
   const clip = cell.clip
 
   if (!clip) {
-    const allowed = layer.kind ? [layer.kind] : ALL_PICKABLE
-    return <KindPicker layerId={layer.id} cellId={cell.id} allowed={allowed} />
+    // Any kind in any cell — layers are mixed, not homogeneous.
+    return <KindPicker layerId={layer.id} cellId={cell.id} allowed={ALL_PICKABLE} />
   }
   const isActive = layer.activeCellId === cell.id
   const isSel = selectedClipId === clip.id
@@ -188,7 +188,8 @@ function LayerRow({ layer, index, count }: { layer: Layer; index: number; count:
           {layer.cells.map((cell) => (
             <ClipCell key={cell.id} layer={layer} cell={cell} />
           ))}
-          {layer.kind && (
+          {/* Only offer "+ cell" when there's no empty cell waiting to be filled. */}
+          {!layer.cells.some((c) => !c.clip) && (
             <button
               className="clip-cell empty add-cell"
               title="Add another clip"

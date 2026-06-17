@@ -227,14 +227,16 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     // Prefer a cadence-capable base (camera/video/screen); else any source.
     const base = bindings.find((b) => clipMeta(b.kind).canBeBase) ?? bindings[0]
 
+    // Fetch the server's output aspect fire-and-forget — NEVER block the start on
+    // it (the /healthz proxy hangs when no server is up, which froze the preview).
+    // It applies on the next (re)start; until then the source's own dims are used.
     if (!aspectFetched) {
       aspectFetched = true
-      try {
-        const h = await getHealthz()
-        if (h.resolution && h.resolution.height > 0) targetAspect = h.resolution.width / h.resolution.height
-      } catch {
-        /* server resolution unknown */
-      }
+      void getHealthz()
+        .then((h) => {
+          if (h.resolution && h.resolution.height > 0) targetAspect = h.resolution.width / h.resolution.height
+        })
+        .catch(() => {})
     }
 
     if (!rail.active || currentBaseLayerId !== base.layerId) {

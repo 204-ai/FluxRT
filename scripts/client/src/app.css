@@ -268,9 +268,15 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .clip-detail-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* composition grid */
-.layer-stack-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px 2px; }
-.layer-stack-head .dim { font-size: 10px; letter-spacing: 0.06em; }
-.add-layer { font-size: 11px; padding: 4px 8px; }
+.layer-stack-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 4px; }
+.layer-stack-head .dim { font-size: 10px; letter-spacing: 0.08em; }
+.add-layer { width: auto; height: auto; min-width: 0; font-size: 11px; line-height: 1; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
+/* compact transport in the detail pane — symbol-only buttons */
+.transport.compact { gap: 4px; padding: 0; }
+.transport.compact .icon-btn { font-size: 14px; }
+.transport.compact .seek { flex: 1 1 auto; min-width: 40px; }
+.transport.compact .time-readout { min-width: 30px; font-size: 10px; }
+.transport.compact .rate { padding: 2px 4px; }
 .layer-grid-row {
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;

@@ -56,40 +56,31 @@ function VideoDetail({ clip }: { clip: Clip }) {
   const setRate = usePipelineStore((s) => s.setVideoRate)
   if (!v) return <span className="dim">video unavailable</span>
   return (
-    <>
-      <div className="dim clip-detail-meta">{v.meta}</div>
-      <div className="controls transport">
-        <button className="icon-btn" title={v.playing ? 'Pause' : 'Play'} onClick={() => toggle(clip.id)}>
-          {v.playing ? '⏸' : '▶'}
-        </button>
-        <input
-          className="seek"
-          type="range"
-          min={0}
-          max={v.duration || 0}
-          step={0.1}
-          value={v.currentTime}
-          onChange={(e) => seek(clip.id, +e.target.value)}
-        />
-        <span className="time-readout">
-          {fmtTime(v.currentTime)}/{fmtTime(v.duration)}
-        </span>
-        <button
-          className={'icon-btn' + (v.loop ? ' on' : '')}
-          title="Loop"
-          onClick={() => setLoop(clip.id, !v.loop)}
-        >
-          🔁
-        </button>
-        <select className="rate" value={v.rate} onChange={(e) => setRate(clip.id, +e.target.value)}>
-          {RATES.map((r) => (
-            <option key={r} value={r}>
-              {r}×
-            </option>
-          ))}
-        </select>
-      </div>
-    </>
+    <div className="controls transport compact">
+      <button className="icon-btn" title={v.playing ? 'Pause' : 'Play'} onClick={() => toggle(clip.id)}>
+        {v.playing ? '⏸' : '▶'}
+      </button>
+      <input
+        className="seek"
+        type="range"
+        min={0}
+        max={v.duration || 0}
+        step={0.1}
+        value={v.currentTime}
+        onChange={(e) => seek(clip.id, +e.target.value)}
+      />
+      <span className="time-readout">{fmtTime(v.currentTime)}</span>
+      <button className={'icon-btn' + (v.loop ? ' on' : '')} title="Loop" onClick={() => setLoop(clip.id, !v.loop)}>
+        🔁
+      </button>
+      <select className="rate" title="Speed" value={v.rate} onChange={(e) => setRate(clip.id, +e.target.value)}>
+        {RATES.map((r) => (
+          <option key={r} value={r}>
+            {r}×
+          </option>
+        ))}
+      </select>
+    </div>
   )
 }
 
