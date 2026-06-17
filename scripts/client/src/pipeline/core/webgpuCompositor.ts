@@ -1,21 +1,23 @@
 // WebGPU compositor — a GPU-resident alternative to the 2D-canvas `Compositor`,
 // behind the SAME public surface (setComposite / drawComposite / bus) so the
-// streams pipeline worker can swap to it behind a capability probe. It keeps
-// each layer's frame on the GPU: a live VideoFrame is imported zero-copy via
-// importExternalTexture and composited into an rgba16float accumulator, which is
-// then blitted to a GPUCanvasContext whose canvas feeds `new VideoFrame(canvas)`
-// → MSTG — no pixel returns to the CPU on the hot path.
+// streams pipeline worker can swap to it behind a capability probe. Each layer's
+// frame stays on the GPU: a live VideoFrame is imported zero-copy via
+// importExternalTexture and composited into an rgba16float accumulator, blitted
+// to a GPUCanvasContext whose canvas feeds `new VideoFrame(canvas)` → MSTG.
 //
-// Blending: every blend mode goes through a ping-pong over two rgba16float
-// accumulators so screen/multiply/difference (which read the backdrop) are
-// correct, not just NORMAL. Per layer, two passes: (A) render the transformed
-// layer into a scratch texture; (B) full-screen blend of (accumulator, scratch)
-// into the other accumulator. Geometry reuses types.ts (`layerDrawRects`) so it
-// stays pixel-identical to the 2D backend.
+// Compositing is a ping-pong over two rgba16float accumulators, back-to-front.
+// At each stack position we either:
+//   • SOURCE layer — Pass A renders the transformed frame into a scratch texture
+//     (opacity as alpha); Pass B blends (accumulator, scratch) → other
+//     accumulator. screen/multiply/difference are computed in WGSL.
+//   • EFFECT layer 'shader' — a full-screen pass applies a CSS-style colour
+//     filter (hue-rotate/saturate/invert/grayscale/brightness/contrast/sepia,
+//     composed into one 4×4 matrix) to the accumulator (everything below),
+//     mixed by the layer opacity.
 //
-// NOT YET IMPLEMENTED (tracked): effect LAYERS (shader/marker/drawLayer) — WGSL
-// ports / overlay-texture upload; non-VideoFrame layer sources (retained
-// ImageBitmap, depth texture). Those are skipped here today.
+// NOT YET PORTED: the `blur` filter (separable Gaussian), and the `marker` /
+// `drawLayer` vector effects (best done as a 2D overlay texture). Those effect
+// layers are skipped here. Non-VideoFrame layer sources are also skipped.
 
 import { AnalyzerBus } from './bus'
 import type { BlendMode, Composite, CompositeOp, EffectInit, LayerId, LayerOptions } from './types'
@@ -24,7 +26,8 @@ import type { GpuContext } from './gpu'
 import type { FrameMap } from './compositor'
 
 const UNIFORM_STRIDE = 256 // ≥ minUniformBufferOffsetAlignment; one slice per layer
-const UNIFORM_BYTES = 48 // 3×vec4<f32> payload actually used
+const LAYER_UNIFORM_BYTES = 48 // 3×vec4<f32>
+const FX_UNIFORM_BYTES = 80 // mat4x4<f32> + vec4<f32>
 const MAX_LAYERS = 16
 const ACCUM_FORMAT: GPUTextureFormat = 'rgba16float'
 
@@ -36,14 +39,20 @@ struct Layer {
   uv:  vec4<f32>,    // u0, v0, u1, v1
   params: vec4<f32>, // opacity, mirror(0/1), blendMode, _
 };
+struct Fx {
+  cmat: mat4x4<f32>, // colour matrix (3×3 + bias in last column) applied to vec4(rgb,1)
+  params: vec4<f32>, // opacity, _, _, _
+};
 @group(0) @binding(0) var<uniform> L: Layer;
-
-// ---- Pass A: transformed layer (external texture) → scratch -----------------
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var srcTex: texture_external;
+@group(0) @binding(3) var accumTex: texture_2d<f32>;
+@group(0) @binding(4) var layerTex: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> FX: Fx;
 
 struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
+// ---- Pass A: transformed layer (external texture) → scratch -----------------
 @vertex
 fn layer_vs(@builtin(vertex_index) vid: u32) -> VSOut {
   let xs = array<f32, 4>(L.dst.x, L.dst.z, L.dst.x, L.dst.z);
@@ -64,22 +73,17 @@ fn layer_fs(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(c.rgb, L.params.x); // alpha carries this layer's opacity (its quad mask)
 }
 
-// ---- full-screen helpers ----------------------------------------------------
-struct FSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
-
+// ---- full-screen vertex (blend / fx / blit) ---------------------------------
 @vertex
-fn fullscreen_vs(@builtin(vertex_index) vid: u32) -> FSOut {
+fn fullscreen_vs(@builtin(vertex_index) vid: u32) -> VSOut {
   let p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-  var o: FSOut;
+  var o: VSOut;
   o.pos = vec4<f32>(p[vid], 0.0, 1.0);
   o.uv = vec2<f32>(p[vid].x * 0.5 + 0.5, 0.5 - p[vid].y * 0.5); // y-flip → uv(0,0)=top-left
   return o;
 }
 
 // ---- Pass B: blend(accum, layerScratch) → accum' ----------------------------
-@group(0) @binding(3) var accumTex: texture_2d<f32>;
-@group(0) @binding(4) var layerTex: texture_2d<f32>;
-
 fn blend_rgb(mode: f32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
   if (mode < 0.5) { return s; }                          // normal
   if (mode < 1.5) { return 1.0 - (1.0 - b) * (1.0 - s); } // screen
@@ -88,22 +92,149 @@ fn blend_rgb(mode: f32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn blend_fs(in: FSOut) -> @location(0) vec4<f32> {
+fn blend_fs(in: VSOut) -> @location(0) vec4<f32> {
   let b = textureSampleLevel(accumTex, samp, in.uv, 0.0);
   let s = textureSampleLevel(layerTex, samp, in.uv, 0.0);
   let blended = blend_rgb(L.params.z, b.rgb, s.rgb);
   return vec4<f32>(mix(b.rgb, blended, s.a), 1.0); // s.a = layer opacity × quad coverage
 }
 
+// ---- effect layer: colour filter over the accumulator (everything below) ----
+@fragment
+fn fx_fs(in: VSOut) -> @location(0) vec4<f32> {
+  let c = textureSampleLevel(accumTex, samp, in.uv, 0.0);
+  let f = (FX.cmat * vec4<f32>(c.rgb, 1.0)).rgb;
+  return vec4<f32>(mix(c.rgb, clamp(f, vec3<f32>(0.0), vec3<f32>(1.0)), FX.params.x), 1.0);
+}
+
 // ---- final blit: accum → canvas --------------------------------------------
 @fragment
-fn blit_fs(in: FSOut) -> @location(0) vec4<f32> {
+fn blit_fs(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(textureSampleLevel(accumTex, samp, in.uv, 0.0).rgb, 1.0);
 }
 `
 
 function isVideoFrame(src: unknown): src is VideoFrame {
   return typeof VideoFrame !== 'undefined' && src instanceof VideoFrame
+}
+
+// --- CSS colour-filter → 3×3 matrix + bias ---------------------------------
+type Mat3 = { m: number[]; b: number[] } // m: row-major 3×3, b: rgb bias
+const IDENT: Mat3 = { m: [1, 0, 0, 0, 1, 0, 0, 0, 1], b: [0, 0, 0] }
+
+function mul3(a: number[], b: number[]): number[] {
+  const r = new Array(9).fill(0)
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++) r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j]
+  return r
+}
+function mulVec3(m: number[], v: number[]): number[] {
+  return [
+    m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+    m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+    m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+  ]
+}
+
+/** Parse a single CSS filter function into a colour transform. Unsupported
+ *  functions (blur, opacity, drop-shadow, …) return identity. */
+function filterMatrix(fn: string, arg: string): Mat3 {
+  const num = (def: number) => {
+    const t = arg.trim()
+    if (t === '') return def
+    if (t.endsWith('%')) return parseFloat(t) / 100
+    return parseFloat(t)
+  }
+  switch (fn) {
+    case 'brightness': {
+      const v = num(1)
+      return { m: [v, 0, 0, 0, v, 0, 0, 0, v], b: [0, 0, 0] }
+    }
+    case 'contrast': {
+      const v = num(1)
+      const o = 0.5 * (1 - v)
+      return { m: [v, 0, 0, 0, v, 0, 0, 0, v], b: [o, o, o] }
+    }
+    case 'invert': {
+      const v = num(1)
+      const s = 1 - 2 * v
+      return { m: [s, 0, 0, 0, s, 0, 0, 0, s], b: [v, v, v] }
+    }
+    case 'saturate': {
+      const s = num(1)
+      return {
+        m: [
+          0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s,
+          0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s,
+          0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s,
+        ],
+        b: [0, 0, 0],
+      }
+    }
+    case 'grayscale': {
+      const g = Math.min(1, num(1))
+      const k = 1 - g
+      const lr = 0.2126, lg = 0.7152, lb = 0.0722
+      return {
+        m: [
+          k + g * lr, g * lg, g * lb,
+          g * lr, k + g * lg, g * lb,
+          g * lr, g * lg, k + g * lb,
+        ],
+        b: [0, 0, 0],
+      }
+    }
+    case 'sepia': {
+      const s = Math.min(1, num(1))
+      const k = 1 - s
+      const sm = [0.393, 0.769, 0.189, 0.349, 0.686, 0.168, 0.272, 0.534, 0.131]
+      const id = IDENT.m
+      return { m: sm.map((v, i) => k * id[i] + s * v), b: [0, 0, 0] }
+    }
+    case 'hue-rotate': {
+      let a = parseFloat(arg) || 0
+      if (arg.includes('turn')) a *= 360
+      else if (arg.includes('rad')) a = (a * 180) / Math.PI
+      const r = (a * Math.PI) / 180
+      const c = Math.cos(r)
+      const n = Math.sin(r)
+      return {
+        m: [
+          0.213 + c * 0.787 - n * 0.213, 0.715 - c * 0.715 - n * 0.715, 0.072 - c * 0.072 + n * 0.928,
+          0.213 - c * 0.213 + n * 0.143, 0.715 + c * 0.285 + n * 0.14, 0.072 - c * 0.072 - n * 0.283,
+          0.213 - c * 0.213 - n * 0.787, 0.715 - c * 0.715 + n * 0.715, 0.072 + c * 0.928 + n * 0.072,
+        ],
+        b: [0, 0, 0],
+      }
+    }
+    default:
+      return IDENT // blur / opacity / unknown — not a colour matrix
+  }
+}
+
+/** Compose a CSS filter string into one 4×4 colour matrix (column-major, ready
+ *  for writeBuffer): out = M·vec4(rgb,1). Returns null for 'none'/empty. */
+function colorMatrix(filter: string): Float32Array | null {
+  if (!filter || filter === 'none') return null
+  let m = IDENT.m
+  let b = IDENT.b
+  const re = /([a-z-]+)\(([^)]*)\)/g
+  let hit: RegExpExecArray | null
+  let any = false
+  while ((hit = re.exec(filter))) {
+    const f = filterMatrix(hit[1], hit[2])
+    m = mul3(f.m, m) // apply this filter AFTER the accumulated ones
+    b = mulVec3(f.m, b).map((v, i) => v + f.b[i])
+    any = true
+  }
+  if (!any) return null
+  // Column-major 4×4: cols 0-2 hold the 3×3 (row i, col j → m[i*3+j]); col 3 = bias.
+  return new Float32Array([
+    m[0], m[3], m[6], 0,
+    m[1], m[4], m[7], 0,
+    m[2], m[5], m[8], 0,
+    b[0], b[1], b[2], 1,
+  ])
 }
 
 export class WebGpuCompositor {
@@ -114,15 +245,19 @@ export class WebGpuCompositor {
   private context: GPUCanvasContext
   private canvasFormat: GPUTextureFormat
   private sampler: GPUSampler
-  private uniforms: GPUBuffer
+  private layerUniforms: GPUBuffer
+  private fxUniforms: GPUBuffer
   private scratch = new Float32Array(12)
+  private fxScratch = new Float32Array(20)
   private diag = 0
 
   private layerLayout: GPUBindGroupLayout
   private blendLayout: GPUBindGroupLayout
+  private fxLayout: GPUBindGroupLayout
   private blitLayout: GPUBindGroupLayout
   private layerPipeline: GPURenderPipeline
   private blendPipeline: GPURenderPipeline
+  private fxPipeline: GPURenderPipeline
   private blitPipeline: GPURenderPipeline
 
   private accumA!: GPUTexture
@@ -140,12 +275,14 @@ export class WebGpuCompositor {
     const ctx = canvas.getContext('webgpu')
     if (!ctx) throw new Error('webgpu canvas context unavailable')
     this.context = ctx
-    // alphaMode 'opaque': output must never be semi-transparent (upstream encodes
-    // alpha as black and breaks screen/multiply) — matches the 2D opaque base.
     this.context.configure({ device: this.device, format: this.canvasFormat, alphaMode: 'opaque' })
 
     this.sampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear' })
-    this.uniforms = this.device.createBuffer({
+    this.layerUniforms = this.device.createBuffer({
+      size: UNIFORM_STRIDE * MAX_LAYERS,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
+    this.fxUniforms = this.device.createBuffer({
       size: UNIFORM_STRIDE * MAX_LAYERS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
@@ -167,6 +304,13 @@ export class WebGpuCompositor {
         { binding: 4, visibility: F, texture: { sampleType: 'float' } },
       ],
     })
+    this.fxLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 1, visibility: F, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: F, texture: { sampleType: 'float' } },
+        { binding: 5, visibility: F, buffer: { type: 'uniform' } },
+      ],
+    })
     this.blitLayout = this.device.createBindGroupLayout({
       entries: [
         { binding: 1, visibility: F, sampler: { type: 'filtering' } },
@@ -175,24 +319,23 @@ export class WebGpuCompositor {
     })
 
     const module = this.device.createShaderModule({ code: WGSL })
-    this.layerPipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layerLayout] }),
-      vertex: { module, entryPoint: 'layer_vs' },
-      fragment: { module, entryPoint: 'layer_fs', targets: [{ format: ACCUM_FORMAT }] },
-      primitive: { topology: 'triangle-strip' },
-    })
-    this.blendPipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blendLayout] }),
-      vertex: { module, entryPoint: 'fullscreen_vs' },
-      fragment: { module, entryPoint: 'blend_fs', targets: [{ format: ACCUM_FORMAT }] },
-      primitive: { topology: 'triangle-list' },
-    })
-    this.blitPipeline = this.device.createRenderPipeline({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blitLayout] }),
-      vertex: { module, entryPoint: 'fullscreen_vs' },
-      fragment: { module, entryPoint: 'blit_fs', targets: [{ format: this.canvasFormat }] },
-      primitive: { topology: 'triangle-list' },
-    })
+    const pipe = (
+      layout: GPUBindGroupLayout,
+      vs: string,
+      fs: string,
+      format: GPUTextureFormat,
+      topology: GPUPrimitiveTopology,
+    ): GPURenderPipeline =>
+      this.device.createRenderPipeline({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        vertex: { module, entryPoint: vs },
+        fragment: { module, entryPoint: fs, targets: [{ format }] },
+        primitive: { topology },
+      })
+    this.layerPipeline = pipe(this.layerLayout, 'layer_vs', 'layer_fs', ACCUM_FORMAT, 'triangle-strip')
+    this.blendPipeline = pipe(this.blendLayout, 'fullscreen_vs', 'blend_fs', ACCUM_FORMAT, 'triangle-list')
+    this.fxPipeline = pipe(this.fxLayout, 'fullscreen_vs', 'fx_fs', ACCUM_FORMAT, 'triangle-list')
+    this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
 
     this.allocTargets()
   }
@@ -210,15 +353,13 @@ export class WebGpuCompositor {
     else applyCompositeOp(this.composite, value)
   }
 
-  // Effect layers / global effects not yet ported to WGSL — no-ops with matching
-  // signatures so the worker drives this and the 2D Compositor identically.
+  // Global effects (legacy marker/drawLayer chain) not ported — no-ops with
+  // matching signatures so the worker drives this and the 2D Compositor alike.
   setEffects(_inits: EffectInit[]): void {}
   configureEffect(_name: string, _patch: Record<string, unknown>): void {}
   effectMessage(_name: string, _data: unknown): void {}
   effectLayerMessage(_layerId: LayerId, _data: unknown): void {}
 
-  /** Pack one layer's NDC dest rect + source UV sub-rect + opacity/mirror/blend
-   *  into its uniform slice. Returns false when not drawable. */
   private writeLayer(slot: number, frame: VideoFrame, opts: LayerOptions, mirror: boolean, blend: BlendMode): boolean {
     const w = frame.displayWidth
     const h = frame.displayHeight
@@ -238,52 +379,38 @@ export class WebGpuCompositor {
     this.scratch[9] = mirror ? 1 : 0
     this.scratch[10] = BLEND_NUM[blend] ?? 0
     this.scratch[11] = 0
-    this.device.queue.writeBuffer(this.uniforms, slot * UNIFORM_STRIDE, this.scratch)
+    this.device.queue.writeBuffer(this.layerUniforms, slot * UNIFORM_STRIDE, this.scratch)
     return true
   }
 
+  private writeFx(slot: number, matrix: Float32Array, opacity: number): void {
+    this.fxScratch.set(matrix, 0) // 16 floats
+    this.fxScratch[16] = opacity
+    this.fxScratch[17] = 0
+    this.fxScratch[18] = 0
+    this.fxScratch[19] = 0
+    this.device.queue.writeBuffer(this.fxUniforms, slot * UNIFORM_STRIDE, this.fxScratch)
+  }
+
   /** Composite back-to-front into the accumulator (ping-pong) then blit to the
-   *  canvas. All external-texture imports happen synchronously within this call
-   *  (their textures are valid only for the current task). */
+   *  canvas. Source layers blend their frame; 'shader' effect layers run a colour
+   *  filter over everything below. All external-texture imports are synchronous
+   *  within this call (their textures are valid only for the current task). */
   drawComposite(frames: FrameMap, _tsMs: number): void {
-    type Drawn = { slot: number; extTex: GPUExternalTexture }
-    const draws: Drawn[] = []
-    for (let i = this.composite.length - 1; i >= 0 && draws.length < MAX_LAYERS; i--) {
-      const layer = this.composite[i]
-      if (layer.effectName) continue // effect layers not yet ported
-      if (layer.opacity <= 0) continue
-      const src = frames[layer.id]
-      if (!src || !isVideoFrame(src)) continue // only live VideoFrame layers for now
-      const slot = draws.length
-      if (!this.writeLayer(slot, src, layer, layer.mirror, layer.blend)) continue
-      draws.push({ slot, extTex: this.device.importExternalTexture({ source: src }) })
-    }
-
-    if (this.diag < 2) {
-      this.diag++
-      console.info(
-        '[webgpu] frame',
-        this.diag,
-        '| layers:',
-        this.composite.map((l) => `${l.id}:${l.effectName ? 'fx' : l.blend}@${l.opacity}`).join(' '),
-        '| drawn:',
-        draws.length,
-        '| frames:',
-        Object.keys(frames)
-          .map((k) => `${k}:${isVideoFrame(frames[k]) ? 'vf' : frames[k] ? 'other' : 'none'}`)
-          .join(' '),
-      )
-    }
-
-    const uni = (slot: number): GPUBufferBinding => ({
-      buffer: this.uniforms,
-      offset: slot * UNIFORM_STRIDE,
-      size: UNIFORM_BYTES,
-    })
     const encoder = this.device.createCommandEncoder()
     let readTex = this.accumA
     let writeTex = this.accumB
     const layerView = this.layerTex.createView()
+    const layerUni = (slot: number): GPUBufferBinding => ({
+      buffer: this.layerUniforms,
+      offset: slot * UNIFORM_STRIDE,
+      size: LAYER_UNIFORM_BYTES,
+    })
+    const fxUni = (slot: number): GPUBufferBinding => ({
+      buffer: this.fxUniforms,
+      offset: slot * UNIFORM_STRIDE,
+      size: FX_UNIFORM_BYTES,
+    })
 
     // Seed the accumulator with opaque black.
     encoder
@@ -294,7 +421,48 @@ export class WebGpuCompositor {
       })
       .end()
 
-    for (const d of draws) {
+    let layerSlot = 0
+    let fxSlot = 0
+    let drawn = 0
+    // Composite is ordered front→back; iterate in reverse to draw back-to-front.
+    for (let i = this.composite.length - 1; i >= 0; i--) {
+      const layer = this.composite[i]
+      if (layer.opacity <= 0) continue
+
+      if (layer.effectName) {
+        if (layer.effectName !== 'shader' || fxSlot >= MAX_LAYERS) continue // only 'shader' ported
+        const filter = (layer.effectConfig?.filter as string | undefined) ?? 'none'
+        const matrix = colorMatrix(filter)
+        if (!matrix) continue // none / blur-only / unsupported → no colour change
+        this.writeFx(fxSlot, matrix, layer.opacity)
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [{ view: writeTex.createView(), loadOp: 'clear', storeOp: 'store' }],
+        })
+        pass.setPipeline(this.fxPipeline)
+        pass.setBindGroup(
+          0,
+          this.device.createBindGroup({
+            layout: this.fxLayout,
+            entries: [
+              { binding: 1, resource: this.sampler },
+              { binding: 3, resource: readTex.createView() },
+              { binding: 5, resource: fxUni(fxSlot) },
+            ],
+          }),
+        )
+        pass.draw(3)
+        pass.end()
+        ;[readTex, writeTex] = [writeTex, readTex]
+        fxSlot++
+        drawn++
+        continue
+      }
+
+      const src = frames[layer.id]
+      if (!src || !isVideoFrame(src)) continue // only live VideoFrame layers for now
+      if (layerSlot >= MAX_LAYERS) continue
+      if (!this.writeLayer(layerSlot, src, layer, layer.mirror, layer.blend)) continue
+      const extTex = this.device.importExternalTexture({ source: src })
       // Pass A: transformed layer → scratch (cleared transparent).
       {
         const pass = encoder.beginRenderPass({
@@ -308,9 +476,9 @@ export class WebGpuCompositor {
           this.device.createBindGroup({
             layout: this.layerLayout,
             entries: [
-              { binding: 0, resource: uni(d.slot) },
+              { binding: 0, resource: layerUni(layerSlot) },
               { binding: 1, resource: this.sampler },
-              { binding: 2, resource: d.extTex },
+              { binding: 2, resource: extTex },
             ],
           }),
         )
@@ -328,7 +496,7 @@ export class WebGpuCompositor {
           this.device.createBindGroup({
             layout: this.blendLayout,
             entries: [
-              { binding: 0, resource: uni(d.slot) },
+              { binding: 0, resource: layerUni(layerSlot) },
               { binding: 1, resource: this.sampler },
               { binding: 3, resource: readTex.createView() },
               { binding: 4, resource: layerView },
@@ -338,15 +506,32 @@ export class WebGpuCompositor {
         pass.draw(3)
         pass.end()
       }
-      const t = readTex
-      readTex = writeTex
-      writeTex = t
+      ;[readTex, writeTex] = [writeTex, readTex]
+      layerSlot++
+      drawn++
+    }
+
+    if (this.diag < 2) {
+      this.diag++
+      console.info(
+        '[webgpu] frame',
+        this.diag,
+        '| layers:',
+        this.composite.map((l) => `${l.id}:${l.effectName ? `fx(${l.effectName})` : l.blend}@${l.opacity}`).join(' '),
+        '| drawn:',
+        drawn,
+        '| frames:',
+        Object.keys(frames)
+          .map((k) => `${k}:${isVideoFrame(frames[k]) ? 'vf' : frames[k] ? 'other' : 'none'}`)
+          .join(' '),
+      )
     }
 
     // Blit the final accumulator to the canvas.
-    const canvasView = this.context.getCurrentTexture().createView()
     const blit = encoder.beginRenderPass({
-      colorAttachments: [{ view: canvasView, loadOp: 'clear', storeOp: 'store' }],
+      colorAttachments: [
+        { view: this.context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' },
+      ],
     })
     blit.setPipeline(this.blitPipeline)
     blit.setBindGroup(
@@ -368,7 +553,8 @@ export class WebGpuCompositor {
   disposeEffects(): void {}
 
   dispose(): void {
-    this.uniforms.destroy()
+    this.layerUniforms.destroy()
+    this.fxUniforms.destroy()
     this.accumA.destroy()
     this.accumB.destroy()
     this.layerTex.destroy()
