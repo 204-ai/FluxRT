@@ -517,6 +517,7 @@ export class WebGpuCompositor {
       topology: GPUPrimitiveTopology,
     ): GPURenderPipeline =>
       this.device.createRenderPipeline({
+        label: fs, // so an "invalid pipeline" error names the offending pass
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
         vertex: { module, entryPoint: vs },
         fragment: { module, entryPoint: fs, targets: [{ format }] },
@@ -530,7 +531,9 @@ export class WebGpuCompositor {
     this.mixPipeline = pipe(this.mixLayout, 'fullscreen_vs', 'fxmix_fs', ACCUM_FORMAT, 'triangle-list')
     this.overlayPipeline = pipe(this.overlayLayout, 'fullscreen_vs', 'overlay_fs', ACCUM_FORMAT, 'triangle-list')
     this.depthPipeline = pipe(this.depthLayout, 'fullscreen_vs', 'depth_fs', ACCUM_FORMAT, 'triangle-list')
-    this.depthEasePipeline = pipe(this.depthEaseLayout, 'fullscreen_vs', 'depth_ease_fs', 'r8unorm', 'triangle-list')
+    // Ease target is rgba16float (the proven render format) — r8unorm-as-target
+    // produced an invalid pipeline on the target adapter. Depth lives in .r.
+    this.depthEasePipeline = pipe(this.depthEaseLayout, 'fullscreen_vs', 'depth_ease_fs', ACCUM_FORMAT, 'triangle-list')
     this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
 
     this.allocTargets()
@@ -637,19 +640,17 @@ export class WebGpuCompositor {
         usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
       })
       this.depthDataView = this.depthDataTex.createView()
-      // Ping-pong smoothed pair: render targets (ease) + sampled + COPY_DST (seed).
-      const su = GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-      const a = this.device.createTexture({ size, format: 'r8unorm', usage: su })
-      const b = this.device.createTexture({ size, format: 'r8unorm', usage: su })
+      // Ping-pong smoothed pair, rgba16float (proven render-target format; depth
+      // is carried in .r). Not seeded — the ease ramps up from the raw map over a
+      // few frames (a brief fade-in on first depth, acceptable for a live effect).
+      const su = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+      const a = this.device.createTexture({ size, format: ACCUM_FORMAT, usage: su })
+      const b = this.device.createTexture({ size, format: ACCUM_FORMAT, usage: su })
       this.depthSmooth = [a, b]
       this.depthSmoothViews = [a.createView(), b.createView()]
       this.depthSmoothCur = 0
       this.depthW = w
       this.depthH = h
-      // Seed both smoothed textures with the first map (don't ease up from black).
-      for (const t of this.depthSmooth) {
-        this.device.queue.writeTexture({ texture: t }, data, { bytesPerRow: w, rowsPerImage: h }, size)
-      }
     }
     this.device.queue.writeTexture({ texture: this.depthDataTex }, data, { bytesPerRow: w, rowsPerImage: h }, size)
   }
