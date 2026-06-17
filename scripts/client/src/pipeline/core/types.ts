@@ -313,6 +313,9 @@ export interface RailStartOptions {
   effects: EffectInit[]
   /** Emit periodic perf summaries (composite/tap timing, fps) via onLog. */
   profile?: boolean
+  /** Opt into the WebGPU compositor (streams backend only; probed, falls back to
+   *  2D on any failure). Default off — shipping behavior is the 2D canvas. */
+  webgpu?: boolean
 }
 
 export interface EffectInit {

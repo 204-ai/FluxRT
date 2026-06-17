@@ -15,6 +15,8 @@
 // stall the base — the open-frame counter guards against regressions.
 
 import { Compositor, type FrameMap } from '../core/compositor'
+import { WebGpuCompositor } from '../core/webgpuCompositor'
+import { getGpuContext } from '../core/gpu'
 import type { Composite, CompositeOp, EffectInit, LayerId } from '../core/types'
 
 interface LayerInit {
@@ -33,6 +35,7 @@ type InMsg =
       composite: Composite
       effects: EffectInit[]
       profile?: boolean
+      webgpu?: boolean
     }
   | { type: 'composite'; op: CompositeOp }
   | { type: 'effect-config'; name: string; patch: Record<string, unknown> }
@@ -47,7 +50,7 @@ type InMsg =
   // Direct worker→worker frame channel to the vision worker (no main bounce).
   | { type: 'vision-port'; port: MessagePort | null }
 
-let compositor: Compositor | null = null
+let compositor: Compositor | WebGpuCompositor | null = null
 let running = false
 let tapIntervalMs = 0
 let lastTapMs = 0
@@ -113,13 +116,36 @@ interface Slot {
 
 async function run(msg: Extract<InMsg, { type: 'init' }>) {
   const { layers, writable, width, height } = msg
-  const canvas = new OffscreenCanvas(width, height)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    post({ type: 'error', message: '2d context unavailable in worker' })
-    return
+  // Pick the compositor backend. WebGPU is opt-in (msg.webgpu) and probed; on any
+  // failure we fall back to the 2D canvas. A canvas can hold only one context
+  // type, so a failed WebGPU attempt (which may already have taken a 'webgpu'
+  // context) gets a fresh canvas before the 2D path.
+  let canvas = new OffscreenCanvas(width, height)
+  let comp: Compositor | WebGpuCompositor | null = null
+  if (msg.webgpu) {
+    const gpu = await getGpuContext()
+    if (gpu) {
+      try {
+        comp = new WebGpuCompositor(gpu, canvas, width, height)
+      } catch (e) {
+        post({
+          type: 'error',
+          message: 'webgpu compositor init failed, using 2d: ' + (e instanceof Error ? e.message : String(e)),
+        })
+        canvas = new OffscreenCanvas(width, height)
+        comp = null
+      }
+    }
   }
-  compositor = new Compositor(ctx, width, height)
+  if (!comp) {
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      post({ type: 'error', message: '2d context unavailable in worker' })
+      return
+    }
+    comp = new Compositor(ctx, width, height)
+  }
+  compositor = comp
   compositor.setComposite(msg.composite)
   compositor.setEffects(msg.effects)
 

@@ -35,11 +35,13 @@ export interface RailEvents {
 /** Longest output edge when the video file is the sole source. */
 const MAX_VIDEO_EDGE = 1280
 
-/** Opt-in per-frame profiling (composite/tap timing → onLog). Toggle in the
- *  console with `localStorage.fluxrt_profile = '1'` then restart the pipeline. */
-function profileEnabled(): boolean {
+/** Opt-in flags read from localStorage, applied at pipeline (re)start. Toggle in
+ *  the console then restart the pipeline:
+ *    localStorage.fluxrt_profile = '1'  // per-frame composite/tap timing → onLog
+ *    localStorage.fluxrt_webgpu  = '1'  // WebGPU compositor (streams backend) */
+function lsFlag(key: string): boolean {
   try {
-    return typeof localStorage !== 'undefined' && localStorage.getItem('fluxrt_profile') === '1'
+    return typeof localStorage !== 'undefined' && localStorage.getItem(key) === '1'
   } catch {
     return false
   }
@@ -148,7 +150,8 @@ export class Rail {
           { name: 'marker', config: this.markerConfig },
           { name: 'drawLayer', config: this.drawConfig },
         ],
-        profile: profileEnabled(),
+        profile: lsFlag('fluxrt_profile'),
+        webgpu: lsFlag('fluxrt_webgpu'),
       },
       { base },
     )

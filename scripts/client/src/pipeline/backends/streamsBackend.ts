@@ -104,6 +104,7 @@ export class StreamsBackend implements RailBackend {
         composite: opts.composite,
         effects: opts.effects satisfies EffectInit[],
         profile: opts.profile ?? false,
+        webgpu: opts.webgpu ?? false,
       },
       transfer,
     )
