@@ -55,6 +55,8 @@ export class DepthSession {
   private runMin = 0
   private runMax = 0
   private haveRange = false
+  // Reused per-inference decode buffer (avoids ~1MB Float32Array GC churn each run).
+  private depthBuf: Float32Array | null = null
 
   /** Load the model on WebGPU (ort owns its own device). Returns null if WebGPU
    *  is unavailable or anything fails — depth then simply stays off. */
@@ -119,14 +121,18 @@ export class DepthSession {
       }
       const outputs = await this.session.run({ [this.inputName]: this.inputTensor })
       const out = outputs[this.outputName]
+      // getData(true) is LOAD-BEARING: with preferredOutputLocation:'gpu-buffer' ORT
+      // keeps the output tensor, and `true` releases its GPU buffer — getData(false)
+      // would leak one GPU buffer per inference.
       const raw = (await out.getData(true)) as Float32Array | Uint16Array
       const [h, w] = out.dims.slice(-2) as [number, number]
       const n = w * h
-      const u8 = new Uint8Array(n)
+      const u8 = new Uint8Array(n) // transferred to the pipeline worker — must be fresh
       const isHalf = raw instanceof Uint16Array
       let mn = Infinity
       let mx = -Infinity
-      const depth = new Float32Array(n)
+      if (!this.depthBuf || this.depthBuf.length !== n) this.depthBuf = new Float32Array(n)
+      const depth = this.depthBuf
       for (let i = 0; i < n; i++) {
         const v = isHalf ? halfToFloat(raw[i]) : (raw[i] as number)
         depth[i] = v

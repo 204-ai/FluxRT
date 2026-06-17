@@ -12,7 +12,10 @@
 // Every NON-BASE layer's newest frame is RETAINED across passes — a paused /
 // slower video or feedback must keep compositing under a 30fps base — and is
 // closed only on supersede, layer removal or shutdown. Unclosed frames silently
-// stall the base — the open-frame counter guards against regressions.
+// stall the base — the open-frame counter guards against regressions. NOTE: it
+// counts SOURCE-STREAM frames only (the valves), not the per-pass canvas
+// snapshots (tap/output VideoFrame, depth clone) — those are owned + closed/
+// transferred at their own call sites.
 
 import { Compositor, type FrameMap } from '../core/compositor'
 import { WebGpuCompositor } from '../core/webgpuCompositor'
@@ -192,11 +195,22 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   // it composite frames and upload the depth maps it returns. Only on WebGPU.
   if (msg.depth && webgpuComp) {
     depthWorker = new Worker(new URL('./depth.worker.ts', import.meta.url), { type: 'module' })
+    let depthReady = false
     depthWorker.onmessage = (de) => {
       const dm = de.data
       if (dm.type === 'depth') webgpuComp.setDepthData(dm.data as Uint8Array, dm.w as number, dm.h as number)
-      else if (dm.type === 'ready') post({ type: 'info', text: 'depth: ready' })
-      else if (dm.type === 'error') post({ type: 'error', message: 'depth: ' + dm.message })
+      else if (dm.type === 'ready') {
+        depthReady = true
+        post({ type: 'info', text: 'depth: ready' })
+      } else if (dm.type === 'error') {
+        post({ type: 'error', message: 'depth: ' + dm.message })
+        // Init failure is terminal — terminate so we stop cloning+transferring a
+        // frame to a dead session every composite frame.
+        if (!depthReady) {
+          depthWorker?.terminate()
+          depthWorker = null
+        }
+      }
     }
     lastDepthSize = depthSizeFromComposite()
     depthWorker.postMessage({ type: 'init', size: lastDepthSize || undefined })
@@ -383,6 +397,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         lastTapMs = tsMs
         const tap0 = profile ? performance.now() : 0
         let tapFrame: VideoFrame | null = null
+        let tapBitmap: ImageBitmap | null = null
         try {
           if (visionPort) {
             // Direct worker→worker handoff: a SYNCHRONOUS canvas snapshot (no
@@ -394,12 +409,14 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
           } else {
             // Fallback when no vision port is wired (e.g. vision inactive): the
             // legacy bitmap relay via the main thread.
-            const bitmap = await createImageBitmap(canvas)
-            post({ type: 'tap-frame', bitmap, tsMs }, [bitmap])
+            tapBitmap = await createImageBitmap(canvas)
+            post({ type: 'tap-frame', bitmap: tapBitmap, tsMs }, [tapBitmap])
+            tapBitmap = null // transferred
           }
         } catch {
           // post failed before transfer (e.g. stale port) — close so it can't leak.
           tapFrame?.close()
+          tapBitmap?.close()
         }
         if (profile) {
           profTapMs += performance.now() - tap0
