@@ -95,6 +95,7 @@ export function TransformOverlay() {
   const layoutLayer = usePipelineStore((s) => s.layoutLayer)
   const cropMode = usePipelineStore((s) => s.cropMode)
   const active = usePipelineStore((s) => s.active)
+  const previewEpoch = usePipelineStore((s) => s.previewEpoch)
   const layers = usePipelineStore((s) => s.layers)
   const setLayoutLayer = usePipelineStore((s) => s.setLayoutLayer)
   const setCropMode = usePipelineStore((s) => s.setCropMode)
@@ -140,7 +141,7 @@ export function TransformOverlay() {
       ro.disconnect()
       window.removeEventListener('resize', measure)
     }
-  }, [measure, layoutLayer, active])
+  }, [measure, layoutLayer, active, previewEpoch])
 
   // End any in-flight drag when the framed layer changes or the overlay
   // unmounts — its captured layer id would otherwise go stale.

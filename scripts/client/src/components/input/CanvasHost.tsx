@@ -11,6 +11,8 @@ import { usePipelineStore } from '../../state/pipelineStore'
 export function CanvasHost({ holds }: { holds: boolean }) {
   const slotRef = useRef<HTMLDivElement>(null)
   const active = usePipelineStore((s) => s.active)
+  // Re-parents the (new) preview element whenever the backend is rebuilt.
+  const previewEpoch = usePipelineStore((s) => s.previewEpoch)
 
   useEffect(() => {
     const slot = slotRef.current
@@ -51,7 +53,7 @@ export function CanvasHost({ holds }: { holds: boolean }) {
       el.removeEventListener('pointerleave', up)
       if (el.parentElement === slot) slot.removeChild(el)
     }
-  }, [holds, active])
+  }, [holds, active, previewEpoch])
 
   return <div ref={slotRef} className="canvas-host" />
 }

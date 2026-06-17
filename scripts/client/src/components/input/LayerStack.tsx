@@ -4,7 +4,7 @@
 // layers; add / remove / swap clips. Layers are homogeneous — once a layer has a
 // kind, its empty cells offer only that kind.
 
-import { useRef, useState } from 'react'
+import { useRef, useState, type DragEvent } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { activeClip, type Cell, type Layer } from '../../state/layerModel'
@@ -23,6 +23,32 @@ const BLEND_SHORT: Record<BlendMode, string> = {
 const PICK_SOURCES: ClipKind[] = ['camera', 'video', 'feedback', 'screen']
 const PICK_EFFECTS: ClipKind[] = ['shader']
 const ALL_PICKABLE: ClipKind[] = [...PICK_SOURCES, ...PICK_EFFECTS]
+
+// Drag-and-drop a clip between cells (within a layer or across layers).
+const DRAG_MIME = 'application/x-fluxrt-clip'
+function readDrag(e: DragEvent): { layerId: string; cellId: string } | null {
+  try {
+    return JSON.parse(e.dataTransfer.getData(DRAG_MIME))
+  } catch {
+    return null
+  }
+}
+/** Drop-target props for a cell — accepts a dragged clip and moves it here. */
+function dropProps(layerId: string, cellId: string, moveClip: MoveClip) {
+  return {
+    onDragOver: (e: DragEvent) => {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const from = readDrag(e)
+      if (from) void moveClip(from.layerId, from.cellId, layerId, cellId)
+    },
+  }
+}
+type MoveClip = (fl: string, fc: string, tl: string, tc: string) => void
 
 /** Per-layer mix: frame button + blend cycle + opacity fader. */
 function LayerMix({ layer }: { layer: Layer }) {
@@ -66,7 +92,17 @@ function LayerMix({ layer }: { layer: Layer }) {
 
 /** Grouped dropdown shown over an empty cell. Camera/feedback/screen/effects
  *  fill immediately; video opens a file picker. */
-function KindPicker({ layerId, cellId, allowed }: { layerId: LayerId; cellId: string; allowed: ClipKind[] }) {
+function KindPicker({
+  layerId,
+  cellId,
+  allowed,
+  moveClip,
+}: {
+  layerId: LayerId
+  cellId: string
+  allowed: ClipKind[]
+  moveClip: MoveClip
+}) {
   const fillCamera = usePipelineStore((s) => s.fillCellCamera)
   const fillVideo = usePipelineStore((s) => s.fillCellVideo)
   const fillFeedback = usePipelineStore((s) => s.fillCellFeedback)
@@ -88,7 +124,7 @@ function KindPicker({ layerId, cellId, allowed }: { layerId: LayerId; cellId: st
   const effects = PICK_EFFECTS.filter((k) => allowed.includes(k))
 
   return (
-    <div className="cell-add">
+    <div className="cell-add" {...dropProps(layerId, cellId, moveClip)}>
       <button
         className="clip-cell empty"
         title="Add a clip"
@@ -138,11 +174,13 @@ function ClipCell({ layer, cell }: { layer: Layer; cell: Cell }) {
   const selectedClipId = usePipelineStore((s) => s.selectedClipId)
   const activateCell = usePipelineStore((s) => s.activateCell)
   const removeClip = usePipelineStore((s) => s.removeClip)
+  const moveClip = usePipelineStore((s) => s.moveClip)
   const clip = cell.clip
 
   if (!clip) {
-    // Any kind in any cell — layers are mixed, not homogeneous.
-    return <KindPicker layerId={layer.id} cellId={cell.id} allowed={ALL_PICKABLE} />
+    // Any kind in any cell — layers are mixed, not homogeneous. The empty cell is
+    // also a drop target for a dragged clip.
+    return <KindPicker layerId={layer.id} cellId={cell.id} allowed={ALL_PICKABLE} moveClip={moveClip} />
   }
   const isActive = layer.activeCellId === cell.id
   const isSel = selectedClipId === clip.id
@@ -150,6 +188,12 @@ function ClipCell({ layer, cell }: { layer: Layer; cell: Cell }) {
     <button
       className={'clip-cell' + (isActive ? ' active' : '') + (isSel ? ' sel' : '')}
       title={clip.label}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ layerId: layer.id, cellId: cell.id }))
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      {...dropProps(layer.id, cell.id, moveClip)}
       onClick={(e) => {
         e.stopPropagation()
         void activateCell(layer.id, cell.id)
@@ -215,6 +259,7 @@ function LayerRow({ layer, index, count }: { layer: Layer; index: number; count:
 export function LayerStack() {
   const layers = usePipelineStore((s) => s.layers)
   const addLayer = usePipelineStore((s) => s.addLayer)
+  const clearComposition = usePipelineStore((s) => s.clearComposition)
   const inputRole = useSessionStore((s) => s.inputRole)
   const roleLabel =
     inputRole === 'you'
@@ -227,9 +272,20 @@ export function LayerStack() {
     <div className="layer-stack">
       <div className="layer-stack-head">
         <span className="dim">COMPOSITION</span>
-        <button className="icon-btn add-layer" title="Add a layer on top" onClick={() => addLayer()}>
-          + Layer
-        </button>
+        <div className="head-actions">
+          <button className="icon-btn add-layer" title="Add a layer on top" onClick={() => addLayer()}>
+            + Layer
+          </button>
+          <button
+            className="icon-btn clear-comp"
+            title="Clear the whole composition"
+            onClick={() => {
+              if (confirm('Clear the whole composition?')) clearComposition()
+            }}
+          >
+            Clear
+          </button>
+        </div>
       </div>
       {layers.map((layer, i) => (
         <LayerRow key={layer.id} layer={layer} index={i} count={layers.length} />

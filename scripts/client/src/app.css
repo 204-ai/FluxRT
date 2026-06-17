@@ -270,7 +270,13 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 /* composition grid */
 .layer-stack-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 4px; }
 .layer-stack-head .dim { font-size: 10px; letter-spacing: 0.08em; }
+.head-actions { display: flex; align-items: center; gap: 6px; }
 .add-layer { width: auto; height: auto; min-width: 0; font-size: 11px; line-height: 1; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
+.clear-comp { width: auto; height: auto; min-width: 0; font-size: 11px; line-height: 1; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
+.clear-comp:not(:disabled) { color: #f87171; }
+.clip-cell[draggable='true'] { cursor: grab; }
+.clip-cell[draggable='true']:active { cursor: grabbing; }
+.cell-add.drag-over, .clip-cell.drag-over { outline: 1px dashed #4ade80; }
 /* compact transport in the detail pane — symbol-only buttons */
 .transport.compact { gap: 4px; padding: 0; }
 .transport.compact .icon-btn { font-size: 14px; }

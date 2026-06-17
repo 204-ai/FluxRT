@@ -59,6 +59,10 @@ interface PipelineState {
   layers: Layer[]
   selectedClipId: ClipId | null
   active: boolean
+  // Bumped on every rail (re)start — the preview element gets a fresh identity
+  // when a new backend is built, so the host re-parents it on epoch change even
+  // when `active` stays true (a hot restart that doesn't toggle active).
+  previewEpoch: number
 
   devices: CameraDevice[]
   // per-video-clip transport, keyed by clip id
@@ -88,11 +92,16 @@ interface PipelineState {
 
   // --- grid structure ---
   addLayer(): void
+  /** Tear down every clip + stop the pipeline; reset to one empty layer. */
+  clearComposition(): void
   removeLayer(layerId: LayerId): Promise<void>
   moveLayer(layerId: LayerId, dir: -1 | 1): void
   addCell(layerId: LayerId): void
   removeClip(layerId: LayerId, cellId: string): Promise<void>
   activateCell(layerId: LayerId, cellId: string): Promise<void>
+  /** Drag a clip from one cell to another (same layer = reorder/swap; across
+   *  layers = move, swapping with whatever occupies the target). */
+  moveClip(fromLayerId: LayerId, fromCellId: string, toLayerId: LayerId, toCellId: string): Promise<void>
   selectClip(clipId: ClipId | null): void
 
   // --- fill an empty cell with a source of a kind ---
@@ -149,7 +158,6 @@ let feedbackStream: MediaStream | null = null
 // The server's output resolution (from /healthz) — the input composite canvas is
 // pinned to it so the preview matches the output's aspect AND resolution exactly.
 let targetResolution: { width: number; height: number } | null = null
-let aspectFetched = false
 
 // Reconciler memo: the base layer driving cadence, and what source each layer is
 // currently bound to (so we only re-bind on change — re-binding glitches).
@@ -200,11 +208,33 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     }
   }
 
+  // syncPipeline is async (it awaits rail.start) and fires from many triggers
+  // (add/activate/remove a clip, the healthz re-pin, feedback). Serialize it so
+  // concurrent invocations can't race rail.start/stop; coalesce overlapping calls
+  // into one trailing re-run.
+  let syncing = false
+  let syncQueued = false
+  async function syncPipeline(): Promise<void> {
+    if (syncing) {
+      syncQueued = true
+      return
+    }
+    syncing = true
+    try {
+      do {
+        syncQueued = false
+        await syncPipelineImpl()
+      } while (syncQueued)
+    } finally {
+      syncing = false
+    }
+  }
+
   /** The one place that drives the rail. Computes the desired source bindings
    *  from the grid and reconciles: (re)start on the first frame-producing source
    *  (base), hot-attach/detach the rest, replace the composite. Never drops the
    *  WebRTC output track unless the base layer itself changes. */
-  async function syncPipeline(): Promise<void> {
+  async function syncPipelineImpl(): Promise<void> {
     const layers = get().layers
     const bindings: { layerId: LayerId; kind: string; source: MediaStream | HTMLVideoElement }[] = []
     for (const layer of layers) {
@@ -229,25 +259,6 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     // Prefer a cadence-capable base (camera/video/screen); else any source.
     const base = bindings.find((b) => clipMeta(b.kind).canBeBase) ?? bindings[0]
 
-    // Fetch the server's output resolution fire-and-forget — NEVER block the start
-    // on it (the /healthz proxy hangs when no server is up, which froze the
-    // preview). When it resolves, pin the canvas to that resolution and restart so
-    // the preview matches the output; with no server the source's dims are used.
-    if (!aspectFetched) {
-      aspectFetched = true
-      void getHealthz()
-        .then((h) => {
-          if (!h.resolution || h.resolution.height <= 0 || h.resolution.width <= 0) return
-          targetResolution = { width: h.resolution.width, height: h.resolution.height }
-          // Re-pin a running pipeline to the server resolution.
-          if (rail.active) {
-            currentBaseLayerId = null
-            void syncPipeline()
-          }
-        })
-        .catch(() => {})
-    }
-
     if (!rail.active || currentBaseLayerId !== base.layerId) {
       // (Re)start on the new base. rail.start passes the current composite, so set
       // it first; then re-bind every non-base source.
@@ -263,7 +274,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       currentBaseLayerId = base.layerId
       boundSource.clear()
       boundSource.set(base.layerId, base.source)
-      set({ active: true })
+      // Bump the epoch: the new backend has a fresh preview element to re-parent.
+      set({ active: true, previewEpoch: get().previewEpoch + 1 })
       for (const b of bindings) {
         if (b.layerId === base.layerId) continue
         rail.setLayerSource(b.layerId, b.kind, b.source)
@@ -310,6 +322,17 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     }
   }
 
+  /** Ensure a layer's activeCellId points at a clip-bearing cell (or null) and
+   *  its kind/role reflect the active clip. `preferCellId` is made active when it
+   *  holds a clip (used when a dragged clip lands in it). */
+  function normalizeLayer(l: Layer, preferCellId?: string): Layer {
+    let activeCellId =
+      preferCellId && l.cells.some((c) => c.id === preferCellId && c.clip) ? preferCellId : l.activeCellId
+    if (!l.cells.find((c) => c.id === activeCellId)?.clip) activeCellId = l.cells.find((c) => c.clip)?.id ?? null
+    const active = l.cells.find((c) => c.id === activeCellId)?.clip ?? null
+    return { ...l, activeCellId, kind: active?.kind ?? null, role: active ? clipMeta(active.kind).role : null }
+  }
+
   /** Put a clip into a cell + make it the layer's active clip + select it. */
   function placeClip(layerId: LayerId, cellId: string, clip: Clip): void {
     set((s) => ({
@@ -351,10 +374,25 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
   // or start with one empty layer.
   const initialLayers = loadComposition() ?? [newEmptyLayer('Layer 1')]
 
+  // Fetch the server's output resolution early (fire-and-forget; never blocks —
+  // the /healthz proxy hangs with no server) so the first start pins to it; if a
+  // clip is added before it resolves, re-pin the running pipeline once.
+  void getHealthz()
+    .then((h) => {
+      if (!h.resolution || h.resolution.height <= 0 || h.resolution.width <= 0) return
+      targetResolution = { width: h.resolution.width, height: h.resolution.height }
+      if (rail.active) {
+        currentBaseLayerId = null
+        void syncPipeline()
+      }
+    })
+    .catch(() => {})
+
   return {
     layers: initialLayers,
     selectedClipId: null,
     active: false,
+    previewEpoch: 0,
     devices: [],
     videoState: {},
     feedbackAvailable: false,
@@ -394,6 +432,23 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     addLayer() {
       const n = get().layers.length + 1
       set((s) => ({ layers: [newEmptyLayer(`Layer ${n}`), ...s.layers] }))
+    },
+
+    clearComposition() {
+      for (const layer of get().layers) {
+        for (const cell of layer.cells) if (cell.clip) releaseClip(cell.clip)
+      }
+      rail.stop()
+      boundSource.clear()
+      currentBaseLayerId = null
+      set({
+        layers: [newEmptyLayer('Layer 1')],
+        selectedClipId: null,
+        videoState: {},
+        active: false,
+        layoutLayer: null,
+        drawMode: 'off',
+      })
     },
 
     async removeLayer(layerId) {
@@ -490,6 +545,26 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       await syncPipeline()
     },
 
+    async moveClip(fromLayerId, fromCellId, toLayerId, toCellId) {
+      if (fromLayerId === toLayerId && fromCellId === toCellId) return
+      const moving = layerById(get().layers, fromLayerId)?.cells.find((c) => c.id === fromCellId)?.clip
+      if (!moving) return
+      set((s) => {
+        const toClip = layerById(s.layers, toLayerId)?.cells.find((c) => c.id === toCellId)?.clip ?? null
+        const swapped = s.layers.map((l) => {
+          let cells = l.cells
+          if (l.id === fromLayerId) cells = cells.map((c) => (c.id === fromCellId ? { ...c, clip: toClip } : c))
+          if (l.id === toLayerId) cells = cells.map((c) => (c.id === toCellId ? { ...c, clip: moving } : c))
+          return cells === l.cells ? l : { ...l, cells }
+        })
+        const fixed = swapped.map((l) =>
+          l.id === toLayerId ? normalizeLayer(l, toCellId) : l.id === fromLayerId ? normalizeLayer(l) : l,
+        )
+        return { layers: fixed, selectedClipId: moving.id }
+      })
+      await syncPipeline()
+    },
+
     selectClip(id) {
       set({ selectedClipId: id })
     },
@@ -501,6 +576,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       try {
         const stream = await acquireCamera(clip.id, deviceId)
         clipStreams.set(clip.id, stream)
+        // Label the clip with the actual device name (track.label).
+        const name = stream.getVideoTracks()[0]?.label
+        if (name) clip.label = name
       } catch (e) {
         log('Camera failed: ' + (e instanceof Error ? e.message : e))
         return
@@ -599,10 +677,13 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       try {
         const stream = await acquireCamera(clipId, deviceId)
         clipStreams.set(clipId, stream)
+        const name = stream.getVideoTracks()[0]?.label
         set((s) => ({
           layers: s.layers.map((l) => ({
             ...l,
-            cells: l.cells.map((c) => (c.clip?.id === clipId ? { ...c, clip: { ...c.clip, deviceId } } : c)),
+            cells: l.cells.map((c) =>
+              c.clip?.id === clipId ? { ...c, clip: { ...c.clip, deviceId, label: name || c.clip.label } } : c,
+            ),
           })),
         }))
         await syncPipeline()
