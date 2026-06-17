@@ -32,6 +32,7 @@ type InMsg =
       height: number
       composite: Composite
       effects: EffectInit[]
+      profile?: boolean
     }
   | { type: 'composite'; op: CompositeOp }
   | { type: 'effect-config'; name: string; patch: Record<string, unknown> }
@@ -43,6 +44,8 @@ type InMsg =
   | { type: 'layer-source'; id: LayerId; readable: ReadableStream<VideoFrame> | null }
   // Re-designate the cadence/dims/tap base layer (e.g. base clip deactivated).
   | { type: 'base'; id: LayerId }
+  // Direct worker→worker frame channel to the vision worker (no main bounce).
+  | { type: 'vision-port'; port: MessagePort | null }
 
 let compositor: Compositor | null = null
 let running = false
@@ -50,6 +53,11 @@ let tapIntervalMs = 0
 let lastTapMs = 0
 let openFrames = 0
 let wake: (() => void) | null = null
+// Direct frame channel to the vision worker. When set, the composite tap hands
+// off a VideoFrame straight to it (no createImageBitmap await, no main bounce).
+let visionPort: MessagePort | null = null
+// Step-0 profiling: rolling per-frame composite/tap timing, summarized to onLog.
+let profile = false
 let setLayerSource: ((id: LayerId, readable: ReadableStream<VideoFrame> | null) => void) | null = null
 let baseSetter: ((id: LayerId) => void) | null = null
 
@@ -117,6 +125,14 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
 
   const writer = writable.getWriter()
   running = true
+
+  // Step-0 profiling accumulators (only touched when `profile`).
+  profile = !!msg.profile
+  let profWallStart = performance.now()
+  let profFrames = 0
+  let profCompMs = 0
+  let profTapMs = 0
+  let profTaps = 0
 
   // One slot per layer that has a live source at start; more hot-attach later.
   const slots = new Map<LayerId, Slot>()
@@ -262,17 +278,34 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       for (const [id, slot] of slots) {
         frames[id] = id === baseLayerId ? baseFrame : slot.retained
       }
+      const comp0 = profile ? performance.now() : 0
       compositor.drawComposite(frames, tsMs)
+      if (profile) profCompMs += performance.now() - comp0
 
       // Analyzer tap: sample the full COMPOSITE (all layers) at cadence, so
       // sensing reflects what's actually composited — not just the base.
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
+        const tap0 = profile ? performance.now() : 0
         try {
-          const bitmap = await createImageBitmap(canvas)
-          post({ type: 'tap-frame', bitmap, tsMs }, [bitmap])
+          if (visionPort) {
+            // Direct worker→worker handoff: a SYNCHRONOUS canvas snapshot (no
+            // createImageBitmap await stalling the loop) transferred straight to
+            // the vision worker — no main-thread bounce.
+            const frame = new VideoFrame(canvas, { timestamp: tsOut })
+            visionPort.postMessage({ type: 'detect', frame, tsMs }, [frame])
+          } else {
+            // Fallback when no vision port is wired (e.g. vision inactive): the
+            // legacy bitmap relay via the main thread.
+            const bitmap = await createImageBitmap(canvas)
+            post({ type: 'tap-frame', bitmap, tsMs }, [bitmap])
+          }
         } catch {
           /* frame raced close — skip */
+        }
+        if (profile) {
+          profTapMs += performance.now() - tap0
+          profTaps++
         }
       }
 
@@ -288,10 +321,32 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         break
       }
       if (openFrames > leakThreshold) post({ type: 'leak', open: openFrames })
+
+      // Step-0 profiling: summarize composite/tap timing every ~2s to onLog.
+      if (profile) {
+        profFrames++
+        const wall = performance.now() - profWallStart
+        if (wall >= 2000) {
+          const fps = (profFrames * 1000) / wall
+          const comp = profCompMs / profFrames
+          const tap = profTaps ? profTapMs / profTaps : 0
+          post({
+            type: 'perf',
+            text: `composite ${comp.toFixed(2)}ms/f · tap ${tap.toFixed(2)}ms (${profTaps}/${profFrames}f) · ${fps.toFixed(1)}fps`,
+          })
+          profWallStart = performance.now()
+          profFrames = 0
+          profCompMs = 0
+          profTapMs = 0
+          profTaps = 0
+        }
+      }
     }
   } finally {
     setLayerSource = null
     baseSetter = null
+    visionPort?.close()
+    visionPort = null
     for (const slot of slots.values()) {
       try {
         slot.valve.reader.cancel()
@@ -344,6 +399,10 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       break
     case 'base':
       baseSetter?.(m.id)
+      break
+    case 'vision-port':
+      visionPort?.close()
+      visionPort = m.port
       break
   }
 }

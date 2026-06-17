@@ -35,6 +35,16 @@ export interface RailEvents {
 /** Longest output edge when the video file is the sole source. */
 const MAX_VIDEO_EDGE = 1280
 
+/** Opt-in per-frame profiling (composite/tap timing → onLog). Toggle in the
+ *  console with `localStorage.fluxrt_profile = '1'` then restart the pipeline. */
+function profileEnabled(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('fluxrt_profile') === '1'
+  } catch {
+    return false
+  }
+}
+
 function videoDims(el: HTMLVideoElement): { width: number; height: number } {
   let w = el.videoWidth || 1280
   let h = el.videoHeight || 720
@@ -64,6 +74,9 @@ export class Rail {
   // is ignored — otherwise it would flood drawHistory and the worker with no-ops.
   private inStroke = false
   private tap: { intervalMs: number; cb: TapCallback } | null = null
+  // Mints a fresh vision frame-port per (re)start (streams backend → vision
+  // worker, no main bounce). Remembered so a restart re-establishes it.
+  private visionPortFactory: (() => MessagePort | null) | null = null
   private onLog: (m: string) => void
   private onOutputTrack: (track: MediaStreamTrack | null) => void = () => {}
 
@@ -135,10 +148,14 @@ export class Rail {
           { name: 'marker', config: this.markerConfig },
           { name: 'drawLayer', config: this.drawConfig },
         ],
+        profile: profileEnabled(),
       },
       { base },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
+    // Wire a fresh vision frame-port into the new backend/worker so the composite
+    // tap reaches the vision worker directly. No-op on the canvas backend.
+    if (this.visionPortFactory) this.backend.setVisionPort(this.visionPortFactory())
     // Replay any persisted drawing onto the freshly-built draw layer so a
     // source-set restart doesn't wipe the user's strokes.
     if (this.drawHistory.length) {
@@ -173,6 +190,13 @@ export class Rail {
    *  uses it to replaceTrack on its RTCRtpSender without renegotiation. */
   setOutputTrackHandler(fn: (track: MediaStreamTrack | null) => void): void {
     this.onOutputTrack = fn
+  }
+
+  /** Provide (or clear) a factory that mints a fresh vision frame-port. Called
+   *  on every (re)start; applied immediately if a backend is already running. */
+  setVisionPortFactory(fn: (() => MessagePort | null) | null): void {
+    this.visionPortFactory = fn
+    if (this.backend) this.backend.setVisionPort(fn ? fn() : null)
   }
 
   /** Hot add/swap/remove one layer's live source in place (no restart): keeps

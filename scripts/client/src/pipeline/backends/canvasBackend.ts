@@ -203,6 +203,13 @@ export class CanvasBackend implements RailBackend {
     this.tapCb = cb
   }
 
+  setVisionPort(port: MessagePort | null): void {
+    // No-op: this backend composites on the main thread, so tapped frames already
+    // reach the vision worker via the setTap callback (VisionClient.push) — there
+    // is no pipeline worker to own a direct port. Close the unused channel end.
+    port?.close()
+  }
+
   async snapshot(type = 'image/png'): Promise<Blob> {
     return new Promise((res, rej) =>
       this.previewEl.toBlob((b) => (b ? res(b) : rej(new Error('snapshot failed'))), type),
