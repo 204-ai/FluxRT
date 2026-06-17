@@ -54,9 +54,12 @@ export class DepthSession {
       const ort = await import('onnxruntime-web/webgpu')
       ort.env.wasm.wasmPaths = '/onnx/' // vendored jsep wasm (mirrors /mediapipe/wasm)
       ort.env.wasm.numThreads = 1 // WebGPU EP needs no threads → no COOP/COEP requirement
-      // ort ignores env.webgpu.device (#26107); the adapter is the only lever, and
-      // ort makes its own device from it regardless. Set it for capability parity.
-      ort.env.webgpu.adapter = gpu.adapter as unknown as GPUAdapter
+      // Do NOT hand ort our adapter: the compositor already consumed it
+      // (a GPUAdapter creates exactly one device), so ort's requestDevice() would
+      // throw "adapter is consumed". Let ort request its OWN adapter+device — the
+      // depth map crosses back to the compositor device via the getData readback
+      // regardless (ort's device != the compositor's, by WebGPU design). The gpu
+      // probe above is only a "is WebGPU usable at all" gate.
       const s = new DepthSession()
       s.session = await ort.InferenceSession.create(MODEL_URL, {
         executionProviders: ['webgpu'],
