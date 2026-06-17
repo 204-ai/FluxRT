@@ -236,6 +236,84 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 
 /* ── compact "layers" panel: camera / video / feedback (top row = frontmost) ── */
 .layer-stack { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px; }
+/* a stack row = reorder handles + the kind body (which is a .layer-row) */
+.layer-row-wrap { display: flex; align-items: stretch; gap: 4px; }
+.layer-row-wrap > .layer-row,
+.layer-row-wrap > .video-row { flex: 1 1 auto; min-width: 0; }
+.layer-reorder { flex: 0 0 auto; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+.layer-reorder .icon-btn { width: 22px; height: 18px; font-size: 9px; line-height: 1; padding: 0; }
+.layer-remove { flex: 0 0 auto; align-self: center; font-size: 13px; }
+.layer-remove:not(:disabled) { color: #f87171; }
+.layer-add { display: flex; align-items: center; gap: 6px; padding-left: 26px; }
+.layer-add .drop-zone { flex: 1 1 auto; }
+.add-screen { flex: 0 0 auto; font-size: 11px; white-space: nowrap; padding: 4px 8px; }
+/* selected layer: highlight the inner row */
+.layer-row-wrap { cursor: pointer; }
+.layer-row-wrap.sel > .layer-row { border-color: #1f7a3a; }
+
+/* clip detail / inspector pane */
+.clip-detail {
+  margin: 0 14px 8px; padding: 8px 10px;
+  background: #141414; border: 1px solid #2a2a2a; border-radius: 6px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.clip-detail.empty { font-size: 11px; padding: 10px; }
+.clip-detail-head { display: flex; align-items: center; gap: 6px; }
+.clip-detail-icon { font-size: 14px; }
+.clip-detail-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-detail-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; margin-left: auto; }
+.clip-detail-meta { font-size: 10px; }
+.clip-detail-body { display: flex; flex-direction: column; gap: 6px; }
+.clip-detail-foot { display: flex; gap: 6px; }
+.clip-detail-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* composition grid */
+.layer-stack-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 2px 4px; }
+.layer-stack-head .dim { font-size: 10px; letter-spacing: 0.08em; }
+.head-actions { display: flex; align-items: center; gap: 6px; }
+.add-layer { width: auto; height: auto; min-width: 0; font-size: 11px; line-height: 1; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
+.clear-comp { width: auto; height: auto; min-width: 0; font-size: 11px; line-height: 1; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
+.clear-comp:not(:disabled) { color: #f87171; }
+.clip-cell[draggable='true'] { cursor: grab; }
+.clip-cell[draggable='true']:active { cursor: grabbing; }
+.cell-add.drag-over, .clip-cell.drag-over { outline: 1px dashed #4ade80; }
+/* compact transport in the detail pane — symbol-only buttons */
+.transport.compact { gap: 4px; padding: 0; }
+.transport.compact .icon-btn { font-size: 14px; }
+.transport.compact .seek { flex: 1 1 auto; min-width: 40px; }
+.transport.compact .time-readout { min-width: 30px; font-size: 10px; }
+.transport.compact .rate { padding: 2px 4px; }
+.layer-grid-row {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;
+}
+/* No overflow clipping here — it would hide the absolutely-positioned kind menu. */
+.cell-track { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.clip-cell {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+  height: 26px; max-width: 140px; padding: 0 6px;
+  background: #242424; border: 1px solid #3a3a3a; border-radius: 4px;
+  color: #ddd; font-size: 11px; cursor: pointer;
+}
+.clip-cell.active { border-color: #1f7a3a; background: #1d2a20; }
+.clip-cell.sel { box-shadow: 0 0 0 1px #4ade80; }
+.clip-cell.empty { justify-content: center; width: 26px; padding: 0; color: #888; font-size: 14px; }
+.clip-cell-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-cell-x { margin-left: 2px; color: #f87171; opacity: 0; }
+.clip-cell:hover .clip-cell-x { opacity: 1; }
+.cell-add { position: relative; flex: 0 0 auto; }
+.kind-menu {
+  position: absolute; z-index: 30; top: 28px; left: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  background: #1c1c1c; border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px; min-width: 120px;
+}
+.kind-opt {
+  text-align: left; background: transparent; border: none; color: #ddd;
+  font-size: 12px; padding: 5px 8px; border-radius: 4px; cursor: pointer;
+}
+.kind-opt:hover { background: #2e2e2e; }
+.kind-group { font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #777; padding: 4px 8px 2px; }
+.kind-backdrop { position: fixed; inset: 0; z-index: 29; }
 .layer-row {
   display: flex; align-items: center; gap: 8px;
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;

@@ -10,11 +10,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { usePipelineStore } from '../../state/pipelineStore'
 import { rail } from '../../state/runtime'
 import type { LayerId, LayerTransform } from '../../pipeline/core/types'
-import { identityTransform, layerDestRect, LAYER_IDS } from '../../pipeline/core/types'
+import { identityTransform, layerDestRect } from '../../pipeline/core/types'
+import { activeClip, layerById } from '../../state/layerModel'
 
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
 const HANDLES: Handle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
-const LAYER_LABEL: Record<LayerId, string> = { camera: 'Camera', video: 'Video', feedback: 'Feedback' }
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
 
@@ -95,10 +95,8 @@ export function TransformOverlay() {
   const layoutLayer = usePipelineStore((s) => s.layoutLayer)
   const cropMode = usePipelineStore((s) => s.cropMode)
   const active = usePipelineStore((s) => s.active)
+  const previewEpoch = usePipelineStore((s) => s.previewEpoch)
   const layers = usePipelineStore((s) => s.layers)
-  const camEnabled = usePipelineStore((s) => s.camEnabled)
-  const videoLoaded = usePipelineStore((s) => s.videoLoaded)
-  const feedbackAvailable = usePipelineStore((s) => s.feedbackAvailable)
   const setLayoutLayer = usePipelineStore((s) => s.setLayoutLayer)
   const setCropMode = usePipelineStore((s) => s.setCropMode)
 
@@ -106,12 +104,13 @@ export function TransformOverlay() {
   const cleanupRef = useRef<(() => void) | null>(null)
   const [stage, setStage] = useState<Stage | null>(null)
 
-  const present: Record<LayerId, boolean> = {
-    camera: camEnabled,
-    video: videoLoaded,
-    feedback: feedbackAvailable,
+  // A layer is framable when the pipeline is live and it has an active clip.
+  const isPresent = (id: LayerId): boolean => {
+    const layer = layerById(layers, id)
+    return active && !!layer && !!activeClip(layer)
   }
-  const presentLayers = LAYER_IDS.filter((id) => present[id])
+  const presentLayers = layers.filter((l) => isPresent(l.id)).map((l) => l.id)
+  const labelOf = (id: LayerId): string => layerById(layers, id)?.name ?? id
 
   // Measure the preview element's rect relative to our container so the box
   // tracks the actual displayed media (works maximized/letterboxed too).
@@ -142,7 +141,7 @@ export function TransformOverlay() {
       ro.disconnect()
       window.removeEventListener('resize', measure)
     }
-  }, [measure, layoutLayer, active])
+  }, [measure, layoutLayer, active, previewEpoch])
 
   // End any in-flight drag when the framed layer changes or the overlay
   // unmounts — its captured layer id would otherwise go stale.
@@ -152,9 +151,9 @@ export function TransformOverlay() {
   // present layer or close the overlay.
   useEffect(() => {
     if (!layoutLayer) return
-    if (!active || !present[layoutLayer]) setLayoutLayer(presentLayers[0] ?? null)
+    if (!active || !isPresent(layoutLayer)) setLayoutLayer(presentLayers[0] ?? null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutLayer, active, camEnabled, videoLoaded, feedbackAvailable])
+  }, [layoutLayer, active, layers])
 
   const beginDrag = (handle: Handle | 'move') => (e: React.PointerEvent) => {
     if (!stage || !layoutLayer) return
@@ -165,7 +164,7 @@ export function TransformOverlay() {
     cleanupRef.current?.()
     const layer = layoutLayer
     const crop = cropMode
-    const startTransform = layers[layer]?.transform ?? identityTransform()
+    const startTransform = layerById(layers, layer)?.transform ?? identityTransform()
     const start: LayerTransform = {
       frame: { ...startTransform.frame },
       crop: { ...startTransform.crop },
@@ -197,7 +196,7 @@ export function TransformOverlay() {
 
   if (!layoutLayer || !active) return <div ref={containerRef} className="layout-overlay" />
 
-  const transform = layers[layoutLayer]?.transform ?? identityTransform()
+  const transform = layerById(layers, layoutLayer)?.transform ?? identityTransform()
   const dest = layerDestRect(transform)
   // In crop mode the handles act on the visible (dest) rect; in move mode on the
   // full frame. The other rect is shown faintly for context.
@@ -228,10 +227,10 @@ export function TransformOverlay() {
             <button
               key={id}
               className={'tool' + (id === layoutLayer ? ' active' : '')}
-              title={`Frame the ${LAYER_LABEL[id]} layer`}
+              title={`Frame the ${labelOf(id)} layer`}
               onClick={() => setLayoutLayer(id)}
             >
-              {LAYER_LABEL[id]}
+              {labelOf(id)}
             </button>
           ))}
         <span className="layout-sep" />

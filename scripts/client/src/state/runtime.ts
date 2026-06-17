@@ -18,8 +18,113 @@ export function rtLog(msg: string): void {
 
 export const rail = new Rail({ onLog: (m) => rtLog(m) })
 
-/** File-backed <video> input layer — outlives rail restarts. */
+/** File-backed <video> input layer for the SEEDED video layer — outlives rail
+ *  restarts. Added (overlay) video layers get their own pooled source below, so
+ *  multiple video clips can present at once (one element presents one clip). */
 export const videoSource = new VideoFileSource()
+
+// Per-clip <video> pool for ADDED video layers (beyond the seeded one). Keyed by
+// clip id so each overlay clip drives its own element, transport and listeners.
+const videoPool = new Map<string, VideoFileSource>()
+
+/** Get (creating on first use) the pooled video source for a clip. */
+export function acquireVideoSource(clipId: string): VideoFileSource {
+  let s = videoPool.get(clipId)
+  if (!s) {
+    s = new VideoFileSource()
+    videoPool.set(clipId, s)
+  }
+  return s
+}
+
+/** Unload + drop a clip's pooled video source (on layer removal). */
+export function releaseVideoSource(clipId: string): void {
+  const s = videoPool.get(clipId)
+  if (s) {
+    s.unload()
+    videoPool.delete(clipId)
+  }
+}
+
+// Camera device-stream pool. One getUserMedia per device (keyed '' = default);
+// each camera clip gets a CLONE of that device's track, so the same webcam can
+// back several camera clips and different devices open independently. The base
+// device stream is stopped once its last clone is released.
+const deviceStreams = new Map<string, MediaStream>()
+const deviceRefs = new Map<string, Set<string>>()
+const cameraClones = new Map<string, MediaStreamTrack>()
+const cloneDevice = new Map<string, string>() // clipId → deviceKey
+
+function camConstraints(deviceId: string): MediaStreamConstraints {
+  return {
+    audio: false,
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30 },
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    },
+  }
+}
+
+/** Acquire a camera MediaStream for a clip. The FIRST clip on a device gets the
+ *  raw device stream (a MediaStreamTrackProcessor needs the real capture track —
+ *  cloned tracks can yield no frames); additional clips on the same device get a
+ *  clone so the webcam can back several clips. Re-acquiring for the same clip
+ *  releases its prior handle first. */
+export async function acquireCamera(clipId: string, deviceId: string): Promise<MediaStream> {
+  const key = deviceId || ''
+  let base = deviceStreams.get(key)
+  if (!base || base.getVideoTracks()[0]?.readyState !== 'live') {
+    base = await navigator.mediaDevices.getUserMedia(camConstraints(deviceId))
+    deviceStreams.set(key, base)
+    deviceRefs.set(key, deviceRefs.get(key) ?? new Set())
+  }
+  releaseCamera(clipId)
+  const refs = deviceRefs.get(key)!
+  const track = base.getVideoTracks()[0]
+  if (!track) throw new Error('camera has no video track')
+  cloneDevice.set(clipId, key)
+  refs.add(clipId)
+  if (refs.size === 1) {
+    // Sole consumer → hand over the raw capture stream (MSTP-friendly).
+    return base
+  }
+  const clone = track.clone()
+  cameraClones.set(clipId, clone)
+  return new MediaStream([clone])
+}
+
+/** Stop a clip's camera clone; stop the device's base stream when its last clone
+ *  is released (clears the browser "camera in use" indicator). */
+export function releaseCamera(clipId: string): void {
+  const clone = cameraClones.get(clipId)
+  if (clone) {
+    try {
+      clone.stop()
+    } catch {
+      /* already stopped */
+    }
+    cameraClones.delete(clipId)
+  }
+  const key = cloneDevice.get(clipId)
+  if (key === undefined) return
+  cloneDevice.delete(clipId)
+  const refs = deviceRefs.get(key)
+  if (!refs) return
+  refs.delete(clipId)
+  if (refs.size === 0) {
+    deviceStreams.get(key)?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    deviceStreams.delete(key)
+    deviceRefs.delete(key)
+  }
+}
 
 export type VisionConsumer = 'marker' | 'sense'
 

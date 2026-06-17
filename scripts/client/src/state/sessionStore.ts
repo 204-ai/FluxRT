@@ -119,10 +119,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     ch.onclose = () => logLine('Control channel closed')
     ch.onmessage = (e) => dispatchCtrl(e.data)
 
-    const pipeline = usePipelineStore.getState()
-    if (pipeline.camEnabled || pipeline.videoLoaded) {
+    // The input pipeline auto-starts when a source clip is added (the grid's
+    // reconciler), so a live rail means we have an output to send upstream.
+    if (rail.active) {
       try {
-        if (!rail.active) await pipeline.startPipeline()
         const stream = rail.outputStream
         const [vt] = stream?.getVideoTracks() ?? []
         if (!vt || !stream) throw new Error('no output track')
@@ -130,9 +130,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       } catch (e) {
         logLine('Input source failed: ' + (e instanceof Error ? e.message : e))
         set({ status: 'input blocked', statusCls: 'err', starting: false })
-        if (pipeline.camEnabled && !pipeline.videoLoaded) {
-          usePipelineStore.setState({ camEnabled: false })
-        }
         pc.addTransceiver('video', { direction: 'recvonly' })
       }
     } else {

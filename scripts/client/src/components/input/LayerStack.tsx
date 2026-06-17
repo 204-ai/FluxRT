@@ -1,12 +1,15 @@
-// Compact "layers" panel: camera, video and feedback stacked top→bottom (the
-// top row is the frontmost layer). Each row carries its source control plus a
-// minimal fader with the blend-mode button in front. Every layer blends down
-// the stack with its own opacity + blend; changes apply live (no restart).
+// Resolume-style composition grid: each LAYER is a row, each CLIP a cell. Click
+// an empty cell to pick a source kind; click a clip cell to activate + select it
+// (details + controls show in the ClipDetail pane). Add / remove / reorder
+// layers; add / remove / swap clips. Layers are homogeneous — once a layer has a
+// kind, its empty cells offer only that kind.
 
-import { fmtTime, usePipelineStore } from '../../state/pipelineStore'
+import { useRef, useState, type DragEvent } from 'react'
+import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
-import type { BlendMode, LayerId } from '../../pipeline/core/types'
-import { DropZone } from '../DropZone'
+import { activeClip, type Cell, type Layer } from '../../state/layerModel'
+import type { BlendMode, ClipKind, LayerId } from '../../pipeline/core/types'
+import { CLIP_ICON, clipMeta, isEffectKind } from '../../pipeline/core/clipKinds'
 
 const BLENDS: BlendMode[] = ['normal', 'screen', 'multiply', 'difference']
 const BLEND_SHORT: Record<BlendMode, string> = {
@@ -15,38 +18,61 @@ const BLEND_SHORT: Record<BlendMode, string> = {
   multiply: 'mul',
   difference: 'dif',
 }
-const RATES = [0.25, 0.5, 1, 1.5, 2]
+// Cell picker, grouped. (image: static-frame path pending; draw/marker: global
+// tools for now.)
+const PICK_SOURCES: ClipKind[] = ['camera', 'video', 'feedback', 'screen']
+const PICK_EFFECTS: ClipKind[] = ['shader']
+const ALL_PICKABLE: ClipKind[] = [...PICK_SOURCES, ...PICK_EFFECTS]
 
-/** The per-layer mix control: blend-mode button in front of a minimal fader. */
-function LayerMix({ id, disabled }: { id: LayerId; disabled: boolean }) {
-  const layer = usePipelineStore((s) => s.layers[id])
+// Drag-and-drop a clip between cells (within a layer or across layers).
+const DRAG_MIME = 'application/x-fluxrt-clip'
+function readDrag(e: DragEvent): { layerId: string; cellId: string } | null {
+  try {
+    return JSON.parse(e.dataTransfer.getData(DRAG_MIME))
+  } catch {
+    return null
+  }
+}
+/** Drop-target props for a cell — accepts a dragged clip and moves it here. */
+function dropProps(layerId: string, cellId: string, moveClip: MoveClip) {
+  return {
+    onDragOver: (e: DragEvent) => {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const from = readDrag(e)
+      if (from) void moveClip(from.layerId, from.cellId, layerId, cellId)
+    },
+  }
+}
+type MoveClip = (fl: string, fc: string, tl: string, tc: string) => void
+
+/** Per-layer mix: frame button + blend cycle + opacity fader. */
+function LayerMix({ layer }: { layer: Layer }) {
   const setLayerOpacity = usePipelineStore((s) => s.setLayerOpacity)
   const setLayerBlend = usePipelineStore((s) => s.setLayerBlend)
   const layoutLayer = usePipelineStore((s) => s.layoutLayer)
   const setLayoutLayer = usePipelineStore((s) => s.setLayoutLayer)
-  const framing = layoutLayer === id
+  const active = usePipelineStore((s) => s.active)
+  const framing = layoutLayer === layer.id
+  const live = active && !!activeClip(layer)
   const pct = Math.round(layer.opacity * 100)
-  const cycleBlend = () => setLayerBlend(id, BLENDS[(BLENDS.indexOf(layer.blend) + 1) % BLENDS.length])
-
+  const cycleBlend = () => setLayerBlend(layer.id, BLENDS[(BLENDS.indexOf(layer.blend) + 1) % BLENDS.length])
   return (
-    <div className="layer-mix">
+    <div className="layer-mix" onClick={(e) => e.stopPropagation()}>
       <button
         className={'icon-btn frame-btn' + (framing ? ' on' : '')}
-        title="Frame this layer — move, resize & crop on the preview"
-        aria-label={`${id} framing`}
+        title="Frame this layer on the preview"
         aria-pressed={framing}
-        disabled={disabled}
-        onClick={() => setLayoutLayer(framing ? null : id)}
+        disabled={!live}
+        onClick={() => setLayoutLayer(framing ? null : layer.id)}
       >
         ◳
       </button>
-      <button
-        className="icon-btn blend-btn"
-        title={`Blend: ${layer.blend} (click to cycle)`}
-        aria-label={`${id} blend mode`}
-        disabled={disabled}
-        onClick={cycleBlend}
-      >
+      <button className="icon-btn blend-btn" title={`Blend: ${layer.blend}`} onClick={cycleBlend}>
         {BLEND_SHORT[layer.blend]}
       </button>
       <input
@@ -56,154 +82,184 @@ function LayerMix({ id, disabled }: { id: LayerId; disabled: boolean }) {
         max={100}
         step={1}
         value={pct}
-        disabled={disabled}
-        aria-label={`${id} opacity`}
-        onChange={(e) => setLayerOpacity(id, +e.target.value / 100)}
+        aria-label={`${layer.name} opacity`}
+        onChange={(e) => setLayerOpacity(layer.id, +e.target.value / 100)}
       />
       <span className="dim layer-pct">{pct}%</span>
     </div>
   )
 }
 
-function CameraRow() {
-  const p = usePipelineStore()
+/** Grouped dropdown shown over an empty cell. Camera/feedback/screen/effects
+ *  fill immediately; video opens a file picker. */
+function KindPicker({
+  layerId,
+  cellId,
+  allowed,
+  moveClip,
+}: {
+  layerId: LayerId
+  cellId: string
+  allowed: ClipKind[]
+  moveClip: MoveClip
+}) {
+  const fillCamera = usePipelineStore((s) => s.fillCellCamera)
+  const fillVideo = usePipelineStore((s) => s.fillCellVideo)
+  const fillFeedback = usePipelineStore((s) => s.fillCellFeedback)
+  const fillScreen = usePipelineStore((s) => s.fillCellScreen)
+  const fillEffect = usePipelineStore((s) => s.fillCellEffect)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState(false)
+
+  const pick = (kind: ClipKind) => {
+    setOpen(false)
+    if (kind === 'video') fileRef.current?.click()
+    else if (kind === 'camera') void fillCamera(layerId, cellId, '')
+    else if (kind === 'feedback') void fillFeedback(layerId, cellId)
+    else if (kind === 'screen') void fillScreen(layerId, cellId)
+    else if (isEffectKind(kind)) void fillEffect(layerId, cellId, kind)
+  }
+
+  const sources = PICK_SOURCES.filter((k) => allowed.includes(k))
+  const effects = PICK_EFFECTS.filter((k) => allowed.includes(k))
+
   return (
-    <div className="layer-row">
-      <span className="layer-name">Camera</span>
-      <div className="layer-src">
-        {/* Selecting a camera auto-enables it; "Camera off" disables. */}
-        <select
-          className="device-pick"
-          value={p.camEnabled ? p.deviceId || 'default' : ''}
-          onChange={(e) => {
-            const v = e.target.value
-            if (v === '') {
-              void p.disableCam()
-              return
-            }
-            const id = v === 'default' ? '' : v
-            usePipelineStore.setState({ deviceId: id })
-            if (p.camEnabled) void p.setDevice(id)
-            else void p.enableCam()
-          }}
-        >
-          <option value="">Camera off</option>
-          <option value="default">Default camera</option>
-          {p.devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId}>
-              {d.label}
-            </option>
-          ))}
-        </select>
-        <label className="dim mirror-lbl" title="Mirror the camera (selfie view)">
-          <input
-            type="checkbox"
-            checked={p.mirror}
-            disabled={!p.camEnabled}
-            onChange={(e) => p.setMirror(e.target.checked)}
-          />{' '}
-          Mirror
-        </label>
-      </div>
-      <LayerMix id="camera" disabled={!(p.camEnabled && p.active)} />
+    <div className="cell-add" {...dropProps(layerId, cellId, moveClip)}>
+      <button
+        className="clip-cell empty"
+        title="Add a clip"
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen((v) => !v)
+        }}
+      >
+        +
+      </button>
+      {open && (
+        <>
+          <div className="kind-backdrop" onClick={() => setOpen(false)} />
+          <div className="kind-menu" onClick={(e) => e.stopPropagation()}>
+            {sources.length > 0 && <div className="kind-group">Sources</div>}
+            {sources.map((k) => (
+              <button key={k} className="kind-opt" onClick={() => pick(k)}>
+                {CLIP_ICON[k] ?? '◻'} {clipMeta(k).label}
+              </button>
+            ))}
+            {effects.length > 0 && <div className="kind-group">Effects</div>}
+            {effects.map((k) => (
+              <button key={k} className="kind-opt" onClick={() => pick(k)}>
+                {CLIP_ICON[k] ?? '◻'} {clipMeta(k).label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="video/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void fillVideo(layerId, cellId, f)
+          e.target.value = ''
+        }}
+      />
     </div>
   )
 }
 
-function VideoRow() {
-  const p = usePipelineStore()
+/** One grid cell — a clip chip (activate + select on click) or an empty picker. */
+function ClipCell({ layer, cell }: { layer: Layer; cell: Cell }) {
+  const selectedClipId = usePipelineStore((s) => s.selectedClipId)
+  const activateCell = usePipelineStore((s) => s.activateCell)
+  const removeClip = usePipelineStore((s) => s.removeClip)
+  const moveClip = usePipelineStore((s) => s.moveClip)
+  const clip = cell.clip
+
+  if (!clip) {
+    // Any kind in any cell — layers are mixed, not homogeneous. The empty cell is
+    // also a drop target for a dragged clip.
+    return <KindPicker layerId={layer.id} cellId={cell.id} allowed={ALL_PICKABLE} moveClip={moveClip} />
+  }
+  const isActive = layer.activeCellId === cell.id
+  const isSel = selectedClipId === clip.id
   return (
-    <div className="layer-row video-row">
-      <div className="layer-line">
-        <span className="layer-name">Video</span>
-        <div className="layer-src">
-          <DropZone
-            accept="video/*"
-            label={p.videoLoaded ? p.videoName : 'Drop video or click'}
-            onFile={(f) => void p.loadVideoFile(f)}
-            title={
-              p.videoLoaded ? `${p.videoName} — ${p.videoMeta}` : 'Drop a video file or click to choose'
-            }
-          />
-          {p.videoLoaded && (
+    <button
+      className={'clip-cell' + (isActive ? ' active' : '') + (isSel ? ' sel' : '')}
+      title={clip.label}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ layerId: layer.id, cellId: cell.id }))
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      {...dropProps(layer.id, cell.id, moveClip)}
+      onClick={(e) => {
+        e.stopPropagation()
+        void activateCell(layer.id, cell.id)
+      }}
+    >
+      <span className="clip-cell-icon">{CLIP_ICON[clip.kind] ?? '◻'}</span>
+      <span className="clip-cell-label">{clip.label}</span>
+      <span
+        className="clip-cell-x"
+        title="Remove clip"
+        onClick={(e) => {
+          e.stopPropagation()
+          void removeClip(layer.id, cell.id)
+        }}
+      >
+        ⌫
+      </span>
+    </button>
+  )
+}
+
+function LayerRow({ layer, index, count }: { layer: Layer; index: number; count: number }) {
+  const moveLayer = usePipelineStore((s) => s.moveLayer)
+  const removeLayer = usePipelineStore((s) => s.removeLayer)
+  const addCell = usePipelineStore((s) => s.addCell)
+  const selectClip = usePipelineStore((s) => s.selectClip)
+  const clip = activeClip(layer)
+  return (
+    <div className="layer-row-wrap" onClick={() => clip && selectClip(clip.id)}>
+      <div className="layer-reorder">
+        <button className="icon-btn" title="Move up" disabled={index === 0} onClick={(e) => { e.stopPropagation(); moveLayer(layer.id, -1) }}>▲</button>
+        <button className="icon-btn" title="Move down" disabled={index === count - 1} onClick={(e) => { e.stopPropagation(); moveLayer(layer.id, 1) }}>▼</button>
+      </div>
+      <div className="layer-grid-row">
+        <div className="cell-track">
+          {layer.cells.map((cell) => (
+            <ClipCell key={cell.id} layer={layer} cell={cell} />
+          ))}
+          {/* Only offer "+ cell" when there's no empty cell waiting to be filled. */}
+          {!layer.cells.some((c) => !c.clip) && (
             <button
-              className="icon-btn"
-              title="Unload video"
-              aria-label="Unload video"
-              onClick={() => void p.unloadVideo()}
+              className="clip-cell empty add-cell"
+              title="Add another clip"
+              onClick={(e) => { e.stopPropagation(); addCell(layer.id) }}
             >
-              🗑
+              +
             </button>
           )}
         </div>
-        <LayerMix id="video" disabled={!(p.videoLoaded && p.active)} />
+        <LayerMix layer={layer} />
       </div>
-      {p.videoLoaded && (
-        <div className="controls transport">
-          <button
-            className="icon-btn"
-            title={p.videoPlaying ? 'Pause' : 'Play'}
-            aria-label={p.videoPlaying ? 'Pause' : 'Play'}
-            onClick={() => p.toggleVideoPlay()}
-          >
-            {p.videoPlaying ? '⏸' : '▶'}
-          </button>
-          <input
-            className="seek"
-            type="range"
-            min={0}
-            max={p.videoDuration || 0}
-            step={0.1}
-            value={p.videoCurrentTime}
-            onChange={(e) => p.seekVideo(+e.target.value)}
-          />
-          <span className="time-readout">
-            {fmtTime(p.videoCurrentTime)}/{fmtTime(p.videoDuration)}
-          </span>
-          <button
-            className={'icon-btn' + (p.videoLoop ? ' on' : '')}
-            title="Loop"
-            aria-label="Loop"
-            onClick={() => p.setVideoLoop(!p.videoLoop)}
-          >
-            🔁
-          </button>
-          <select
-            className="rate"
-            title="Playback speed"
-            value={p.videoRate}
-            onChange={(e) => p.setVideoRate(+e.target.value)}
-          >
-            {RATES.map((r) => (
-              <option key={r} value={r}>
-                {r}×
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function FeedbackRow() {
-  const active = usePipelineStore((s) => s.active)
-  const feedbackAvailable = usePipelineStore((s) => s.feedbackAvailable)
-  const live = feedbackAvailable && active
-  return (
-    <div className="layer-row">
-      <span className="layer-name">Feedback</span>
-      <div className="layer-src">
-        <span className="dim feedback-hint">
-          {live ? 'output → input loop' : 'live once the stream is running'}
-        </span>
-      </div>
-      <LayerMix id="feedback" disabled={!live} />
+      <button
+        className="icon-btn layer-remove"
+        title="Remove layer"
+        onClick={(e) => { e.stopPropagation(); void removeLayer(layer.id) }}
+      >
+        ⌫
+      </button>
     </div>
   )
 }
 
 export function LayerStack() {
+  const layers = usePipelineStore((s) => s.layers)
+  const addLayer = usePipelineStore((s) => s.addLayer)
+  const clearComposition = usePipelineStore((s) => s.clearComposition)
   const inputRole = useSessionStore((s) => s.inputRole)
   const roleLabel =
     inputRole === 'you'
@@ -214,9 +270,26 @@ export function LayerStack() {
 
   return (
     <div className="layer-stack">
-      <CameraRow />
-      <VideoRow />
-      <FeedbackRow />
+      <div className="layer-stack-head">
+        <span className="dim">COMPOSITION</span>
+        <div className="head-actions">
+          <button className="icon-btn add-layer" title="Add a layer on top" onClick={() => addLayer()}>
+            + Layer
+          </button>
+          <button
+            className="icon-btn clear-comp"
+            title="Clear the whole composition"
+            onClick={() => {
+              if (confirm('Clear the whole composition?')) clearComposition()
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      {layers.map((layer, i) => (
+        <LayerRow key={layer.id} layer={layer} index={i} count={layers.length} />
+      ))}
       <span className="dim layer-foot">{roleLabel}</span>
     </div>
   )

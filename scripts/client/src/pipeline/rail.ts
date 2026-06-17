@@ -7,27 +7,29 @@ import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
 import type {
-  CompositeOptions,
-  CompositePatch,
+  BaseSource,
+  ClipKind,
+  Composite,
+  CompositeOp,
+  LayerId,
+  LayerSourceInput,
   RailBackend,
   RailBackendKind,
   TapCallback,
 } from './core/types'
-import { defaultComposite, hasVideoTrack, mergeComposite } from './core/types'
+import {
+  applyCompositeOp,
+  CAMERA_LAYER,
+  defaultComposite,
+  FEEDBACK_LAYER,
+  hasVideoTrack,
+  VIDEO_LAYER,
+} from './core/types'
 import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
 export interface RailEvents {
   onLog?: (msg: string) => void
-}
-
-export interface RailSources {
-  deviceId: string | null
-  camera: boolean
-  videoEl: HTMLVideoElement | null
-  /** Force the output/canvas aspect ratio (width/height); the source is
-   *  cover-cropped into it. Used to match the server's generation aspect. */
-  targetAspect?: number | null
 }
 
 /** Longest output edge when the video file is the sole source. */
@@ -46,29 +48,13 @@ function videoDims(el: HTMLVideoElement): { width: number; height: number } {
   return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
 }
 
-/** Canvas dims forced to a target aspect (the server's output aspect), keeping
- *  the source height; the source is cover-cropped into this by the compositor. */
-function aspectDims(srcHeight: number, aspect: number): { width: number; height: number } {
-  let h = srcHeight || 720
-  let w = h * aspect
-  const long = Math.max(w, h)
-  if (long > MAX_VIDEO_EDGE) {
-    const scale = MAX_VIDEO_EDGE / long
-    w *= scale
-    h *= scale
-  }
-  return { width: Math.round(w / 2) * 2, height: Math.round(h / 2) * 2 }
-}
-
 export class Rail {
   private backend: RailBackend | null = null
-  private rawStream: MediaStream | null = null
-  private mirrored = false
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
-  private composite: CompositeOptions = defaultComposite()
-  // The remote output stream fed back in as the bottom layer. Remembered so a
-  // pipeline restart (camera/video toggle) re-attaches it to the new backend.
+  private composite: Composite = defaultComposite()
+  // The remote output stream fed back in as a layer. Remembered so a pipeline
+  // restart (camera/video toggle) re-attaches it to the new backend.
   private feedbackStream: MediaStream | null = null
   // Draw ops recorded so a pipeline restart (which rebuilds the draw layer from
   // scratch) can replay the strokes instead of wiping the user's drawing. Each
@@ -101,37 +87,38 @@ export class Rail {
     return this.backend?.outputStream ?? null
   }
 
-  async start(sources: RailSources): Promise<{ label: string }> {
+  /** Start the pipeline on an already-acquired BASE source (the store owns
+   *  getUserMedia/getDisplayMedia/file). Output dims come from `outDims` when
+   *  given (the server's output resolution → preview matches output), else from
+   *  the base source; every other clip hot-attaches afterward via setLayerSource. */
+  async start(base: BaseSource, outDims?: { width: number; height: number } | null): Promise<{ label: string }> {
     if (this.backend) this.stop()
-    if (!sources.camera && !sources.videoEl) throw new Error('no input source')
 
-    let label = 'video file'
+    let label: string
     let width: number
     let height: number
-    if (sources.camera) {
-      this.rawStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 },
-          ...(sources.deviceId ? { deviceId: { exact: sources.deviceId } } : {}),
-        },
-      })
-      const [track] = this.rawStream.getVideoTracks()
+    if (base.stream) {
+      const [track] = base.stream.getVideoTracks()
+      if (!track) throw new Error('base source has no video track')
       const s = track.getSettings()
       width = s.width || 1280
       height = s.height || 720
-      label = track.label || 'camera'
-      if (sources.videoEl) label += ' + video file'
+      label = track.label || base.kind
+    } else if (base.videoEl) {
+      ;({ width, height } = videoDims(base.videoEl))
+      label = 'video file'
     } else {
-      ;({ width, height } = videoDims(sources.videoEl!))
+      throw new Error('no base source')
     }
 
-    // Force the output aspect to match the server's generation aspect; the
-    // source is cover-cropped into it (no stretch/letterbox).
-    if (sources.targetAspect && sources.targetAspect > 0) {
-      ;({ width, height } = aspectDims(height, sources.targetAspect))
+    // Pin the output canvas to the server's generation resolution when known —
+    // the input composite (and the frames sent upstream) then match the output's
+    // aspect AND resolution exactly; sources are cover-cropped into it (no stretch
+    // / letterbox). Dims are fixed at start and never derive from a single layer's
+    // liveness, so activating/deactivating a clip can't change them.
+    if (outDims && outDims.width > 0 && outDims.height > 0) {
+      width = outDims.width
+      height = outDims.height
     }
 
     const kind = detectBackend()
@@ -143,14 +130,13 @@ export class Rail {
         width,
         height,
         fps: 30,
-        mirrored: this.mirrored,
-        composite: { ...this.composite },
+        composite: this.composite,
         effects: [
           { name: 'marker', config: this.markerConfig },
           { name: 'drawLayer', config: this.drawConfig },
         ],
       },
-      { cameraStream: this.rawStream, videoEl: sources.videoEl },
+      { base },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
     // Replay any persisted drawing onto the freshly-built draw layer so a
@@ -169,7 +155,7 @@ export class Rail {
     // start and tear down the whole input pipeline — just drop the feedback layer.
     if (this.feedbackStream) {
       try {
-        this.backend.setFeedback(this.feedbackStream)
+        this.backend.setLayerSource(FEEDBACK_LAYER, 'feedback', this.feedbackStream)
       } catch (e) {
         this.onLog('feedback re-attach failed: ' + (e instanceof Error ? e.message : e))
         this.feedbackStream = null
@@ -189,72 +175,55 @@ export class Rail {
     this.onOutputTrack = fn
   }
 
+  /** Hot add/swap/remove one layer's live source in place (no restart): keeps
+   *  the output stream/track alive. Generalizes the old swap-video/swap-camera/
+   *  clear-video/set-feedback paths. */
+  setLayerSource(id: LayerId, kind: ClipKind, source: LayerSourceInput): void {
+    this.backend?.setLayerSource(id, kind, source)
+  }
+
   /** Hot-swap the video-file source in place (no restart): re-feed the worker
    *  the element's new track while keeping the output stream/track alive. */
   swapVideoSource(videoEl: HTMLVideoElement): void {
-    this.backend?.swapVideo(videoEl)
+    this.backend?.setLayerSource(VIDEO_LAYER, 'video', videoEl)
   }
 
   /** Hot-remove the video-file overlay in place (no restart): drop the overlay
    *  layer while the camera keeps feeding and the output stream stays alive. */
   clearVideoSource(): void {
-    this.backend?.clearVideo()
-  }
-
-  /** Hot-swap the camera device in place (no restart): acquire the new device's
-   *  stream, feed it to the backend, then stop the old one. Keeps the output
-   *  track / WebRTC sender alive. */
-  async swapCameraDevice(deviceId: string | null): Promise<void> {
-    if (!this.backend) return
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 },
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      },
-    })
-    this.backend.swapCamera(newStream)
-    // Stop the previous camera track now that the new one is feeding.
-    this.rawStream?.getTracks().forEach((t) => {
-      try {
-        t.stop()
-      } catch {
-        /* already stopped */
-      }
-    })
-    this.rawStream = newStream
+    this.backend?.setLayerSource(VIDEO_LAYER, 'video', null)
   }
 
   stop(): void {
     this.backend?.stop()
     this.backend = null
-    this.rawStream?.getTracks().forEach((t) => {
-      try {
-        t.stop()
-      } catch {
-        /* already stopped */
-      }
-    })
-    this.rawStream = null
+    // Camera/screen streams are owned by the store now (it acquires + releases).
   }
 
+  /** Per-layer selfie flip. In the migration era this targets the camera layer
+   *  (selfie view) — once clips own their mirror (P1+) the store drives it via
+   *  a composite patch directly. */
   setMirror(on: boolean): void {
-    this.mirrored = on
-    this.backend?.setMirror(on)
+    this.setComposite({ op: 'patch', layers: [{ id: CAMERA_LAYER, mirror: on }] })
   }
 
-  setComposite(patch: CompositePatch): void {
-    mergeComposite(this.composite, patch)
-    this.backend?.setComposite(patch)
+  /** Apply a structural/mix op to the composite (patch/add/remove/reorder),
+   *  remembered so a pipeline restart re-establishes it. */
+  setComposite(op: CompositeOp): void {
+    applyCompositeOp(this.composite, op)
+    this.backend?.setComposite(op)
+  }
+
+  /** Replace the whole composite (the reconciler's "match this stack"). */
+  setCompositeAll(composite: Composite): void {
+    this.setComposite({ op: 'replace', layers: composite })
   }
 
   /** Set or clear the feedback layer — the remote output stream fed back into
    *  the input compositor. Remembered so a pipeline restart re-attaches it. */
   setFeedback(stream: MediaStream | null): void {
     this.feedbackStream = hasVideoTrack(stream) ? stream : null
-    this.backend?.setFeedback(this.feedbackStream)
+    this.backend?.setLayerSource(FEEDBACK_LAYER, 'feedback', this.feedbackStream)
   }
 
   configureMarker(patch: Partial<MarkerConfig>): void {
@@ -296,7 +265,7 @@ export class Rail {
     this.backend?.busPush(key, value)
   }
 
-  /** Sampled COMPOSITE frames (already mirrored when the camera mirror is on)
+  /** Sampled COMPOSITE frames (already mirrored when a layer's mirror is on)
    *  for the vision analyzer — NOT pre-mirror base frames. Consumers must treat
    *  landmarks as being in the same (mirrored) space the preview displays, so
    *  they render 1:1 with no extra flip (see marker.ts / OverlayCanvas). */
