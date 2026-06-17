@@ -46,13 +46,8 @@ from aiortc import (
 from aiortc.mediastreams import MediaStreamError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, Response
 from PIL import Image
-
-# React/TS client (scripts/client) — the only browser client. Build with:
-# yarn --cwd scripts/client install && yarn --cwd scripts/client build
-CLIENT_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client", "dist")
 
 # ComfyUI API-format workflow templates patched + queued by /comfy/edit.
 WORKFLOWS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_workflows")
@@ -464,46 +459,6 @@ def _rtc_config() -> RTCConfiguration:
             )
         )
     return RTCConfiguration(iceServers=servers)
-
-
-# Ensure ES-module (.mjs) and wasm are served with a script/wasm MIME — Python's
-# mimetypes historically maps .mjs to text/plain, which breaks dynamic import()
-# (and onnxruntime-web's jsep loader) with "Failed to fetch dynamically imported
-# module". StaticFiles consults mimetypes at request time, so register up front.
-import mimetypes
-
-mimetypes.add_type("text/javascript", ".mjs")
-mimetypes.add_type("text/javascript", ".js")
-mimetypes.add_type("application/wasm", ".wasm")
-
-# New client build, when present: Vite assets + vendored MediaPipe wasm/models.
-_client_built = os.path.isfile(os.path.join(CLIENT_DIST, "index.html"))
-if _client_built:
-    app.mount("/assets", StaticFiles(directory=os.path.join(CLIENT_DIST, "assets")), name="assets")
-    _mediapipe_dir = os.path.join(CLIENT_DIST, "mediapipe")
-    if os.path.isdir(_mediapipe_dir):
-        app.mount("/mediapipe", StaticFiles(directory=_mediapipe_dir), name="mediapipe")
-    # onnxruntime-web (jsep wasm/loader) + vendored ONNX models for the WebGPU
-    # depth pass. Must be real static mounts — otherwise these paths fall through
-    # to the SPA catch-all and return index.html, breaking ort's module/wasm fetch.
-    _onnx_dir = os.path.join(CLIENT_DIST, "onnx")
-    if os.path.isdir(_onnx_dir):
-        app.mount("/onnx", StaticFiles(directory=_onnx_dir), name="onnx")
-    _models_dir = os.path.join(CLIENT_DIST, "models")
-    if os.path.isdir(_models_dir):
-        app.mount("/models", StaticFiles(directory=_models_dir), name="models")
-
-
-@app.middleware("http")
-async def _no_cache_client(request: Request, call_next):
-    """Force revalidation of the browser client. Without Cache-Control,
-    browsers heuristically cache the hashed assets / index and serve a stale
-    client after a server update (a LAN 304 roundtrip is free)."""
-    response = await call_next(request)
-    path = request.url.path
-    if path == "/" or path.startswith("/assets"):
-        response.headers["Cache-Control"] = "no-cache"
-    return response
 
 
 @app.post("/offer")
@@ -1171,15 +1126,9 @@ async def delete_saved_prompt(request: Request):
 
 @app.get("/")
 async def _index():
-    if not _client_built:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Client build not found. Build it with: "
-                "yarn --cwd scripts/client install && yarn --cwd scripts/client build"
-            ),
-        )
-    return FileResponse(os.path.join(CLIENT_DIST, "index.html"))
+    # Backend-only now (the web client lives in the realtime-client repo and is
+    # hosted separately). Root is a liveness/identity ping; see /healthz for stats.
+    return JSONResponse({"service": "fluxrt-webrtc", "ok": True})
 
 
 @app.get("/healthz")

@@ -1,9 +1,0 @@
-node_modules/
-dist/
-public/mediapipe/
-public/onnx/
-public/models/
-tsconfig.tsbuildinfo
-
-# This project uses yarn only — never commit npm's lockfile
-package-lock.json

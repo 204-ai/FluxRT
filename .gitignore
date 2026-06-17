@@ -227,7 +227,6 @@ marimo/_lsp/
 __marimo__/
 
 # Per-machine generated / runtime-local files (untracked to avoid pull conflicts)
-scripts/client/yarn.lock
 scripts/saved_prompts.json
 
 # npm lockfiles — this project uses yarn only; ignore any stray npm output
