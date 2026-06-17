@@ -128,6 +128,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       try {
         comp = new WebGpuCompositor(gpu, canvas, width, height)
       } catch (e) {
+        console.error('[pipeline] webgpu compositor init failed, using 2d:', e)
         post({
           type: 'error',
           message: 'webgpu compositor init failed, using 2d: ' + (e instanceof Error ? e.message : String(e)),
@@ -146,6 +147,9 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     comp = new Compositor(ctx, width, height)
   }
   compositor = comp
+  const compositorMode = comp instanceof WebGpuCompositor ? 'webgpu' : '2d'
+  console.info('[pipeline] compositor:', compositorMode, `${width}x${height}`)
+  post({ type: 'info', text: `compositor: ${compositorMode}` })
   compositor.setComposite(msg.composite)
   compositor.setEffects(msg.effects)
 

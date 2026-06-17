@@ -88,6 +88,8 @@ export class StreamsBackend implements RailBackend {
         this.onLog(`pipeline worker: ${m.open} VideoFrames open (possible leak)`)
       } else if (m.type === 'perf') {
         this.onLog(`pipeline ${m.text}`)
+      } else if (m.type === 'info') {
+        this.onLog(`pipeline ${m.text}`)
       } else if (m.type === 'error') {
         this.onLog('pipeline worker error: ' + m.message)
       }

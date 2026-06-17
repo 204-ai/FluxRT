@@ -38,6 +38,11 @@ async function initGpu(): Promise<GpuContext | null> {
     const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' })
     if (!adapter) return null
     const device = await adapter.requestDevice()
+    // Surface WebGPU validation/other errors to the console — they are otherwise
+    // silent (no throw), so a broken pipeline just renders wrong with no signal.
+    device.addEventListener('uncapturederror', (e) => {
+      console.error('[webgpu] uncaptured error:', (e as GPUUncapturedErrorEvent).error?.message)
+    })
     const canvasFormat = gpu.getPreferredCanvasFormat()
     // On device loss, drop the cache and notify the owner. `device.lost` resolves
     // (never rejects) on loss, including on explicit destroy().

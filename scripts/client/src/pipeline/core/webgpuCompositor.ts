@@ -116,6 +116,7 @@ export class WebGpuCompositor {
   private sampler: GPUSampler
   private uniforms: GPUBuffer
   private scratch = new Float32Array(12)
+  private diag = 0
 
   private layerLayout: GPUBindGroupLayout
   private blendLayout: GPUBindGroupLayout
@@ -256,6 +257,22 @@ export class WebGpuCompositor {
       const slot = draws.length
       if (!this.writeLayer(slot, src, layer, layer.mirror, layer.blend)) continue
       draws.push({ slot, extTex: this.device.importExternalTexture({ source: src }) })
+    }
+
+    if (this.diag < 2) {
+      this.diag++
+      console.info(
+        '[webgpu] frame',
+        this.diag,
+        '| layers:',
+        this.composite.map((l) => `${l.id}:${l.effectName ? 'fx' : l.blend}@${l.opacity}`).join(' '),
+        '| drawn:',
+        draws.length,
+        '| frames:',
+        Object.keys(frames)
+          .map((k) => `${k}:${isVideoFrame(frames[k]) ? 'vf' : frames[k] ? 'other' : 'none'}`)
+          .join(' '),
+      )
     }
 
     const uni = (slot: number): GPUBufferBinding => ({
