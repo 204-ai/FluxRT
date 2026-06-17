@@ -311,6 +311,14 @@ export interface RailStartOptions {
   fps: number
   composite: Composite
   effects: EffectInit[]
+  /** Emit periodic perf summaries (composite/tap timing, fps) via onLog. */
+  profile?: boolean
+  /** Opt into the WebGPU compositor (streams backend only; probed, falls back to
+   *  2D on any failure). Default off — shipping behavior is the 2D canvas. */
+  webgpu?: boolean
+  /** Opt into the Depth Anything V2 pass (requires the WebGPU compositor + the
+   *  vendored ONNX model). Default off. A `depth` effect layer renders the map. */
+  depth?: boolean
 }
 
 export interface EffectInit {
@@ -346,5 +354,10 @@ export interface RailBackend {
   busPush(key: string, value: unknown): void
   /** Sample source frames at most every `intervalMs`; null disables the tap. */
   setTap(intervalMs: number, cb: TapCallback | null): void
+  /** Hand the backend a worker→worker frame channel so the COMPOSITE tap can
+   *  reach the vision worker directly (no main-thread bounce). The streams
+   *  backend forwards it to its pipeline worker; the canvas backend (main-thread
+   *  compositing) ignores it and keeps using the setTap callback. null detaches. */
+  setVisionPort(port: MessagePort | null): void
   snapshot(type?: string): Promise<Blob>
 }

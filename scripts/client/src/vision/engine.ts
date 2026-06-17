@@ -93,7 +93,7 @@ export class VisionEngine {
     onStatus('')
   }
 
-  detect(input: ImageBitmap, tsMs: number): VisionResult | null {
+  detect(input: ImageBitmap | VideoFrame, tsMs: number): VisionResult | null {
     // detectForVideo timestamps must increase monotonically.
     if (tsMs <= this.lastTs) tsMs = this.lastTs + 1
     this.lastTs = tsMs

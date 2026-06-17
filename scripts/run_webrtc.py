@@ -429,6 +429,16 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=_lifespan)
 
+# Ensure ES-module (.mjs) and wasm are served with a script/wasm MIME — Python's
+# mimetypes historically maps .mjs to text/plain, which breaks dynamic import()
+# (and onnxruntime-web's jsep loader) with "Failed to fetch dynamically imported
+# module". StaticFiles consults mimetypes at request time, so register up front.
+import mimetypes
+
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("application/wasm", ".wasm")
+
 # New client build, when present: Vite assets + vendored MediaPipe wasm/models.
 _client_built = os.path.isfile(os.path.join(CLIENT_DIST, "index.html"))
 if _client_built:
@@ -436,6 +446,15 @@ if _client_built:
     _mediapipe_dir = os.path.join(CLIENT_DIST, "mediapipe")
     if os.path.isdir(_mediapipe_dir):
         app.mount("/mediapipe", StaticFiles(directory=_mediapipe_dir), name="mediapipe")
+    # onnxruntime-web (jsep wasm/loader) + vendored ONNX models for the WebGPU
+    # depth pass. Must be real static mounts — otherwise these paths fall through
+    # to the SPA catch-all and return index.html, breaking ort's module/wasm fetch.
+    _onnx_dir = os.path.join(CLIENT_DIST, "onnx")
+    if os.path.isdir(_onnx_dir):
+        app.mount("/onnx", StaticFiles(directory=_onnx_dir), name="onnx")
+    _models_dir = os.path.join(CLIENT_DIST, "models")
+    if os.path.isdir(_models_dir):
+        app.mount("/models", StaticFiles(directory=_models_dir), name="models")
 
 
 @app.middleware("http")

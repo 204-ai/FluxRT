@@ -43,13 +43,27 @@ export class VisionClient {
     return this.ready
   }
 
-  /** Takes ownership of the bitmap (transferred to the worker). */
+  /** Takes ownership of the bitmap (transferred to the worker). Main-thread
+   *  sources (canvas backend, output <video> sampler) feed frames this way. The
+   *  streams backend bypasses this and posts straight to the worker via the port
+   *  from mintFramePort(). */
   push(bitmap: ImageBitmap, tsMs: number): void {
     if (!this.worker || !this.ready || this.disposed) {
       bitmap.close()
       return
     }
-    this.worker.postMessage({ type: 'detect', bitmap, tsMs }, [bitmap])
+    this.worker.postMessage({ type: 'detect', frame: bitmap, tsMs }, [bitmap])
+  }
+
+  /** Open a fresh worker→worker frame channel and return the producer end to
+   *  hand to the pipeline worker. The vision worker replaces any prior port, so
+   *  minting a new one per rail (re)start is safe — the dead worker's port is
+   *  simply dropped. Returns null if the worker isn't up. */
+  mintFramePort(): MessagePort | null {
+    if (!this.worker || this.disposed) return null
+    const ch = new MessageChannel()
+    this.worker.postMessage({ type: 'frame-port', port: ch.port2 }, [ch.port2])
+    return ch.port1
   }
 
   subscribe(l: VisionListener): () => void {

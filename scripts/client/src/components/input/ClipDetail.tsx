@@ -117,12 +117,57 @@ function ShaderDetail({ clip }: { clip: Clip }) {
   )
 }
 
+const DEPTH_MODES = [
+  { label: 'Replace (show depth)', value: 'replace' },
+  { label: 'Fog', value: 'fog' },
+  { label: 'Mask (keep near)', value: 'mask' },
+]
+// Model input size (multiple of 14). Bigger = sharper depth + slower — the
+// realtime demo's "Image size" knob (it runs ~504px). 252 is fast/blurry.
+const DEPTH_SIZES = [252, 392, 518, 686]
+
+function DepthDetail({ clip }: { clip: Clip }) {
+  const setEffectConfig = usePipelineStore((s) => s.setEffectConfig)
+  const mode = (clip.effectConfig?.mode as string) ?? 'replace'
+  const size = Number(clip.effectConfig?.size) || 518
+  return (
+    <>
+      <div className="clip-detail-row">
+        <span className="dim">mode</span>
+        <select className="device-pick" value={mode} onChange={(e) => setEffectConfig(clip.id, { mode: e.target.value })}>
+          {DEPTH_MODES.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="clip-detail-row">
+        <span className="dim">image size</span>
+        <select
+          className="device-pick"
+          value={size}
+          onChange={(e) => setEffectConfig(clip.id, { size: Number(e.target.value) })}
+        >
+          {DEPTH_SIZES.map((s) => (
+            <option key={s} value={s}>
+              {s}px
+            </option>
+          ))}
+        </select>
+        <span className="dim">bigger = sharper + slower · strength = layer opacity · needs WebGPU</span>
+      </div>
+    </>
+  )
+}
+
 function ClipDetailBody({ clip }: { clip: Clip }) {
   if (clip.kind === 'camera') return <CameraDetail clip={clip} />
   if (clip.kind === 'video') return <VideoDetail clip={clip} />
   if (clip.kind === 'feedback') return <FeedbackDetail />
   if (clip.kind === 'screen') return <span className="dim">screen share — live</span>
   if (clip.kind === 'shader') return <ShaderDetail clip={clip} />
+  if (clip.kind === 'depth') return <DepthDetail clip={clip} />
   return <span className="dim">no details for this clip</span>
 }
 

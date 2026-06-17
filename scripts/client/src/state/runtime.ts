@@ -205,14 +205,21 @@ class InputVisionManager {
       this.starting = null
     }
     // ~15 Hz sampling: smooth enough for marker + sense, far below video rate.
+    // setTap sets the worker's tap CADENCE (and is the canvas backend's frame
+    // path); the streams backend's frames flow through the direct port below.
     rail.setTap(66, (bitmap, tsMs) => {
       if (this.client) this.client.push(bitmap, tsMs)
       else bitmap.close()
     })
+    // Streams backend: hand the pipeline worker a direct frame-port to this
+    // vision worker so composite frames skip the main thread. Re-minted per rail
+    // (re)start. The canvas backend ignores it and uses the tap callback above.
+    rail.setVisionPortFactory(() => (this.client ? this.client.mintFramePort() : null))
   }
 
   private teardown(): void {
     rail.setTap(0, null)
+    rail.setVisionPortFactory(null)
     this.client?.dispose()
     this.client = null
     this.caps = { face: false, pose: false }

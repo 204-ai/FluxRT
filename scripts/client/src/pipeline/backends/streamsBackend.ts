@@ -86,6 +86,10 @@ export class StreamsBackend implements RailBackend {
         else (m.bitmap as ImageBitmap).close()
       } else if (m.type === 'leak') {
         this.onLog(`pipeline worker: ${m.open} VideoFrames open (possible leak)`)
+      } else if (m.type === 'perf') {
+        this.onLog(`pipeline ${m.text}`)
+      } else if (m.type === 'info') {
+        this.onLog(`pipeline ${m.text}`)
       } else if (m.type === 'error') {
         this.onLog('pipeline worker error: ' + m.message)
       }
@@ -101,6 +105,9 @@ export class StreamsBackend implements RailBackend {
         height: opts.height,
         composite: opts.composite,
         effects: opts.effects satisfies EffectInit[],
+        profile: opts.profile ?? false,
+        webgpu: opts.webgpu ?? false,
+        depth: opts.depth ?? false,
       },
       transfer,
     )
@@ -254,6 +261,13 @@ export class StreamsBackend implements RailBackend {
   setTap(intervalMs: number, cb: TapCallback | null): void {
     this.tapCb = cb
     this.worker?.postMessage({ type: 'tap', intervalMs: cb ? intervalMs : 0 })
+  }
+
+  setVisionPort(port: MessagePort | null): void {
+    // Transfer the worker→worker frame channel to the pipeline worker; it then
+    // posts composite VideoFrames straight to the vision worker, bypassing the
+    // main thread. A fresh port arrives on each rail (re)start.
+    this.worker?.postMessage({ type: 'vision-port', port }, port ? [port] : [])
   }
 
   async snapshot(type = 'image/png'): Promise<Blob> {
