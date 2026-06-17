@@ -364,6 +364,10 @@ export class WebGpuCompositor {
   private depthSmooth: [GPUTexture, GPUTexture] | null = null
   private depthSmoothViews: [GPUTextureView, GPUTextureView] | null = null
   private depthSmoothCur = 0
+  // Temporarily off: the ease pipeline is producing an invalid pipeline that
+  // blacks out the composite. Disabled so depth still renders (reuse-last) while
+  // the constructor's error capture pinpoints the cause; re-enable once fixed.
+  private easeEnabled = false
   // Cache the composed colour matrix + blur radius per effect layer; recompute
   // only when its filter string changes (keyed by layer id, not string, so an
   // animated hue-rotate doesn't grow the map unboundedly).
@@ -523,6 +527,14 @@ export class WebGpuCompositor {
         fragment: { module, entryPoint: fs, targets: [{ format }] },
         primitive: { topology },
       })
+    // Capture shader-compile + pipeline-creation errors (otherwise they surface
+    // only as a generic async "invalid pipeline" when used). Logs the real cause.
+    void module.getCompilationInfo().then((info) => {
+      for (const m of info.messages) {
+        if (m.type === 'error') console.error(`[webgpu] WGSL ${m.lineNum}:${m.linePos} ${m.message}`)
+      }
+    })
+    this.device.pushErrorScope('validation')
     this.layerPipeline = pipe(this.layerLayout, 'layer_vs', 'layer_fs', ACCUM_FORMAT, 'triangle-strip')
     this.blendPipeline = pipe(this.blendLayout, 'fullscreen_vs', 'blend_fs', ACCUM_FORMAT, 'triangle-list')
     this.fxPipeline = pipe(this.fxLayout, 'fullscreen_vs', 'fx_fs', ACCUM_FORMAT, 'triangle-list')
@@ -535,6 +547,9 @@ export class WebGpuCompositor {
     // produced an invalid pipeline on the target adapter. Depth lives in .r.
     this.depthEasePipeline = pipe(this.depthEaseLayout, 'fullscreen_vs', 'depth_ease_fs', ACCUM_FORMAT, 'triangle-list')
     this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
+    void this.device.popErrorScope().then((e) => {
+      if (e) console.error('[webgpu] pipeline creation error:', e.message)
+    })
 
     this.allocTargets()
   }
@@ -723,6 +738,7 @@ export class WebGpuCompositor {
     // active + data has arrived): smoothNext = mix(smoothPrev, raw, 0.18), so the
     // depth effect glides between low-fps inferences instead of stepping.
     if (
+      this.easeEnabled &&
       this.depthDataView &&
       this.depthSmoothViews &&
       this.composite.some((l) => l.effectName === 'depth' && l.opacity > 0)
@@ -756,8 +772,14 @@ export class WebGpuCompositor {
           this.fsPass(encoder, this.accumView(writeTex), this.depthPipeline, this.depthLayout, [
             { binding: 1, resource: this.sampler },
             { binding: 3, resource: this.accumView(readTex) },
-            // Sample the eased (smoothed) depth, not the raw map.
-            { binding: 9, resource: this.depthSmoothViews?.[this.depthSmoothCur] ?? this.depthDataView },
+            // Sample the eased (smoothed) depth when enabled, else the raw map.
+            {
+              binding: 9,
+              resource:
+                this.easeEnabled && this.depthSmoothViews
+                  ? this.depthSmoothViews[this.depthSmoothCur]
+                  : this.depthDataView,
+            },
             { binding: 10, resource: depthUni(depthSlot) },
           ])
           ;[readTex, writeTex] = [writeTex, readTex]
