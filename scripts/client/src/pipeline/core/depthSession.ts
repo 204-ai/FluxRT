@@ -15,7 +15,9 @@
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
 import { getGpuContext } from './gpu'
 
-const DIM = 392 // 28*14 — a patch-multiple (DINOv2 patch size 14); fixed to avoid recompiles
+// 20*14 — a patch-multiple (DINOv2 patch size 14). Smaller = far fewer ViT tokens
+// = much faster inference (tokens scale with (DIM/14)²) and cheaper CPU preprocess.
+const DIM = 280
 const MEAN = [0.485, 0.456, 0.406]
 const STD = [0.229, 0.224, 0.225]
 const MODEL_URL = '/models/depth/depth_anything_v2_vits_fp16.onnx'
@@ -44,6 +46,10 @@ export class DepthSession {
   private preCtx = this.pre.getContext('2d', { willReadFrequently: true })
   private input = new Float32Array(3 * DIM * DIM)
   private inputTensor: Tensor | null = null
+  // Running depth range (EMA) so the normalized brightness doesn't jump per frame.
+  private runMin = 0
+  private runMax = 0
+  private haveRange = false
 
   /** Load the model on WebGPU (sharing the compositor's adapter). Returns null
    *  if WebGPU is unavailable or anything fails — depth then simply stays off. */
@@ -108,8 +114,23 @@ export class DepthSession {
         if (v < mn) mn = v
         if (v > mx) mx = v
       }
-      const inv = mx > mn ? 255 / (mx - mn) : 0
-      for (let i = 0; i < n; i++) u8[i] = (depth[i] - mn) * inv
+      // Running min/max (EMA): per-frame min-max makes the depth brightness jump
+      // frame-to-frame (visible flicker); smoothing the range stabilizes it.
+      if (!this.haveRange) {
+        this.runMin = mn
+        this.runMax = mx
+        this.haveRange = true
+      } else {
+        const a = 0.15
+        this.runMin += (mn - this.runMin) * a
+        this.runMax += (mx - this.runMax) * a
+      }
+      const lo = this.runMin
+      const inv = this.runMax > lo ? 255 / (this.runMax - lo) : 0
+      for (let i = 0; i < n; i++) {
+        const t = (depth[i] - lo) * inv
+        u8[i] = t < 0 ? 0 : t > 255 ? 255 : t
+      }
       return { data: u8, w, h }
     } catch (e) {
       console.error('[depth] run failed:', e)
