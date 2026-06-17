@@ -258,6 +258,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         self.upscaler_pipeline = upscaler_pipeline
 
     @staticmethod
+    @torch.no_grad()
     def _get_qwen3_prompt_embeds(
         text_encoder: Qwen3ForCausalLM,
         tokenizer: Qwen2TokenizerFast,
@@ -267,6 +268,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         max_sequence_length: int = 512,
         hidden_states_layers: list[int] = (9, 18, 27),
     ):
+        # Inference-only encode. Without no_grad the text-encoder forward retains
+        # autograd activations across all layers (~hundreds of MiB), which OOMs
+        # at runtime when called outside the pipeline's no_grad __call__ (e.g.
+        # update_prompt_embeds / prompt travel) on a near-full GPU.
         dtype = text_encoder.dtype if dtype is None else dtype
         device = text_encoder.device if device is None else device
 

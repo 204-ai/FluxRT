@@ -1,5 +1,5 @@
 {
-    "default_prompt" : "Make professional soft light: cyberpunk gaming room, red and violet light, soft streamer's light, warm white light, cinematic, beautiful, professional, bokeh",
+    "default_prompt" : "person with giant googly eyes",
     "default_steps" : 2,
     "default_seed" : 52,
     "models_path" : "FLUX.2-klein-4B",
@@ -20,6 +20,10 @@
     "reference_image_resolution": {
         "height" : 256,
         "width" : 256
+    },
+    "lip_transfer": {
+        "enable": true,
+        "models_dir": "LivePortrait/liveportrait"
     },
     "logging": true
 }

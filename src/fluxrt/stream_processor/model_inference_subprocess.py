@@ -8,6 +8,21 @@ from multiprocessing import Process, Value, Manager
 from queue import Empty
 from PIL import Image
 
+# ── torch.compile / Dynamo tuning ─────────────────────────────────────────────
+# The spatial-cache transformer in transformer_flux2.py specializes Dynamo
+# graphs on (a) per-block KV cache indexing (single_block_keys[block_id] for 20
+# distinct block_id values) and (b) sparse_mlp_compute() shapes that change
+# with the per-frame active-token mask. The default recompile_limit (8) gives
+# up partway and falls back to eager mode for the remaining graphs, costing
+# ~10-25% throughput. Raising the limit lets every variant compile, then warm
+# up once and stay hot.
+try:
+    torch._dynamo.config.recompile_limit = 64
+    torch._dynamo.config.cache_size_limit = 256
+except AttributeError:
+    # Older torch builds without _dynamo.config — skip silently; nothing breaks.
+    pass
+
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.models import AutoencoderKLFlux2
 from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM, AutoConfig
@@ -26,6 +41,37 @@ from fluxrt.stream_processor.postprocessors import (
 from fluxrt.flow_upscaler.upscaler_unet import UpscalerUNet
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
 from fluxrt.stream_processor.flux_tiny_vae import DiffusersTAEF2Wrapper
+
+
+def slerp(a: torch.Tensor, b: torch.Tensor, t: float, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Spherical-linear interpolation between two prompt-embedding tensors.
+
+    `a` and `b` are treated as single flattened vectors. slerp keeps the
+    interpolant's norm roughly constant through the midpoint, which avoids the
+    washed-out / low-contrast middle that plain lerp can produce on conditioning
+    tensors. Computed in float32 for numerical stability, then cast back to the
+    input dtype (the embeddings are bfloat16). Falls back to lerp when the two
+    vectors are nearly colinear (sin(theta) -> 0).
+    """
+    # Compute only the angle/weights in float32 (scalars — cheap, numerically
+    # stable). The flattened float32 copies used for the dot product are
+    # transient and freed immediately; the final blend is done in the input
+    # dtype (bfloat16) to avoid materializing a full-size float32 result every
+    # frame on the memory-tight prompt-travel hot path.
+    af, bf = a.flatten().float(), b.flatten().float()
+    dot = (af @ bf) / (af.norm() * bf.norm() + eps)
+    dot = dot.clamp(-1.0, 1.0)
+    # Fall back to lerp when nearly colinear in EITHER direction. Near-parallel
+    # (dot -> 1) slerp == lerp anyway; near-anti-parallel (dot -> -1) makes
+    # sin(theta) -> 0, so the slerp divisor blows up — lerp is the safe path.
+    if dot.abs() > 0.9995:
+        return torch.lerp(a, b, t)
+    theta = torch.acos(dot)
+    sin_theta = torch.sin(theta)
+    w_a = (torch.sin((1.0 - t) * theta) / sin_theta).to(a.dtype)
+    w_b = (torch.sin(t * theta) / sin_theta).to(a.dtype)
+    return w_a * a + w_b * b
 
 
 class ModelInferenceSubprocess:
@@ -51,10 +97,20 @@ class ModelInferenceSubprocess:
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
 
-        manager = Manager()
-        self.command_queue = manager.Queue()
-        self.shared_state = manager.dict()
+        self._manager = Manager()
+        self.command_queue = self._manager.Queue()
+        self.shared_state = self._manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
+
+    def __getstate__(self):
+        # The subprocess is spawned via Process(target=self.process_main),
+        # which pickles `self`. The SyncManager holds a weakref and is not
+        # picklable, so drop it from the child's state. Only the parent calls
+        # stop(), where _manager still exists; the picklable queue/dict
+        # proxies the child actually uses are kept.
+        state = self.__dict__.copy()
+        state.pop("_manager", None)
+        return state
 
     def enable_quantization(self):
         """
@@ -70,6 +126,9 @@ class ModelInferenceSubprocess:
             "steps": self.config["default_steps"],
             "seed": self.config["default_seed"],
         }
+        # Active prompt-travel state, or None when no morph is in progress.
+        # Populated by _begin_prompt_travel(), advanced in process_main().
+        self._travel = None
 
     def load_models_without_quantization(self):
         device = self.device
@@ -221,7 +280,69 @@ class ModelInferenceSubprocess:
             max_sequence_length=512,
             text_encoder_out_layers=(9, 18, 27),
         )
+        # A direct prompt set cancels any in-progress morph.
+        self._travel = None
         self.update_controller.reset_cache()
+
+    def _begin_prompt_travel(self, payload: dict) -> None:
+        """
+        Worker-side handler: pre-encode the target prompt ONCE and arm the
+        travel state. Encoding (the text-encoder forward) is the expensive part,
+        so it must not run per frame — only the cheap blend does.
+        """
+        target_prompt = payload["prompt"]
+        frames = max(1, int(payload.get("frames", 48)))
+        mode = payload.get("mode", "slerp")
+        target_embeds, _ = self.pipe.encode_prompt(
+            prompt=target_prompt,
+            device=self.device,
+            num_images_per_prompt=1,
+            max_sequence_length=512,
+            text_encoder_out_layers=(9, 18, 27),
+        )
+        self._travel = {
+            "src": self.prompt_embeds,
+            "tgt": target_embeds,
+            "n": frames,
+            "i": 0,
+            "mode": mode,
+            "prompt": target_prompt,
+        }
+
+    def _advance_prompt_travel(self) -> None:
+        """
+        Called once per generated frame. Advances an in-progress morph by one
+        step: blends src->tgt embeddings and forces a full-frame execute so the
+        new conditioning actually reaches every pixel.
+        """
+        tv = self._travel
+        if tv is None:
+            return
+
+        # Advance first so the morph renders exactly tv["n"] frames, every one of
+        # them showing progress: the first frame is at t=1/n (not t=0, which
+        # would be the unchanged source) and the last is at t=n/n=1.0 (target).
+        tv["i"] += 1
+        t = tv["i"] / tv["n"]
+        if tv["mode"] == "lerp":
+            self.prompt_embeds = torch.lerp(tv["src"], tv["tgt"], t)
+        else:
+            self.prompt_embeds = slerp(tv["src"], tv["tgt"], t)
+
+        # Force the whole image to execute this frame. The spatial cache would
+        # otherwise skip static tokens and the interpolated prompt would never
+        # appear (text-only invalidation does not propagate to cached image
+        # tokens). Recompute text K/V too, but leave the reference-image cache
+        # intact so it is not re-encoded every frame.
+        self.update_controller.requires_reset = True
+        self.update_controller.text_is_valid = False
+
+        if tv["i"] >= tv["n"]:
+            # Final frame was rendered at t=1.0 above; snap exactly onto the
+            # target embeds and update tracked prompt state.
+            self.prompt_embeds = tv["tgt"]
+            self.process_state["prompt"] = tv["prompt"]
+            self._travel = None
 
     def init_shared_tensors(self):
         height, width = self.resolution["height"], self.resolution["width"]
@@ -281,7 +402,25 @@ class ModelInferenceSubprocess:
     def stop(self):
         self.running.value = False
         if self.process:
-            self.process.join()
+            # Graceful first: let process_main observe running=False and exit
+            # its loop. Escalate to terminate/kill if it is wedged in CUDA,
+            # torch.compile, or a blocking call so Ctrl+C never hangs.
+            self.process.join(timeout=5)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=3)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=2)
+            self.process = None
+        # Tear down the Manager process spawned in __init__; otherwise it
+        # lingers as an orphan after the main process exits.
+        if getattr(self, "_manager", None) is not None:
+            try:
+                self._manager.shutdown()
+            except Exception:
+                pass
+            self._manager = None
 
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
@@ -312,6 +451,22 @@ class ModelInferenceSubprocess:
 
     def set_lip_transfer(self, enabled: bool) -> None:
         self.command_queue.put(("set_lip_transfer", enabled))
+
+    def start_prompt_travel(
+        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+    ) -> None:
+        """
+        Smoothly interpolate the conditioning from the current prompt to
+        `target_prompt` over `frames` generated frames. `mode` is "slerp" or
+        "lerp". Enqueues onto the command queue; handled in the inference
+        subprocess by _begin_prompt_travel / _advance_prompt_travel.
+        """
+        self.command_queue.put(
+            (
+                "start_prompt_travel",
+                {"prompt": target_prompt, "frames": int(frames), "mode": mode},
+            )
+        )
 
     def update_process_state(self) -> None:
         """
@@ -353,6 +508,9 @@ class ModelInferenceSubprocess:
 
                 elif cmd == "set_lip_transfer":
                     self.lip_active = payload
+
+                elif cmd == "start_prompt_travel":
+                    self._begin_prompt_travel(payload)
 
         except Empty:
             pass
@@ -483,6 +641,7 @@ class ModelInferenceSubprocess:
         prev_time = time.time()
         while self.running.value:
             self.update_process_state()
+            self._advance_prompt_travel()
             original_frame = self.input_shared_tensor.to_numpy()
             original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
             frame = self.process_frame_with_pipeline(original_frame)

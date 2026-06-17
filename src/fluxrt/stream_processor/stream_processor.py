@@ -70,14 +70,31 @@ class StreamProcessor:
         return self.output_shared_tensor
 
     def stop(self) -> None:
-        self.model_inference_subprocess.stop()
-        self.output_scheduler_subprocess.stop()
-        self.input_shared_tensor.close_and_unlink()
-        self.output_shared_tensor.close_and_unlink()
-        self.output_batch_shared_tensor.close_and_unlink()
+        # Run every teardown step even if an earlier one raises, so a single
+        # failure can't leak subprocesses or shared-memory segments.
+        for step in (
+            self.model_inference_subprocess.stop,
+            self.output_scheduler_subprocess.stop,
+            self.input_shared_tensor.close_and_unlink,
+            self.output_shared_tensor.close_and_unlink,
+            self.output_batch_shared_tensor.close_and_unlink,
+        ):
+            try:
+                step()
+            except Exception as exc:
+                print(f"StreamProcessor.stop: {step.__qualname__} failed: {exc}")
 
     def set_prompt(self, prompt: str) -> None:
         self.model_inference_subprocess.set_param(name="prompt", value=prompt)
+
+    def start_prompt_travel(
+        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+    ) -> None:
+        """Smoothly morph from the current prompt to target_prompt over
+        `frames` generated frames (mode: "slerp" or "lerp")."""
+        self.model_inference_subprocess.start_prompt_travel(
+            target_prompt, frames, mode
+        )
 
     def set_steps(self, steps: int) -> None:
         self.model_inference_subprocess.set_param(name="steps", value=steps)
