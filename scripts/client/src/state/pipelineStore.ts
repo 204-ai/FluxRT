@@ -3,10 +3,37 @@
 // renderable state.
 
 import { create } from 'zustand'
-import { inputVision, rail, videoSource } from './runtime'
+import { acquireVideoSource, inputVision, rail, releaseVideoSource, videoSource } from './runtime'
 import { getHealthz } from '../lib/api'
-import type { BlendMode, LayerId, LayerOptions, LayerTransform } from '../pipeline/core/types'
-import { defaultComposite, hasVideoTrack } from '../pipeline/core/types'
+import type { BlendMode, ClipId, LayerId, LayerTransform } from '../pipeline/core/types'
+import { hasVideoTrack } from '../pipeline/core/types'
+import type { Layer } from './layerModel'
+import { activeClip, freshId, layerById, makeClip, seedLayers } from './layerModel'
+
+/** Transient transport state for an ADDED (overlay) video clip, keyed by clip
+ *  id. The seeded video layer keeps the singular video* fields above; extra
+ *  layers each track their own playback here so the pool stays decoupled. */
+interface ExtraVideoState {
+  name: string
+  duration: number
+  currentTime: number
+  playing: boolean
+  loop: boolean
+  rate: number
+}
+
+// Per-added-clip <video> event detachers, mirroring the seeded layer's
+// listeners — kept module-level so a removed layer never strands handlers.
+const extraDetachers = new Map<string, () => void>()
+
+// Live getDisplayMedia streams for screen-share layers, keyed by layer id —
+// stopped on layer removal so the browser's "sharing" indicator clears.
+const screenStreams = new Map<string, MediaStream>()
+
+/** Immutable per-layer patch by id (the store holds layers as an ordered list). */
+function patchLayer(layers: Layer[], id: LayerId, patch: Partial<Layer>): Layer[] {
+  return layers.map((l) => (l.id === id ? { ...l, ...patch } : l))
+}
 
 export type DrawMode = 'off' | 'brush' | 'eraser'
 
@@ -31,8 +58,12 @@ interface PipelineState {
   videoLoop: boolean
   videoRate: number
 
-  // Per-layer mix for the camera / video / feedback stack (front → back).
-  layers: Record<LayerId, LayerOptions>
+  // The compositing stack, ordered front → back (top row frontmost). Holds the
+  // per-layer mix + geometry + cells/clips. Seeded with the three legacy layers;
+  // dynamic add/remove/reorder lands in P2.
+  layers: Layer[]
+  // Transport for ADDED (overlay) video layers, keyed by their clip id.
+  extraVideo: Record<string, ExtraVideoState>
   // The feedback layer is live only while a remote output stream is connected.
   feedbackAvailable: boolean
 
@@ -73,6 +104,28 @@ interface PipelineState {
 
   setLayerOpacity(id: LayerId, opacity: number): void
   setLayerBlend(id: LayerId, blend: BlendMode): void
+  /** Move a layer up (-1, toward the front) or down (+1) in the z-order; the
+   *  composite re-stacks live (no restart). */
+  moveLayer(id: LayerId, dir: -1 | 1): void
+  /** Add a new video layer (front) from a file. With a running pipeline this
+   *  hot-adds a live overlay (its own pooled <video> source) with no restart;
+   *  with nothing running it falls back to loading the seeded video layer. */
+  addVideoLayer(file: File): Promise<void>
+  /** Remove an ADDED layer: drop its source + composite slot + pooled state.
+   *  (The seeded camera/video/feedback layers are not removed here.) */
+  removeLayer(id: LayerId): Promise<void>
+  toggleExtraVideoPlay(clipId: string): void
+  seekExtraVideo(clipId: string, t: number): void
+  setExtraVideoLoop(clipId: string, on: boolean): void
+  setExtraVideoRate(clipId: string, r: number): void
+  /** Add a screen-share layer (getDisplayMedia) as a live overlay — proves a
+   *  new mediastream clip kind needs only a registry entry + an acquire (no
+   *  pipeline/worker change). */
+  addScreenLayer(): Promise<void>
+
+  // The clip selected for the detail pane + highlight (null = none).
+  selectedClipId: ClipId | null
+  selectClip(id: ClipId | null): void
   /** Wire the remote output stream in/out as the feedback layer (null = clear). */
   attachFeedback(stream: MediaStream | null): void
 
@@ -146,6 +199,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     }
   }
 
+  // Seed once so the default selection (camera clip) matches the seeded layers.
+  const initialLayers = seedLayers()
+
   return {
     camEnabled: false,
     devices: [],
@@ -162,7 +218,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     videoLoop: true,
     videoRate: 1,
 
-    layers: defaultComposite(),
+    layers: initialLayers,
+    extraVideo: {},
+    selectedClipId: activeClip(initialLayers[0])?.id ?? null,
     feedbackAvailable: false,
 
     drawMode: 'off',
@@ -276,6 +334,19 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       })
       log('Input pipeline started: ' + label)
       set({ active: true })
+      // Re-bind any added (overlay) video layers onto the freshly-built backend
+      // so a source-set restart doesn't drop them — their mix already rode along
+      // in rail.composite (op:'add'); only the live source needs re-attaching.
+      // The seeded camera/video/feedback re-attach via the SourceSet/feedback.
+      for (const layer of get().layers) {
+        const clip = activeClip(layer)
+        if (clip && get().extraVideo[clip.id]) {
+          rail.setLayerSource(layer.id, 'video', acquireVideoSource(clip.id).el)
+        } else if (clip?.kind === 'screen') {
+          const s = screenStreams.get(layer.id)
+          if (s) rail.setLayerSource(layer.id, 'screen', s)
+        }
+      }
     },
 
     stopPipeline() {
@@ -398,12 +469,206 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     },
 
     setLayerOpacity(id, opacity) {
-      set((s) => ({ layers: { ...s.layers, [id]: { ...s.layers[id], opacity } } }))
-      rail.setComposite({ [id]: { opacity } })
+      set((s) => ({ layers: patchLayer(s.layers, id, { opacity }) }))
+      rail.setComposite({ op: 'patch', layers: [{ id, opacity }] })
     },
     setLayerBlend(id, blend) {
-      set((s) => ({ layers: { ...s.layers, [id]: { ...s.layers[id], blend } } }))
-      rail.setComposite({ [id]: { blend } })
+      set((s) => ({ layers: patchLayer(s.layers, id, { blend }) }))
+      rail.setComposite({ op: 'patch', layers: [{ id, blend }] })
+    },
+    moveLayer(id, dir) {
+      const layers = get().layers
+      const i = layers.findIndex((l) => l.id === id)
+      const j = i + dir
+      if (i < 0 || j < 0 || j >= layers.length) return
+      const next = layers.slice()
+      ;[next[i], next[j]] = [next[j], next[i]]
+      set({ layers: next })
+      // Re-stack the live composite to match — z-order changes immediately.
+      rail.setComposite({ op: 'reorder', order: next.map((l) => l.id) })
+    },
+
+    async addVideoLayer(file) {
+      const { log } = get()
+      // Nothing running yet → load into the seeded video layer (keeps the
+      // proven base/start path); extra layers are always live overlays.
+      if (!get().active) {
+        await get().loadVideoFile(file)
+        return
+      }
+      try {
+        const clip = makeClip('video', file.name)
+        const layerId = freshId('layer')
+        const cellId = freshId('cell')
+        const src = acquireVideoSource(clip.id)
+        const meta = await src.load(file)
+        src.setLoop(true)
+        src.setRate(1)
+        // Per-clip transport listeners (mirror of the seeded layer's).
+        const el = src.el
+        const onTime = () =>
+          set((s) => ({
+            extraVideo: {
+              ...s.extraVideo,
+              [clip.id]: { ...s.extraVideo[clip.id], currentTime: el.currentTime },
+            },
+          }))
+        const onDur = () =>
+          set((s) => ({
+            extraVideo: { ...s.extraVideo, [clip.id]: { ...s.extraVideo[clip.id], duration: el.duration } },
+          }))
+        const onPlay = () =>
+          set((s) => ({
+            extraVideo: { ...s.extraVideo, [clip.id]: { ...s.extraVideo[clip.id], playing: true } },
+          }))
+        const onPause = () =>
+          set((s) => ({
+            extraVideo: { ...s.extraVideo, [clip.id]: { ...s.extraVideo[clip.id], playing: false } },
+          }))
+        el.addEventListener('timeupdate', onTime)
+        el.addEventListener('durationchange', onDur)
+        el.addEventListener('play', onPlay)
+        el.addEventListener('pause', onPause)
+        extraDetachers.set(clip.id, () => {
+          el.removeEventListener('timeupdate', onTime)
+          el.removeEventListener('durationchange', onDur)
+          el.removeEventListener('play', onPlay)
+          el.removeEventListener('pause', onPause)
+        })
+
+        const layer: Layer = {
+          id: layerId,
+          name: file.name,
+          opacity: 1,
+          blend: 'normal',
+          cells: [{ id: cellId, clip }],
+          activeCellId: cellId,
+        }
+        set((s) => ({
+          layers: [layer, ...s.layers],
+          extraVideo: {
+            ...s.extraVideo,
+            [clip.id]: {
+              name: file.name,
+              duration: meta.duration,
+              currentTime: 0,
+              playing: true,
+              loop: true,
+              rate: 1,
+            },
+          },
+        }))
+        // Add the layer to the live composite (frontmost) then hot-bind its
+        // source — both in place, no restart, output track stays alive.
+        rail.setComposite({ op: 'add', layer: { id: layerId, opacity: 1, blend: 'normal', mirror: false }, index: 0 })
+        rail.setLayerSource(layerId, 'video', el)
+        log(`Video layer added: ${file.name} (${meta.width}x${meta.height}, ${fmtTime(meta.duration)})`)
+      } catch (e) {
+        log('Add video layer failed: ' + (e instanceof Error ? e.message : e))
+      }
+    },
+
+    async removeLayer(id) {
+      const layer = layerById(get().layers, id)
+      if (!layer) return
+      const clip = activeClip(layer)
+      // Drop the live source + composite slot in place (output stays alive).
+      rail.setLayerSource(id, clip?.kind ?? 'video', null)
+      rail.setComposite({ op: 'remove', id })
+      if (clip) {
+        extraDetachers.get(clip.id)?.()
+        extraDetachers.delete(clip.id)
+        releaseVideoSource(clip.id)
+      }
+      const screen = screenStreams.get(id)
+      if (screen) {
+        screen.getTracks().forEach((t) => {
+          try {
+            t.stop()
+          } catch {
+            /* already stopped */
+          }
+        })
+        screenStreams.delete(id)
+      }
+      set((s) => {
+        const extraVideo = { ...s.extraVideo }
+        if (clip) delete extraVideo[clip.id]
+        const layers = s.layers.filter((l) => l.id !== id)
+        // Re-select the frontmost remaining clip if the selected one is gone.
+        const selectedClipId =
+          clip && s.selectedClipId === clip.id
+            ? (layers[0] ? activeClip(layers[0]) : null)?.id ?? null
+            : s.selectedClipId
+        return { layers, extraVideo, selectedClipId }
+      })
+      if (get().layoutLayer === id) set({ layoutLayer: null })
+    },
+
+    toggleExtraVideoPlay(clipId) {
+      const el = acquireVideoSource(clipId).el
+      if (el.paused) {
+        if (el.ended && !get().extraVideo[clipId]?.loop) el.currentTime = 0
+        void el.play().catch((e) => get().log('Video play failed: ' + e))
+      } else {
+        el.pause()
+      }
+    },
+    seekExtraVideo(clipId, t) {
+      acquireVideoSource(clipId).seek(t)
+      set((s) => ({
+        extraVideo: { ...s.extraVideo, [clipId]: { ...s.extraVideo[clipId], currentTime: t } },
+      }))
+    },
+    setExtraVideoLoop(clipId, on) {
+      acquireVideoSource(clipId).setLoop(on)
+      set((s) => ({ extraVideo: { ...s.extraVideo, [clipId]: { ...s.extraVideo[clipId], loop: on } } }))
+    },
+    setExtraVideoRate(clipId, r) {
+      acquireVideoSource(clipId).setRate(r)
+      set((s) => ({ extraVideo: { ...s.extraVideo, [clipId]: { ...s.extraVideo[clipId], rate: r } } }))
+    },
+
+    async addScreenLayer() {
+      const { log } = get()
+      if (!get().active) {
+        log('Start the camera or a video before adding a screen layer.')
+        return
+      }
+      const getDisplay = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices)
+      if (!getDisplay) {
+        log('Screen share unavailable in this browser.')
+        return
+      }
+      let stream: MediaStream
+      try {
+        stream = await getDisplay({ video: true, audio: false })
+      } catch (e) {
+        log('Screen share cancelled: ' + (e instanceof Error ? e.message : e))
+        return
+      }
+      const clip = makeClip('screen', 'Screen')
+      const layerId = freshId('layer')
+      const cellId = freshId('cell')
+      const layer: Layer = {
+        id: layerId,
+        name: 'Screen',
+        opacity: 1,
+        blend: 'normal',
+        cells: [{ id: cellId, clip }],
+        activeCellId: cellId,
+      }
+      screenStreams.set(layerId, stream)
+      // The user can stop sharing from the browser chrome — drop the layer then.
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => void get().removeLayer(layerId))
+      set((s) => ({ layers: [layer, ...s.layers], selectedClipId: clip.id }))
+      rail.setComposite({ op: 'add', layer: { id: layerId, opacity: 1, blend: 'normal', mirror: false }, index: 0 })
+      rail.setLayerSource(layerId, 'screen', stream)
+      log('Screen layer added')
+    },
+
+    selectClip(id) {
+      set({ selectedClipId: id })
     },
     attachFeedback(stream) {
       const ok = hasVideoTrack(stream)
@@ -428,12 +693,10 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       set({ cropMode: on })
     },
     setLayerTransform(id, transform) {
-      set((s) => ({
-        layers: { ...s.layers, [id]: { ...s.layers[id], transform: transform ?? undefined } },
-      }))
+      set((s) => ({ layers: patchLayer(s.layers, id, { transform: transform ?? undefined }) }))
       // Carry the value explicitly (incl. undefined) so the patch resets the
       // compositor layer back to legacy cover-fit when cleared.
-      rail.setComposite({ [id]: { transform: transform ?? undefined } })
+      rail.setComposite({ op: 'patch', layers: [{ id, transform: transform ?? undefined }] })
     },
 
     setDrawMode(mode) {

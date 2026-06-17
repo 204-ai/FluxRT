@@ -2,6 +2,9 @@
 // beyond canvas — the same effect code runs on the main thread (canvas
 // backend) and inside the pipeline worker (WebCodecs streams backend).
 
+import type { ClipKind } from './clipKinds'
+export type { ClipKind } from './clipKinds'
+
 export type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 
 export interface FrameInfo {
@@ -35,16 +38,25 @@ export type RailBackendKind = 'streams' | 'canvas'
 
 export type BlendMode = 'normal' | 'screen' | 'multiply' | 'difference'
 
-/** The compositing layers in stack order, front → back — the panel stacks them
- *  top to bottom in this order. Camera is frontmost; feedback (the previous
- *  output fed back in) is the backmost field the front layers paint over. Single
- *  source of truth: the layer type, default factory, and merge loop all derive
- *  from this, so adding/reordering a layer is one edit. */
-export const LAYER_IDS = ['camera', 'video', 'feedback'] as const
-export type LayerId = (typeof LAYER_IDS)[number]
+// ---------------------------------------------------------------------------
+// Dynamic layer/clip model (Resolume-style). The compositing stack is an
+// ORDERED list of layers, front → back (the panel's top row is frontmost).
+// Each layer carries its mix (opacity/blend), geometry (transform) and a
+// per-layer selfie flip (mirror) — there is no fixed camera/video/feedback
+// set. Which clip currently feeds a layer is tracked separately (the worker /
+// backend hold the live frames keyed by layer id); the compositor only needs
+// the per-layer RENDER options below.
+// ---------------------------------------------------------------------------
+
+/** Opaque per-layer instance id (was the closed 'camera'|'video'|'feedback'
+ *  union). Stable across a layer's lifetime. */
+export type LayerId = string
+/** Opaque per-clip instance id, stable across activation/deactivation. */
+export type ClipId = string
 
 /** Per-layer mix: every layer blends onto the accumulated result beneath it
- *  with its own opacity + blend — not just the top one. */
+ *  with its own opacity + blend — not just the top one. (The geometry/render
+ *  payload the compositor consumes; clip identity lives in the store/worker.) */
 export interface LayerOptions {
   /** 0..1 */
   opacity: number
@@ -53,6 +65,109 @@ export interface LayerOptions {
    *  source center-cropped to fill the canvas), so an untouched layer is
    *  unchanged. Materialized to identity on first edit. */
   transform?: LayerTransform
+}
+
+/** The render payload for ONE layer the compositor draws: its mix + geometry +
+ *  per-layer selfie flip, tagged with the layer id so frames can be matched to
+ *  it. `mirror` replaces the old global camera-only flip (it now belongs to the
+ *  layer, seeded from the active clip's kind). */
+export interface LayerRender extends LayerOptions {
+  id: LayerId
+  mirror: boolean
+}
+
+/** The whole compositing stack, ORDERED front → back (top row first). */
+export type Composite = LayerRender[]
+
+/** A structural / mix edit to the composite. A plain Record patch can't express
+ *  order, insert or delete, so structure is mutated through explicit ops. */
+export type LayerMixPatch = { id: LayerId } & Partial<Omit<LayerRender, 'id'>>
+export type CompositeOp =
+  | { op: 'patch'; layers: LayerMixPatch[] }
+  | { op: 'add'; layer: LayerRender; index?: number }
+  | { op: 'remove'; id: LayerId }
+  | { op: 'reorder'; order: LayerId[] }
+
+// --- Migration seed -------------------------------------------------------
+// Stable ids for the three legacy layers. The store/UI still seed exactly these
+// during P0/P1 so behavior is byte-identical; once the store is dynamic
+// (P1) and add/remove lands (P2) these are just the default starting layers.
+export const CAMERA_LAYER: LayerId = 'camera'
+export const VIDEO_LAYER: LayerId = 'video'
+export const FEEDBACK_LAYER: LayerId = 'feedback'
+
+/** The kind each seeded layer's first clip is — used to seed `mirror` and to
+ *  drive backend source binding during migration. */
+export const SEED_LAYER_KIND: Record<LayerId, ClipKind> = {
+  [CAMERA_LAYER]: 'camera',
+  [VIDEO_LAYER]: 'video',
+  [FEEDBACK_LAYER]: 'feedback',
+}
+
+/** Legacy seed id list (front → back). Retained so migration-era UI
+ *  (TransformOverlay) and the store can enumerate the default layers; replaced
+ *  by reading `layers[]` once the store is dynamic. */
+export const LAYER_IDS = [CAMERA_LAYER, VIDEO_LAYER, FEEDBACK_LAYER] as const
+
+/** Fresh default mix — the three legacy layers, every layer fully visible
+ *  (opacity 1, normal blend), camera mirrored. Returns a new array each call so
+ *  each holder (compositor, rail) mutates its own copy. */
+export function defaultComposite(): Composite {
+  return [
+    { id: CAMERA_LAYER, opacity: 1, blend: 'normal', mirror: false },
+    { id: VIDEO_LAYER, opacity: 1, blend: 'normal', mirror: false },
+    { id: FEEDBACK_LAYER, opacity: 1, blend: 'normal', mirror: false },
+  ]
+}
+
+/** Apply a structural/mix op to a composite in place. Patch looks each layer up
+ *  by id (a flat Object.assign would clobber order); add/remove/reorder splice
+ *  the ordered list. Unknown ids are ignored (a patch for a removed layer is a
+ *  no-op, not a crash). */
+export function applyCompositeOp(target: Composite, op: CompositeOp): void {
+  switch (op.op) {
+    case 'patch':
+      for (const p of op.layers) {
+        const layer = target.find((l) => l.id === p.id)
+        if (!layer) continue
+        // Carry every field explicitly (incl. transform: undefined → reset to
+        // legacy cover-fit) so a patch that clears framing actually clears it.
+        const dst = layer as unknown as Record<string, unknown>
+        const src = p as unknown as Record<string, unknown>
+        for (const k of Object.keys(p)) {
+          if (k === 'id') continue
+          dst[k] = src[k]
+        }
+      }
+      break
+    case 'add': {
+      if (target.some((l) => l.id === op.layer.id)) break
+      const i = op.index ?? 0
+      target.splice(Math.max(0, Math.min(i, target.length)), 0, op.layer)
+      break
+    }
+    case 'remove': {
+      const i = target.findIndex((l) => l.id === op.id)
+      if (i >= 0) target.splice(i, 1)
+      break
+    }
+    case 'reorder': {
+      const byId = new Map(target.map((l) => [l.id, l]))
+      const next: Composite = []
+      for (const id of op.order) {
+        const l = byId.get(id)
+        if (l) {
+          next.push(l)
+          byId.delete(id)
+        }
+      }
+      // Any layer not named in the order keeps its relative position at the end.
+      for (const l of target) if (byId.has(l.id)) next.push(l)
+      target.length = 0
+      target.push(...next)
+      break
+    }
+  }
 }
 
 /**
@@ -156,42 +271,17 @@ export function layerDrawRects(
   return { sx, sy, sw, sh, dx, dy, dw, dh }
 }
 
-/** Mix settings for the whole stack. Layers are drawn back-to-front (feedback,
- *  then video, then camera) over an opaque base, so the panel's top row is on top. */
-export type CompositeOptions = Record<LayerId, LayerOptions>
-
-/** A live tweak to one or more layers — each layer's fields are optional. */
-export type CompositePatch = Partial<Record<LayerId, Partial<LayerOptions>>>
-
-/** Fresh default mix — every layer fully visible (opacity 1, normal blend), the
- *  standard layers-panel default. Returns a new object each call so each holder
- *  (compositor, rail, store) mutates its own copy. */
-export function defaultComposite(): CompositeOptions {
-  return {
-    camera: { opacity: 1, blend: 'normal' },
-    video: { opacity: 1, blend: 'normal' },
-    feedback: { opacity: 1, blend: 'normal' },
-  }
-}
-
-/** Apply a patch in place, per layer — a flat Object.assign would drop the
- *  untouched field (a blend-only patch must keep the layer's opacity). */
-export function mergeComposite(target: CompositeOptions, patch: CompositePatch): void {
-  for (const id of LAYER_IDS) {
-    const p = patch[id]
-    if (p) Object.assign(target[id], p)
-  }
-}
-
 /** True when a stream carries at least one video track usable as a layer. */
 export function hasVideoTrack(stream: MediaStream | null | undefined): boolean {
   return !!stream && stream.getVideoTracks().length > 0
 }
 
 /**
- * Input layers for a rail session. At least one must be non-null. The camera
+ * Input layers for a rail START. At least one must be non-null. The camera
  * layer (when present) is the base: it sets canvas dims, drives the frame
- * cadence, and is the vision-tap source.
+ * cadence, and is the vision-tap source; otherwise the video file is the base.
+ * Additional layers (feedback, extra clips) hot-attach after start via
+ * RailBackend.setLayerSource — start carries only the cadence-eligible sources.
  */
 export interface SourceSet {
   cameraStream: MediaStream | null
@@ -202,8 +292,7 @@ export interface RailStartOptions {
   width: number
   height: number
   fps: number
-  mirrored: boolean
-  composite: CompositeOptions
+  composite: Composite
   effects: EffectInit[]
 }
 
@@ -212,9 +301,13 @@ export interface EffectInit {
   config: Record<string, unknown>
 }
 
-/** Callback receiving sampled COMPOSITE frames (already mirrored when the
- *  camera mirror is on) for analysis. */
+/** Callback receiving sampled COMPOSITE frames (already mirrored when a layer's
+ *  mirror is on) for analysis. */
 export type TapCallback = (frame: ImageBitmap, tsMs: number) => void
+
+/** A live source for one layer handed to a backend: a MediaStream (camera /
+ *  feedback) or an <video> element (file). null removes the layer's source. */
+export type LayerSourceInput = MediaStream | HTMLVideoElement | null
 
 export interface RailBackend {
   readonly kind: RailBackendKind
@@ -223,26 +316,18 @@ export interface RailBackend {
   readonly outputStream: MediaStream
   start(opts: RailStartOptions, sources: SourceSet): Promise<void>
   stop(): void
-  setMirror(on: boolean): void
-  setComposite(patch: CompositePatch): void
-  /** Set (or clear, with null) the feedback layer — the remote output stream
-   *  fed back in. Hot add/remove in place, like the video overlay; no restart. */
-  setFeedback(stream: MediaStream | null): void
+  /** Apply a structural/mix op to the composite (patch/add/remove/reorder).
+   *  Hot — never restarts; mirror is just a per-layer field in a patch. */
+  setComposite(op: CompositeOp): void
+  /** Bind (or clear, with null source) one layer's live source IN PLACE — the
+   *  generalized hot add/swap/remove that keeps the output track alive (no
+   *  restart, no WebRTC renegotiation). `kind` tells the backend how to cross
+   *  the source in (mediastream / clone / element). */
+  setLayerSource(id: LayerId, kind: ClipKind, source: LayerSourceInput): void
   configureEffect(name: string, patch: Record<string, unknown>): void
   effectMessage(name: string, data: unknown): void
   busPush(key: string, value: unknown): void
   /** Sample source frames at most every `intervalMs`; null disables the tap. */
   setTap(intervalMs: number, cb: TapCallback | null): void
-  /** Hot-swap the video-file input in place — re-feed the element's
-   *  (re-captured) video track WITHOUT recreating the output track, so the
-   *  WebRTC stream keeps flowing. */
-  swapVideo(videoEl: HTMLVideoElement): void
-  /** Hot-swap the camera input in place — feed the new device's track without
-   *  recreating the output track (no pipeline restart / WebRTC renegotiation). */
-  swapCamera(cameraStream: MediaStream): void
-  /** Hot-REMOVE the video-file overlay in place — drop the overlay layer while
-   *  the camera keeps feeding, WITHOUT recreating the output track (mirror of
-   *  swapVideo). No-op when there is no overlay. */
-  clearVideo(): void
   snapshot(type?: string): Promise<Blob>
 }

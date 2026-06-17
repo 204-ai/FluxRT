@@ -236,6 +236,35 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
 
 /* ── compact "layers" panel: camera / video / feedback (top row = frontmost) ── */
 .layer-stack { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px; }
+/* a stack row = reorder handles + the kind body (which is a .layer-row) */
+.layer-row-wrap { display: flex; align-items: stretch; gap: 4px; }
+.layer-row-wrap > .layer-row,
+.layer-row-wrap > .video-row { flex: 1 1 auto; min-width: 0; }
+.layer-reorder { flex: 0 0 auto; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+.layer-reorder .icon-btn { width: 22px; height: 18px; font-size: 9px; line-height: 1; padding: 0; }
+.layer-remove { flex: 0 0 auto; align-self: center; font-size: 13px; }
+.layer-remove:not(:disabled) { color: #f87171; }
+.layer-add { display: flex; align-items: center; gap: 6px; padding-left: 26px; }
+.layer-add .drop-zone { flex: 1 1 auto; }
+.add-screen { flex: 0 0 auto; font-size: 11px; white-space: nowrap; padding: 4px 8px; }
+/* selected layer: highlight the inner row */
+.layer-row-wrap { cursor: pointer; }
+.layer-row-wrap.sel > .layer-row { border-color: #1f7a3a; }
+
+/* clip detail / inspector pane */
+.clip-detail {
+  margin: 0 14px 8px; padding: 8px 10px;
+  background: #141414; border: 1px solid #2a2a2a; border-radius: 6px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.clip-detail.empty { font-size: 11px; padding: 10px; }
+.clip-detail-head { display: flex; align-items: center; gap: 6px; }
+.clip-detail-icon { font-size: 14px; }
+.clip-detail-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-detail-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; margin-left: auto; }
+.clip-detail-meta { font-size: 10px; }
+.clip-detail-body { display: flex; flex-direction: column; gap: 6px; }
+.clip-detail-foot { display: flex; gap: 6px; }
 .layer-row {
   display: flex; align-items: center; gap: 8px;
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;

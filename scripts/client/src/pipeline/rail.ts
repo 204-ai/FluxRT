@@ -7,13 +7,23 @@ import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
 import type {
-  CompositeOptions,
-  CompositePatch,
+  ClipKind,
+  Composite,
+  CompositeOp,
+  LayerId,
+  LayerSourceInput,
   RailBackend,
   RailBackendKind,
   TapCallback,
 } from './core/types'
-import { defaultComposite, hasVideoTrack, mergeComposite } from './core/types'
+import {
+  applyCompositeOp,
+  CAMERA_LAYER,
+  defaultComposite,
+  FEEDBACK_LAYER,
+  hasVideoTrack,
+  VIDEO_LAYER,
+} from './core/types'
 import type { DrawLayerConfig, StrokeMessage } from './effects/drawLayer'
 import type { MarkerConfig } from './effects/marker'
 
@@ -63,12 +73,11 @@ function aspectDims(srcHeight: number, aspect: number): { width: number; height:
 export class Rail {
   private backend: RailBackend | null = null
   private rawStream: MediaStream | null = null
-  private mirrored = false
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
-  private composite: CompositeOptions = defaultComposite()
-  // The remote output stream fed back in as the bottom layer. Remembered so a
-  // pipeline restart (camera/video toggle) re-attaches it to the new backend.
+  private composite: Composite = defaultComposite()
+  // The remote output stream fed back in as a layer. Remembered so a pipeline
+  // restart (camera/video toggle) re-attaches it to the new backend.
   private feedbackStream: MediaStream | null = null
   // Draw ops recorded so a pipeline restart (which rebuilds the draw layer from
   // scratch) can replay the strokes instead of wiping the user's drawing. Each
@@ -129,7 +138,9 @@ export class Rail {
     }
 
     // Force the output aspect to match the server's generation aspect; the
-    // source is cover-cropped into it (no stretch/letterbox).
+    // source is cover-cropped into it (no stretch/letterbox). Dims are fixed at
+    // start and never derive from a single layer's liveness, so activating or
+    // deactivating a clip can never change them and force a restart.
     if (sources.targetAspect && sources.targetAspect > 0) {
       ;({ width, height } = aspectDims(height, sources.targetAspect))
     }
@@ -143,8 +154,7 @@ export class Rail {
         width,
         height,
         fps: 30,
-        mirrored: this.mirrored,
-        composite: { ...this.composite },
+        composite: this.composite,
         effects: [
           { name: 'marker', config: this.markerConfig },
           { name: 'drawLayer', config: this.drawConfig },
@@ -169,7 +179,7 @@ export class Rail {
     // start and tear down the whole input pipeline — just drop the feedback layer.
     if (this.feedbackStream) {
       try {
-        this.backend.setFeedback(this.feedbackStream)
+        this.backend.setLayerSource(FEEDBACK_LAYER, 'feedback', this.feedbackStream)
       } catch (e) {
         this.onLog('feedback re-attach failed: ' + (e instanceof Error ? e.message : e))
         this.feedbackStream = null
@@ -189,16 +199,23 @@ export class Rail {
     this.onOutputTrack = fn
   }
 
+  /** Hot add/swap/remove one layer's live source in place (no restart): keeps
+   *  the output stream/track alive. Generalizes the old swap-video/swap-camera/
+   *  clear-video/set-feedback paths. */
+  setLayerSource(id: LayerId, kind: ClipKind, source: LayerSourceInput): void {
+    this.backend?.setLayerSource(id, kind, source)
+  }
+
   /** Hot-swap the video-file source in place (no restart): re-feed the worker
    *  the element's new track while keeping the output stream/track alive. */
   swapVideoSource(videoEl: HTMLVideoElement): void {
-    this.backend?.swapVideo(videoEl)
+    this.backend?.setLayerSource(VIDEO_LAYER, 'video', videoEl)
   }
 
   /** Hot-remove the video-file overlay in place (no restart): drop the overlay
    *  layer while the camera keeps feeding and the output stream stays alive. */
   clearVideoSource(): void {
-    this.backend?.clearVideo()
+    this.backend?.setLayerSource(VIDEO_LAYER, 'video', null)
   }
 
   /** Hot-swap the camera device in place (no restart): acquire the new device's
@@ -215,7 +232,7 @@ export class Rail {
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       },
     })
-    this.backend.swapCamera(newStream)
+    this.backend.setLayerSource(CAMERA_LAYER, 'camera', newStream)
     // Stop the previous camera track now that the new one is feeding.
     this.rawStream?.getTracks().forEach((t) => {
       try {
@@ -240,21 +257,25 @@ export class Rail {
     this.rawStream = null
   }
 
+  /** Per-layer selfie flip. In the migration era this targets the camera layer
+   *  (selfie view) — once clips own their mirror (P1+) the store drives it via
+   *  a composite patch directly. */
   setMirror(on: boolean): void {
-    this.mirrored = on
-    this.backend?.setMirror(on)
+    this.setComposite({ op: 'patch', layers: [{ id: CAMERA_LAYER, mirror: on }] })
   }
 
-  setComposite(patch: CompositePatch): void {
-    mergeComposite(this.composite, patch)
-    this.backend?.setComposite(patch)
+  /** Apply a structural/mix op to the composite (patch/add/remove/reorder),
+   *  remembered so a pipeline restart re-establishes it. */
+  setComposite(op: CompositeOp): void {
+    applyCompositeOp(this.composite, op)
+    this.backend?.setComposite(op)
   }
 
   /** Set or clear the feedback layer — the remote output stream fed back into
    *  the input compositor. Remembered so a pipeline restart re-attaches it. */
   setFeedback(stream: MediaStream | null): void {
     this.feedbackStream = hasVideoTrack(stream) ? stream : null
-    this.backend?.setFeedback(this.feedbackStream)
+    this.backend?.setLayerSource(FEEDBACK_LAYER, 'feedback', this.feedbackStream)
   }
 
   configureMarker(patch: Partial<MarkerConfig>): void {
@@ -296,7 +317,7 @@ export class Rail {
     this.backend?.busPush(key, value)
   }
 
-  /** Sampled COMPOSITE frames (already mirrored when the camera mirror is on)
+  /** Sampled COMPOSITE frames (already mirrored when a layer's mirror is on)
    *  for the vision analyzer — NOT pre-mirror base frames. Consumers must treat
    *  landmarks as being in the same (mirrored) space the preview displays, so
    *  they render 1:1 with no extra flip (see marker.ts / OverlayCanvas). */

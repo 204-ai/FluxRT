@@ -6,6 +6,7 @@ import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { CanvasHost } from './CanvasHost'
 import { LayerStack } from './LayerStack'
+import { ClipDetail } from './ClipDetail'
 import { TransformOverlay } from './TransformOverlay'
 import { FullscreenButton } from '../FullscreenButton'
 import { OverlayCanvas } from '../sense/OverlayCanvas'
@@ -66,6 +67,7 @@ export function InputTab({ active }: { active: boolean }) {
       </div>
 
       <LayerStack />
+      <ClipDetail />
 
       <SensePanel />
     </section>

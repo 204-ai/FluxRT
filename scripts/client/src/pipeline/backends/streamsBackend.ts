@@ -1,17 +1,33 @@
 // WebCodecs/insertable-streams backend. Compositing runs in pipeline.worker;
-// this side owns the worker, the MSTP/MSTG pairs (camera + optional video
-// file layer), and a <video> preview element fed by the generator's output
-// stream. The video-file layer is captured via HTMLMediaElement.captureStream
-// — Chrome-only, but so is this backend.
+// this side owns the worker, the MSTP/MSTG pairs (one per layer source), and a
+// <video> preview element fed by the generator's output stream. Video-file
+// layers are captured via HTMLMediaElement.captureStream — Chrome-only, but so
+// is this backend.
 
 import type {
-  CompositePatch,
+  ClipKind,
+  CompositeOp,
   EffectInit,
+  LayerId,
+  LayerSourceInput,
   RailBackend,
   RailStartOptions,
   SourceSet,
   TapCallback,
 } from '../core/types'
+import { CAMERA_LAYER, VIDEO_LAYER } from '../core/types'
+import { clipMeta } from '../core/clipKinds'
+
+/** Backend-owned resources for one layer's live source, stopped on replace /
+ *  remove / shutdown. The camera stream is owned by the rail (not here). */
+interface OwnedSource {
+  /** captureStream() result for a video-file layer. */
+  capturedStream?: MediaStream
+  /** Our clone of a shared MediaStream track (e.g. the remote output → feedback;
+   *  one MediaStreamTrackProcessor per track, so we never process the shared
+   *  track directly). */
+  clonedTrack?: MediaStreamTrack
+}
 
 export class StreamsBackend implements RailBackend {
   readonly kind = 'streams' as const
@@ -20,11 +36,7 @@ export class StreamsBackend implements RailBackend {
 
   private worker: Worker | null = null
   private generator: MediaStreamTrackGenerator<VideoFrame> | null = null
-  private capturedStream: MediaStream | null = null
-  // Our CLONE of the remote output track fed to the feedback valve — one
-  // MediaStreamTrackProcessor is allowed per track, so we never process the
-  // shared remote track directly. We own (and stop) the clone.
-  private feedbackTrack: MediaStreamTrack | null = null
+  private owned = new Map<LayerId, OwnedSource>()
   private tapCb: TapCallback | null = null
   private onLog: (m: string) => void
 
@@ -37,19 +49,30 @@ export class StreamsBackend implements RailBackend {
   }
 
   async start(opts: RailStartOptions, sources: SourceSet): Promise<void> {
+    const layers: { id: LayerId; readable: ReadableStream<VideoFrame> | null }[] = []
+    const transfer: Transferable[] = []
+
     let cameraReadable: ReadableStream<VideoFrame> | null = null
     if (sources.cameraStream) {
       const [track] = sources.cameraStream.getVideoTracks()
       cameraReadable = new MediaStreamTrackProcessor({ track }).readable
+      layers.push({ id: CAMERA_LAYER, readable: cameraReadable })
+      transfer.push(cameraReadable as unknown as Transferable)
     }
 
     let videoReadable: ReadableStream<VideoFrame> | null = null
     if (sources.videoEl) {
       // Don't touch the element itself — playback state belongs to its owner.
-      this.capturedStream = sources.videoEl.captureStream()
-      const [track] = this.capturedStream.getVideoTracks()
+      const captured = sources.videoEl.captureStream()
+      this.owned.set(VIDEO_LAYER, { capturedStream: captured })
+      const [track] = captured.getVideoTracks()
       videoReadable = new MediaStreamTrackProcessor({ track }).readable
+      layers.push({ id: VIDEO_LAYER, readable: videoReadable })
+      transfer.push(videoReadable as unknown as Transferable)
     }
+
+    // Camera drives cadence/dims/tap when present; otherwise the video file.
+    const baseLayerId = sources.cameraStream ? CAMERA_LAYER : VIDEO_LAYER
 
     this.generator = new MediaStreamTrackGenerator<VideoFrame>({ kind: 'video' })
     this.outputStream = new MediaStream([this.generator])
@@ -70,18 +93,15 @@ export class StreamsBackend implements RailBackend {
         this.onLog('pipeline worker error: ' + m.message)
       }
     }
-    const transfer: Transferable[] = [this.generator.writable as unknown as Transferable]
-    if (cameraReadable) transfer.push(cameraReadable)
-    if (videoReadable) transfer.push(videoReadable)
+    transfer.push(this.generator.writable as unknown as Transferable)
     this.worker.postMessage(
       {
         type: 'init',
-        camera: cameraReadable,
-        video: videoReadable,
+        layers,
+        baseLayerId,
         writable: this.generator.writable,
         width: opts.width,
         height: opts.height,
-        mirrored: opts.mirrored,
         composite: opts.composite,
         effects: opts.effects satisfies EffectInit[],
       },
@@ -97,67 +117,129 @@ export class StreamsBackend implements RailBackend {
     this.worker = null
     this.generator?.stop()
     this.generator = null
-    this.capturedStream?.getTracks().forEach((t) => {
+    for (const owned of this.owned.values()) this.freeOwned(owned)
+    this.owned.clear()
+    this.previewEl.srcObject = null
+    this.tapCb = null
+  }
+
+  private freeOwned(owned: OwnedSource): void {
+    owned.capturedStream?.getTracks().forEach((t) => {
       try {
         t.stop()
       } catch {
         /* already stopped */
       }
     })
-    this.capturedStream = null
-    if (this.feedbackTrack) {
+    if (owned.clonedTrack) {
       try {
-        this.feedbackTrack.stop()
+        owned.clonedTrack.stop()
       } catch {
         /* already stopped */
       }
-      this.feedbackTrack = null
     }
-    this.previewEl.srcObject = null
-    this.tapCb = null
   }
 
-  setMirror(on: boolean): void {
-    this.worker?.postMessage({ type: 'mirror', on })
+  setComposite(op: CompositeOp): void {
+    this.worker?.postMessage({ type: 'composite', op })
   }
 
-  setComposite(patch: CompositePatch): void {
-    this.worker?.postMessage({ type: 'composite', patch })
-  }
-
-  setFeedback(stream: MediaStream | null): void {
+  setLayerSource(id: LayerId, kind: ClipKind, source: LayerSourceInput): void {
     if (!this.worker) return
-    const src = stream?.getVideoTracks()[0] ?? null
-    if (!src) {
-      // Hot-remove: tell the worker to drop the feedback valve and release our
-      // clone. The remote track itself belongs to the peer connection.
-      if (this.feedbackTrack) {
-        this.worker.postMessage({ type: 'clear-feedback' })
-        try {
-          this.feedbackTrack.stop()
-        } catch {
-          /* already stopped */
-        }
-        this.feedbackTrack = null
+    if (!source) {
+      this.worker.postMessage({ type: 'layer-source', id, readable: null })
+      const owned = this.owned.get(id)
+      if (owned) {
+        this.freeOwned(owned)
+        this.owned.delete(id)
       }
       return
     }
-    // Clone so we own an MSTP-eligible track (one processor per track; the
-    // remote track also feeds the output <video>, and a later restart needs a
-    // fresh clone for the new worker). Drop any previous clone we were feeding.
-    if (this.feedbackTrack) {
+    switch (clipMeta(kind).sourceForm) {
+      case 'mediastream':
+        this.bindMediaStream(id, source as MediaStream)
+        break
+      case 'mediastream-clone':
+        this.bindClonedStream(id, source as MediaStream)
+        break
+      case 'element':
+        this.bindElement(id, source as HTMLVideoElement)
+        break
+    }
+  }
+
+  /** Camera: process the track directly (getUserMedia tracks are live
+   *  immediately, no first-frame wait). The MediaStream is owned by the rail. */
+  private bindMediaStream(id: LayerId, stream: MediaStream): void {
+    const [track] = stream.getVideoTracks()
+    if (!track) {
+      this.onLog('setLayerSource: no video track for ' + id)
+      return
+    }
+    const readable = new MediaStreamTrackProcessor({ track }).readable
+    this.worker!.postMessage({ type: 'layer-source', id, readable }, [
+      readable as unknown as Transferable,
+    ])
+  }
+
+  /** Feedback: clone the shared remote track (one processor per track; the
+   *  remote track also feeds the output <video>). We own and stop the clone. */
+  private bindClonedStream(id: LayerId, stream: MediaStream): void {
+    const src = stream.getVideoTracks()[0]
+    if (!src) {
+      this.onLog('setLayerSource: no video track to clone for ' + id)
+      return
+    }
+    const prev = this.owned.get(id)
+    if (prev?.clonedTrack) {
       try {
-        this.feedbackTrack.stop()
+        prev.clonedTrack.stop()
       } catch {
         /* already stopped */
       }
     }
     const clone = src.clone()
-    this.feedbackTrack = clone
+    this.owned.set(id, { ...prev, clonedTrack: clone })
     const readable = new MediaStreamTrackProcessor({ track: clone }).readable
-    this.worker.postMessage({ type: 'set-feedback', video: readable }, [
+    this.worker!.postMessage({ type: 'layer-source', id, readable }, [
       readable as unknown as Transferable,
     ])
+  }
+
+  /** Video file: wait for the element's first presented frame so the
+   *  re-captured stream has a LIVE track before handing it to the worker
+   *  (re-capturing immediately would grab the old, just-ended track and freeze
+   *  the layer). A paused / autoplay-blocked element never fires rVFC, so also
+   *  fall back on a timer (the `sent` guard makes whichever fires first win). */
+  private bindElement(id: LayerId, videoEl: HTMLVideoElement): void {
+    let sent = false
+    const send = () => {
+      if (sent) return
+      sent = true
+      const w = this.worker
+      if (!w) return
+      // captureStream() returns the SAME MediaStream per element; on a src
+      // change the old track ends and a new one is added once the element
+      // presents frames. Do NOT stop the previous capture here — it IS this same
+      // stream, so stopping it would kill the just-added LIVE track. The old
+      // track ends on its own; the stream is freed on remove / stop.
+      const stream = videoEl.captureStream()
+      this.owned.set(id, { capturedStream: stream })
+      const tracks = stream.getVideoTracks()
+      const track = tracks.find((t) => t.readyState === 'live') ?? tracks[0]
+      if (!track) {
+        this.onLog('setLayerSource: no live video track after re-capture for ' + id)
+        return
+      }
+      const readable = new MediaStreamTrackProcessor({ track }).readable
+      w.postMessage({ type: 'layer-source', id, readable }, [readable as unknown as Transferable])
+    }
+    if ('requestVideoFrameCallback' in videoEl) {
+      videoEl.requestVideoFrameCallback(() => send())
+      setTimeout(send, 600)
+    } else {
+      send()
+    }
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {
@@ -175,71 +257,6 @@ export class StreamsBackend implements RailBackend {
   setTap(intervalMs: number, cb: TapCallback | null): void {
     this.tapCb = cb
     this.worker?.postMessage({ type: 'tap', intervalMs: cb ? intervalMs : 0 })
-  }
-
-  swapVideo(videoEl: HTMLVideoElement): void {
-    if (!this.worker) return
-    let sent = false
-    const send = () => {
-      if (sent) return
-      sent = true
-      const w = this.worker
-      if (!w) return
-      // captureStream() returns the SAME MediaStream; on a src change the old
-      // track ends and a new one is added once the element presents frames.
-      // Pick the LIVE track — the just-ended old track may still be listed
-      // (and could be first), and binding the worker to it would stall it.
-      const stream = videoEl.captureStream()
-      this.capturedStream = stream
-      const tracks = stream.getVideoTracks()
-      const track = tracks.find((t) => t.readyState === 'live') ?? tracks[0]
-      if (!track) {
-        this.onLog('swapVideo: no live video track after re-capture')
-        return
-      }
-      const readable = new MediaStreamTrackProcessor({ track }).readable
-      w.postMessage({ type: 'swap-video', video: readable }, [readable as unknown as Transferable])
-    }
-    // Wait for the new clip's FIRST presented frame so the re-captured stream
-    // actually has a live track before handing it to the worker; re-capturing
-    // immediately would grab the old, just-ended track and freeze the input.
-    // A paused / autoplay-blocked element never fires rVFC, so also fall back on
-    // a timer (the `sent` guard makes whichever fires first win) — otherwise the
-    // overlay would silently never appear.
-    if ('requestVideoFrameCallback' in videoEl) {
-      videoEl.requestVideoFrameCallback(() => send())
-      setTimeout(send, 600)
-    } else {
-      send()
-    }
-  }
-
-  swapCamera(cameraStream: MediaStream): void {
-    if (!this.worker) return
-    // getUserMedia tracks are live immediately (no first-frame wait needed).
-    const [track] = cameraStream.getVideoTracks()
-    if (!track) {
-      this.onLog('swapCamera: no camera track')
-      return
-    }
-    const readable = new MediaStreamTrackProcessor({ track }).readable
-    this.worker.postMessage({ type: 'swap-camera', video: readable }, [
-      readable as unknown as Transferable,
-    ])
-  }
-
-  clearVideo(): void {
-    if (!this.worker) return
-    this.worker.postMessage({ type: 'clear-video' })
-    // The file capture is no longer feeding the worker — release it.
-    this.capturedStream?.getTracks().forEach((t) => {
-      try {
-        t.stop()
-      } catch {
-        /* already stopped */
-      }
-    })
-    this.capturedStream = null
   }
 
   async snapshot(type = 'image/png'): Promise<Blob> {

@@ -18,8 +18,33 @@ export function rtLog(msg: string): void {
 
 export const rail = new Rail({ onLog: (m) => rtLog(m) })
 
-/** File-backed <video> input layer — outlives rail restarts. */
+/** File-backed <video> input layer for the SEEDED video layer — outlives rail
+ *  restarts. Added (overlay) video layers get their own pooled source below, so
+ *  multiple video clips can present at once (one element presents one clip). */
 export const videoSource = new VideoFileSource()
+
+// Per-clip <video> pool for ADDED video layers (beyond the seeded one). Keyed by
+// clip id so each overlay clip drives its own element, transport and listeners.
+const videoPool = new Map<string, VideoFileSource>()
+
+/** Get (creating on first use) the pooled video source for a clip. */
+export function acquireVideoSource(clipId: string): VideoFileSource {
+  let s = videoPool.get(clipId)
+  if (!s) {
+    s = new VideoFileSource()
+    videoPool.set(clipId, s)
+  }
+  return s
+}
+
+/** Unload + drop a clip's pooled video source (on layer removal). */
+export function releaseVideoSource(clipId: string): void {
+  const s = videoPool.get(clipId)
+  if (s) {
+    s.unload()
+    videoPool.delete(clipId)
+  }
+}
 
 export type VisionConsumer = 'marker' | 'sense'
 

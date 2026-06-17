@@ -1,21 +1,26 @@
-// Per-frame compositing shared by both backends: camera + video layers
-// (order/opacity/blend) + ordered effect layers. Runs in the pipeline worker
-// for the streams backend, on the main thread for the canvas fallback.
+// Per-frame compositing shared by both backends: a dynamic ordered stack of
+// layers (each with its own source frame, opacity, blend, transform, mirror) +
+// ordered effect layers. Runs in the pipeline worker for the streams backend,
+// on the main thread for the canvas fallback.
 
 import { AnalyzerBus } from './bus'
 import type {
   BlendMode,
   CanvasEffect,
-  CompositeOptions,
-  CompositePatch,
+  Composite,
+  CompositeOp,
   Ctx2D,
   EffectInit,
+  LayerId,
   LayerOptions,
 } from './types'
-import { defaultComposite, layerDrawRects, mergeComposite } from './types'
+import { applyCompositeOp, defaultComposite, layerDrawRects } from './types'
 import { createEffect } from '../effects/registry'
 
-type Layer = CanvasImageSource | VideoFrame
+type FrameSource = CanvasImageSource | VideoFrame
+/** Live frame per layer id for the current pass (absent / null = layer not
+ *  drawn this frame). */
+export type FrameMap = Record<LayerId, FrameSource | null | undefined>
 
 const BLEND_OP: Record<BlendMode, GlobalCompositeOperation> = {
   normal: 'source-over',
@@ -24,7 +29,7 @@ const BLEND_OP: Record<BlendMode, GlobalCompositeOperation> = {
   difference: 'difference',
 }
 
-function dimsOf(src: Layer): { w: number; h: number } {
+function dimsOf(src: FrameSource): { w: number; h: number } {
   if (typeof VideoFrame !== 'undefined' && src instanceof VideoFrame) {
     return { w: src.displayWidth, h: src.displayHeight }
   }
@@ -38,8 +43,7 @@ function dimsOf(src: Layer): { w: number; h: number } {
 export class Compositor {
   readonly bus = new AnalyzerBus()
   private effects: CanvasEffect[] = []
-  mirrored = false
-  composite: CompositeOptions = defaultComposite()
+  composite: Composite = defaultComposite()
 
   constructor(
     private ctx: Ctx2D,
@@ -53,8 +57,14 @@ export class Compositor {
     for (const e of this.effects) e.init?.(this.width, this.height)
   }
 
-  setComposite(patch: CompositePatch): void {
-    mergeComposite(this.composite, patch)
+  /** Replace the whole composite (init) or apply a structural/mix op. */
+  setComposite(value: Composite | CompositeOp): void {
+    if (Array.isArray(value)) {
+      // Init / full replace — copy so callers keep their own array.
+      this.composite = value.map((l) => ({ ...l }))
+    } else {
+      applyCompositeOp(this.composite, value)
+    }
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {
@@ -70,9 +80,9 @@ export class Compositor {
    *  cover-fit (center-crop) so a source whose aspect differs from the output
    *  canvas is cropped, never stretched (letterbox bars would feed black into
    *  the model and break screen/multiply). `mirror` flips the content
-   *  horizontally about its own box center (selfie view, camera only) — for the
-   *  full-canvas default box this is the legacy full-frame flip. */
-  private drawLayer(src: Layer, opts: LayerOptions, mirror: boolean): void {
+   *  horizontally about its own box center (selfie view) — for the full-canvas
+   *  default box this is the legacy full-frame flip. */
+  private drawLayer(src: FrameSource, opts: LayerOptions, mirror: boolean): void {
     if (opts.opacity <= 0) return
     const { ctx, width: W, height: H } = this
     const { w, h } = dimsOf(src)
@@ -91,24 +101,22 @@ export class Compositor {
     ctx.restore()
   }
 
-  /** Composite the layer stack back-to-front — feedback (bottom) → video →
-   *  camera (top) — each with its own opacity + blend, over an opaque base so
-   *  the output frame is never semi-transparent (transparency encodes as black
-   *  upstream and breaks screen/multiply). Any layer may be null/absent. */
-  drawComposite(
-    camera: Layer | null,
-    video: Layer | null,
-    feedback: Layer | null,
-    tsMs: number,
-  ): void {
+  /** Composite the layer stack back-to-front (the composite is ordered front →
+   *  back, so we iterate in reverse) — each layer with its own source frame,
+   *  opacity, blend, transform and mirror — over an opaque base so the output
+   *  frame is never semi-transparent (transparency encodes as black upstream
+   *  and breaks screen/multiply). A layer with no frame this pass is skipped. */
+  drawComposite(frames: FrameMap, tsMs: number): void {
     const { ctx, width: W, height: H } = this
     ctx.globalCompositeOperation = 'source-over'
     ctx.globalAlpha = 1
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, W, H)
-    if (feedback) this.drawLayer(feedback, this.composite.feedback, false)
-    if (video) this.drawLayer(video, this.composite.video, false)
-    if (camera) this.drawLayer(camera, this.composite.camera, this.mirrored)
+    for (let i = this.composite.length - 1; i >= 0; i--) {
+      const layer = this.composite[i]
+      const src = frames[layer.id]
+      if (src) this.drawLayer(src, layer, layer.mirror)
+    }
     const info = { width: W, height: H, tsMs }
     for (const e of this.effects) e.render(ctx, info, this.bus)
   }

@@ -1,44 +1,48 @@
 // Pipeline worker — WebCodecs streams backend compositing loop.
-// Receives up to two MSTP readables (camera + video file layers, transferred)
-// plus the MSTG writable, composites each pass onto an OffscreenCanvas through
-// the effect chain, writes the result out. Keeps running when the tab is
-// backgrounded (no rAF throttle).
+// Receives one MSTP readable per layer that has a live source at start
+// (transferred) plus the MSTG writable, composites each pass onto an
+// OffscreenCanvas through the effect chain, writes the result out. Keeps
+// running when the tab is backgrounded (no rAF throttle). Layers can be hot
+// added/swapped/removed at runtime (layer-source) without restarting.
 //
 // VideoFrame ownership: each layer has an eager-read valve holding at most one
-// pending frame, closing superseded ones. The base frame (camera when present,
-// else video) drives the loop and is closed right after drawing (and after the
-// analyzer-tap bitmap is created). The overlay's newest frame is RETAINED
-// across passes — a paused/slower video must keep compositing under a 30fps
-// camera — and closed only on supersede or shutdown. Unclosed frames silently
-// stall the camera — the open-frame counter guards against regressions.
+// pending frame, closing superseded ones. The BASE layer (the cadence/dims/tap
+// source — camera when present, else video) drives the loop and its frame is
+// closed right after drawing (and after the analyzer-tap bitmap is created).
+// Every NON-BASE layer's newest frame is RETAINED across passes — a paused /
+// slower video or feedback must keep compositing under a 30fps base — and is
+// closed only on supersede, layer removal or shutdown. Unclosed frames silently
+// stall the base — the open-frame counter guards against regressions.
 
-import { Compositor } from '../core/compositor'
-import type { CompositeOptions, CompositePatch, EffectInit } from '../core/types'
+import { Compositor, type FrameMap } from '../core/compositor'
+import type { Composite, CompositeOp, EffectInit, LayerId } from '../core/types'
+
+interface LayerInit {
+  id: LayerId
+  readable: ReadableStream<VideoFrame> | null
+}
 
 type InMsg =
   | {
       type: 'init'
-      camera: ReadableStream<VideoFrame> | null
-      video: ReadableStream<VideoFrame> | null
+      layers: LayerInit[]
+      baseLayerId: LayerId
       writable: WritableStream<VideoFrame>
       width: number
       height: number
-      mirrored: boolean
-      composite: CompositeOptions
+      composite: Composite
       effects: EffectInit[]
     }
-  | { type: 'mirror'; on: boolean }
-  | { type: 'composite'; patch: CompositePatch }
+  | { type: 'composite'; op: CompositeOp }
   | { type: 'effect-config'; name: string; patch: Record<string, unknown> }
   | { type: 'effect-msg'; name: string; data: unknown }
   | { type: 'bus'; key: string; value: unknown }
   | { type: 'tap'; intervalMs: number }
   | { type: 'stop' }
-  | { type: 'swap-video'; video: ReadableStream<VideoFrame> }
-  | { type: 'swap-camera'; video: ReadableStream<VideoFrame> }
-  | { type: 'clear-video' }
-  | { type: 'set-feedback'; video: ReadableStream<VideoFrame> }
-  | { type: 'clear-feedback' }
+  // Hot add / swap (readable set) or remove (readable null) one layer's source.
+  | { type: 'layer-source'; id: LayerId; readable: ReadableStream<VideoFrame> | null }
+  // Re-designate the cadence/dims/tap base layer (e.g. base clip deactivated).
+  | { type: 'base'; id: LayerId }
 
 let compositor: Compositor | null = null
 let running = false
@@ -46,11 +50,8 @@ let tapIntervalMs = 0
 let lastTapMs = 0
 let openFrames = 0
 let wake: (() => void) | null = null
-let requestVideoSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
-let requestCameraSwap: ((readable: ReadableStream<VideoFrame>) => void) | null = null
-let requestOverlayClear: (() => void) | null = null
-let requestFeedbackSet: ((readable: ReadableStream<VideoFrame>) => void) | null = null
-let requestFeedbackClear: (() => void) | null = null
+let setLayerSource: ((id: LayerId, readable: ReadableStream<VideoFrame> | null) => void) | null = null
+let baseSetter: ((id: LayerId) => void) | null = null
 
 function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
@@ -95,8 +96,15 @@ function startValve(readable: ReadableStream<VideoFrame>): Valve {
   return valve
 }
 
+/** One layer's live frame plumbing: its valve plus the newest frame retained
+ *  across passes (non-base layers only — the base's frame is closed each pass). */
+interface Slot {
+  valve: Valve
+  retained: VideoFrame | null
+}
+
 async function run(msg: Extract<InMsg, { type: 'init' }>) {
-  const { camera, video, writable, width, height } = msg
+  const { layers, writable, width, height } = msg
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
   if (!ctx) {
@@ -104,201 +112,129 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     return
   }
   compositor = new Compositor(ctx, width, height)
-  compositor.mirrored = msg.mirrored
   compositor.setComposite(msg.composite)
   compositor.setEffects(msg.effects)
 
   const writer = writable.getWriter()
   running = true
 
-  // Base layer drives the loop cadence and the vision tap.
-  const baseIsCamera = camera !== null
-  let base = startValve(baseIsCamera ? camera! : video!)
-  let overlay = camera && video ? startValve(video) : null
-  let retainedOverlay: VideoFrame | null = null
-  // The feedback layer (remote output stream) arrives after init via
-  // set-feedback — it's always a standalone layer, never the base/overlay.
-  // Retained across passes like the overlay so it keeps compositing between its
-  // own (possibly slower) frames.
-  // Typed-null init (not a bare `null` literal) so control-flow analysis keeps
-  // the `Valve | null` union across the closures below — matching `overlay`.
-  let feedback = null as Valve | null
-  let retainedFeedback: VideoFrame | null = null
-  // Steady-state holds one extra open frame per retained overlay/feedback;
-  // recomputed when a layer is added/removed at runtime. Declared before the
-  // swap/clear closures that call it (no use-before-init).
+  // One slot per layer that has a live source at start; more hot-attach later.
+  const slots = new Map<LayerId, Slot>()
+  for (const l of layers) {
+    if (l.readable) slots.set(l.id, { valve: startValve(l.readable), retained: null })
+  }
+  let baseLayerId = msg.baseLayerId
+
+  // Steady-state holds one extra open frame per retained (non-base) slot;
+  // recomputed when a layer is added/removed at runtime.
   let leakThreshold = 4
   const recomputeLeak = () => {
-    leakThreshold = 4 + (overlay ? 1 : 0) + (feedback ? 1 : 0)
+    const nonBase = slots.size - (slots.has(baseLayerId) ? 1 : 0)
+    leakThreshold = 4 + Math.max(0, nonBase)
   }
   recomputeLeak()
 
-  // Hot-swap the video-file input without restarting: cancel the old video
-  // valve and start a fresh one on the re-captured readable. The video is the
-  // `base` valve when there's no camera, otherwise the `overlay`.
-  requestVideoSwap = (readable) => {
-    if (!running) {
-      void readable.cancel().catch(() => {})
-      return
-    }
-    const videoIsBase = !baseIsCamera
-    const oldValve = videoIsBase ? base : overlay
-    if (oldValve) {
-      try {
-        void oldValve.reader.cancel()
-      } catch {
-        /* already done */
-      }
-      if (oldValve.pending) {
-        oldValve.pending.close()
-        openFrames--
-        oldValve.pending = null
-      }
-    }
-    const fresh = startValve(readable)
-    if (videoIsBase) base = fresh
-    else overlay = fresh
-    // A camera-only pipeline gaining its first video overlay now retains one
-    // extra frame in steady state — widen the leak guard to match init.
+  // Re-designate the cadence/dims/tap base layer (e.g. the base clip was
+  // deactivated and another base-capable layer must drive the loop). The loop
+  // reads `baseLayerId` fresh each pass, so this takes effect next frame.
+  baseSetter = (id) => {
+    baseLayerId = id
     recomputeLeak()
+    wake?.()
   }
 
-  // Hot-swap the camera: it's always the `base` valve when a camera is present.
-  requestCameraSwap = (readable) => {
-    if (!running || !baseIsCamera) {
-      void readable.cancel().catch(() => {})
-      return
-    }
+  const freeSlot = (slot: Slot) => {
     try {
-      void base.reader.cancel()
+      void slot.valve.reader.cancel()
     } catch {
       /* already done */
     }
-    if (base.pending) {
-      base.pending.close()
+    if (slot.valve.pending) {
+      slot.valve.pending.close()
       openFrames--
-      base.pending = null
+      slot.valve.pending = null
     }
-    base = startValve(readable)
+    if (slot.retained) {
+      slot.retained.close()
+      openFrames--
+      slot.retained = null
+    }
   }
 
-  // Hot-remove the overlay: drop the video layer while the camera keeps
-  // feeding. Cancels the overlay valve, frees any held frames, and narrows the
-  // leak guard back to camera-only. No-op when there is no overlay.
-  requestOverlayClear = () => {
-    if (overlay) {
-      try {
-        void overlay.reader.cancel()
-      } catch {
-        /* already done */
-      }
-      if (overlay.pending) {
-        overlay.pending.close()
-        openFrames--
-        overlay.pending = null
-      }
-      overlay = null
-    }
-    if (retainedOverlay) {
-      retainedOverlay.close()
-      openFrames--
-      retainedOverlay = null
-    }
-    recomputeLeak()
-  }
-
-  // Hot-add / re-point the feedback layer (remote output stream). Mirrors
-  // requestVideoSwap's valve handling but is always a standalone overlay layer.
-  requestFeedbackSet = (readable) => {
+  // Hot add / swap (readable set) or remove (readable null) one layer's source
+  // without restarting. Swapping keeps the slot's retained frame on screen until
+  // the fresh valve supplies a new one (no one-frame gap on the common
+  // video-overlay swap); removal frees everything and narrows the leak guard.
+  setLayerSource = (id, readable) => {
     if (!running) {
-      void readable.cancel().catch(() => {})
+      void readable?.cancel().catch(() => {})
       return
     }
-    if (feedback) {
+    const existing = slots.get(id)
+    if (!readable) {
+      if (existing) {
+        freeSlot(existing)
+        slots.delete(id)
+        recomputeLeak()
+      }
+      return
+    }
+    if (existing) {
+      // Swap in place: cancel the old reader + drop its pending frame, but keep
+      // `retained` so the layer stays on screen until the new valve produces.
       try {
-        void feedback.reader.cancel()
+        void existing.valve.reader.cancel()
       } catch {
         /* already done */
       }
-      if (feedback.pending) {
-        feedback.pending.close()
+      if (existing.valve.pending) {
+        existing.valve.pending.close()
         openFrames--
-        feedback.pending = null
+        existing.valve.pending = null
       }
-    }
-    if (retainedFeedback) {
-      retainedFeedback.close()
-      openFrames--
-      retainedFeedback = null
-    }
-    feedback = startValve(readable)
-    recomputeLeak()
-  }
-
-  // Hot-remove the feedback layer (mirror of requestOverlayClear).
-  requestFeedbackClear = () => {
-    if (feedback) {
-      try {
-        void feedback.reader.cancel()
-      } catch {
-        /* already done */
-      }
-      if (feedback.pending) {
-        feedback.pending.close()
-        openFrames--
-        feedback.pending = null
-      }
-      feedback = null
-    }
-    if (retainedFeedback) {
-      retainedFeedback.close()
-      openFrames--
-      retainedFeedback = null
+      existing.valve = startValve(readable)
+    } else {
+      slots.set(id, { valve: startValve(readable), retained: null })
     }
     recomputeLeak()
   }
 
   try {
     while (running) {
-      if (!base.pending) {
+      const baseSlot = slots.get(baseLayerId)
+      if (!baseSlot || !baseSlot.valve.pending) {
         await new Promise<void>((res) => {
           wake = res
-          if (base.pending || !running) res() // re-check after registering: avoids lost wakeup
+          const b = slots.get(baseLayerId)
+          if ((b && b.valve.pending) || !running) res() // re-check after registering: avoids lost wakeup
         })
         wake = null
         continue
       }
-      const frame: VideoFrame = base.take()!
+      const baseFrame: VideoFrame = baseSlot.valve.take()!
 
-      if (overlay) {
-        const fresh = overlay.take()
+      // Refresh the retained frame of every non-base slot from its valve.
+      for (const [id, slot] of slots) {
+        if (id === baseLayerId) continue
+        const fresh = slot.valve.take()
         if (fresh) {
-          if (retainedOverlay) {
-            retainedOverlay.close()
+          if (slot.retained) {
+            slot.retained.close()
             openFrames--
           }
-          retainedOverlay = fresh
+          slot.retained = fresh
         }
       }
 
-      if (feedback) {
-        const fresh = feedback.take()
-        if (fresh) {
-          if (retainedFeedback) {
-            retainedFeedback.close()
-            openFrames--
-          }
-          retainedFeedback = fresh
-        }
+      const tsMs = baseFrame.timestamp / 1000
+      const frames: FrameMap = {}
+      for (const [id, slot] of slots) {
+        frames[id] = id === baseLayerId ? baseFrame : slot.retained
       }
+      compositor.drawComposite(frames, tsMs)
 
-      const tsMs = frame.timestamp / 1000
-      const cameraFrame = baseIsCamera ? frame : null
-      const videoFrame = baseIsCamera ? retainedOverlay : frame
-      compositor.drawComposite(cameraFrame, videoFrame, retainedFeedback, tsMs)
-
-      // Analyzer tap: sample the full COMPOSITE (all layers, incl. feedback) at
-      // cadence, so sensing reflects what's actually composited — not just the base.
+      // Analyzer tap: sample the full COMPOSITE (all layers) at cadence, so
+      // sensing reflects what's actually composited — not just the base.
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
         try {
@@ -309,8 +245,8 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         }
       }
 
-      const out = new VideoFrame(canvas, { timestamp: frame.timestamp })
-      frame.close()
+      const out = new VideoFrame(canvas, { timestamp: baseFrame.timestamp })
+      baseFrame.close()
       openFrames--
       try {
         await writer.write(out)
@@ -321,23 +257,20 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       if (openFrames > leakThreshold) post({ type: 'leak', open: openFrames })
     }
   } finally {
-    requestVideoSwap = null
-    requestCameraSwap = null
-    requestOverlayClear = null
-    requestFeedbackSet = null
-    requestFeedbackClear = null
-    for (const v of [base, overlay, feedback]) {
-      if (!v) continue
+    setLayerSource = null
+    baseSetter = null
+    for (const slot of slots.values()) {
       try {
-        v.reader.cancel()
+        slot.valve.reader.cancel()
       } catch {
         /* already done */
       }
-      ;(v.pending as VideoFrame | null)?.close()
-      v.pending = null
+      slot.valve.pending?.close()
+      slot.valve.pending = null
+      slot.retained?.close()
+      slot.retained = null
     }
-    retainedOverlay?.close()
-    retainedFeedback?.close()
+    slots.clear()
     try {
       await writer.close()
     } catch {
@@ -354,11 +287,8 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
     case 'init':
       void run(m)
       break
-    case 'mirror':
-      if (compositor) compositor.mirrored = m.on
-      break
     case 'composite':
-      compositor?.setComposite(m.patch)
+      compositor?.setComposite(m.op)
       break
     case 'effect-config':
       compositor?.configureEffect(m.name, m.patch)
@@ -376,20 +306,11 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       running = false
       wake?.()
       break
-    case 'swap-video':
-      requestVideoSwap?.(m.video)
+    case 'layer-source':
+      setLayerSource?.(m.id, m.readable)
       break
-    case 'swap-camera':
-      requestCameraSwap?.(m.video)
-      break
-    case 'clear-video':
-      requestOverlayClear?.()
-      break
-    case 'set-feedback':
-      requestFeedbackSet?.(m.video)
-      break
-    case 'clear-feedback':
-      requestFeedbackClear?.()
+    case 'base':
+      baseSetter?.(m.id)
       break
   }
 }
