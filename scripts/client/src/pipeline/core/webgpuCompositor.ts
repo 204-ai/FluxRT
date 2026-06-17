@@ -20,8 +20,19 @@
 // layers are skipped here. Non-VideoFrame layer sources are also skipped.
 
 import { AnalyzerBus } from './bus'
-import type { BlendMode, Composite, CompositeOp, EffectInit, LayerId, LayerOptions } from './types'
+import type {
+  BlendMode,
+  CanvasEffect,
+  Composite,
+  CompositeOp,
+  Ctx2D,
+  EffectInit,
+  FrameInfo,
+  LayerId,
+  LayerOptions,
+} from './types'
 import { applyCompositeOp, defaultComposite, layerDrawRects } from './types'
+import { createEffect } from '../effects/registry'
 import type { GpuContext } from './gpu'
 import type { FrameMap } from './compositor'
 
@@ -149,6 +160,15 @@ fn fxmix_fs(in: VSOut) -> @location(0) vec4<f32> {
   let orig = textureSampleLevel(accumTex, samp, in.uv, 0.0).rgb;
   let filt = textureSampleLevel(blurredTex, samp, in.uv, 0.0).rgb;
   return vec4<f32>(mix(orig, filt, FX.params.x), 1.0);
+}
+
+// ---- global effects overlay (marker / drawLayer) over the accumulator -------
+@group(0) @binding(8) var overlayTex: texture_2d<f32>;
+@fragment
+fn overlay_fs(in: VSOut) -> @location(0) vec4<f32> {
+  let b = textureSampleLevel(accumTex, samp, in.uv, 0.0).rgb;
+  let o = textureSampleLevel(overlayTex, samp, in.uv, 0.0); // straight alpha
+  return vec4<f32>(mix(b, o.rgb, o.a), 1.0);
 }
 
 // ---- final blit: accum → canvas --------------------------------------------
@@ -309,12 +329,18 @@ export class WebGpuCompositor {
   // only when its filter string changes (keyed by layer id, not string, so an
   // animated hue-rotate doesn't grow the map unboundedly).
   private fxCache = new Map<LayerId, { filter: string; matrix: Float32Array | null; blur: number }>()
+  // Global effects (marker / drawLayer) run on a 2D overlay canvas, uploaded as a
+  // texture and composited over the final accumulator — reuses the CanvasEffect code.
+  private effects: CanvasEffect[] = []
+  private overlayCanvas: OffscreenCanvas
+  private overlayCtx: Ctx2D | null
 
   private layerLayout: GPUBindGroupLayout
   private blendLayout: GPUBindGroupLayout
   private fxLayout: GPUBindGroupLayout
   private blurLayout: GPUBindGroupLayout
   private mixLayout: GPUBindGroupLayout
+  private overlayLayout: GPUBindGroupLayout
   private blitLayout: GPUBindGroupLayout
   private layerPipeline: GPURenderPipeline
   private blendPipeline: GPURenderPipeline
@@ -322,6 +348,7 @@ export class WebGpuCompositor {
   private fxFullPipeline: GPURenderPipeline
   private blurPipeline: GPURenderPipeline
   private mixPipeline: GPURenderPipeline
+  private overlayPipeline: GPURenderPipeline
   private blitPipeline: GPURenderPipeline
 
   private accumA!: GPUTexture
@@ -332,6 +359,8 @@ export class WebGpuCompositor {
   private accumAView!: GPUTextureView
   private accumBView!: GPUTextureView
   private layerTexView!: GPUTextureView
+  private overlayTex!: GPUTexture
+  private overlayTexView!: GPUTextureView
 
   constructor(
     gpu: GpuContext,
@@ -360,6 +389,9 @@ export class WebGpuCompositor {
       size: UNIFORM_STRIDE * MAX_LAYERS * 2,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    // 2D canvas the global effects (marker/drawLayer) render onto each frame.
+    this.overlayCanvas = new OffscreenCanvas(width, height)
+    this.overlayCtx = this.overlayCanvas.getContext('2d')
 
     const VF = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT
     const F = GPUShaderStage.FRAGMENT
@@ -400,6 +432,13 @@ export class WebGpuCompositor {
         { binding: 7, visibility: F, texture: { sampleType: 'float' } },
       ],
     })
+    this.overlayLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 1, visibility: F, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: F, texture: { sampleType: 'float' } },
+        { binding: 8, visibility: F, texture: { sampleType: 'float' } },
+      ],
+    })
     this.blitLayout = this.device.createBindGroupLayout({
       entries: [
         { binding: 1, visibility: F, sampler: { type: 'filtering' } },
@@ -427,6 +466,7 @@ export class WebGpuCompositor {
     this.fxFullPipeline = pipe(this.fxLayout, 'fullscreen_vs', 'fxfull_fs', ACCUM_FORMAT, 'triangle-list')
     this.blurPipeline = pipe(this.blurLayout, 'fullscreen_vs', 'blur_fs', ACCUM_FORMAT, 'triangle-list')
     this.mixPipeline = pipe(this.mixLayout, 'fullscreen_vs', 'fxmix_fs', ACCUM_FORMAT, 'triangle-list')
+    this.overlayPipeline = pipe(this.overlayLayout, 'fullscreen_vs', 'overlay_fs', ACCUM_FORMAT, 'triangle-list')
     this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
 
     this.allocTargets()
@@ -441,6 +481,14 @@ export class WebGpuCompositor {
     this.accumAView = this.accumA.createView()
     this.accumBView = this.accumB.createView()
     this.layerTexView = this.layerTex.createView()
+    // rgba8 overlay (effects render to a 2D canvas, uploaded here). Needs
+    // RENDER_ATTACHMENT for copyExternalImageToTexture's destination.
+    this.overlayTex = this.device.createTexture({
+      size,
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    })
+    this.overlayTexView = this.overlayTex.createView()
   }
 
   /** Stable view for one of the two ping-pong accumulators. */
@@ -453,11 +501,18 @@ export class WebGpuCompositor {
     else applyCompositeOp(this.composite, value)
   }
 
-  // Global effects (legacy marker/drawLayer chain) not ported — no-ops with
-  // matching signatures so the worker drives this and the 2D Compositor alike.
-  setEffects(_inits: EffectInit[]): void {}
-  configureEffect(_name: string, _patch: Record<string, unknown>): void {}
-  effectMessage(_name: string, _data: unknown): void {}
+  setEffects(inits: EffectInit[]): void {
+    this.disposeEffects()
+    this.effects = inits.map((e) => createEffect(e.name, e.config))
+    for (const e of this.effects) e.init?.(this.width, this.height)
+  }
+  configureEffect(name: string, patch: Record<string, unknown>): void {
+    this.effects.find((e) => e.name === name)?.configure(patch)
+  }
+  effectMessage(name: string, data: unknown): void {
+    this.effects.find((e) => e.name === name)?.message?.(data)
+  }
+  // Effect LAYERS (shader) take no out-of-band messages; only global effects do.
   effectLayerMessage(_layerId: LayerId, _data: unknown): void {}
 
   private writeLayer(slot: number, frame: VideoFrame, opts: LayerOptions, mirror: boolean, blend: BlendMode): boolean {
@@ -525,7 +580,7 @@ export class WebGpuCompositor {
    *  canvas. Source layers blend their frame; 'shader' effect layers run a colour
    *  filter over everything below. All external-texture imports are synchronous
    *  within this call (their textures are valid only for the current task). */
-  drawComposite(frames: FrameMap, _tsMs: number): void {
+  drawComposite(frames: FrameMap, tsMs: number): void {
     const encoder = this.device.createCommandEncoder()
     let readTex = this.accumA
     let writeTex = this.accumB
@@ -678,6 +733,27 @@ export class WebGpuCompositor {
       drawn++
     }
 
+    // Global effects (marker/drawLayer) → 2D overlay → upload → composite on top
+    // of the finished accumulator. Matches the 2D Compositor, which runs the
+    // global effect chain last.
+    if (this.effects.length && this.overlayCtx) {
+      const octx = this.overlayCtx
+      octx.clearRect(0, 0, this.width, this.height)
+      const info: FrameInfo = { width: this.width, height: this.height, tsMs }
+      for (const e of this.effects) e.render(octx, info, this.bus)
+      this.device.queue.copyExternalImageToTexture(
+        { source: this.overlayCanvas },
+        { texture: this.overlayTex, premultipliedAlpha: false },
+        { width: this.width, height: this.height },
+      )
+      this.fsPass(encoder, this.accumView(writeTex), this.overlayPipeline, this.overlayLayout, [
+        { binding: 1, resource: this.sampler },
+        { binding: 3, resource: this.accumView(readTex) },
+        { binding: 8, resource: this.overlayTexView },
+      ])
+      ;[readTex, writeTex] = [writeTex, readTex]
+    }
+
     if (this.diag < 2) {
       this.diag++
       console.info(
@@ -717,14 +793,19 @@ export class WebGpuCompositor {
     this.device.queue.submit([encoder.finish()])
   }
 
-  disposeEffects(): void {}
+  disposeEffects(): void {
+    for (const e of this.effects) e.dispose?.()
+    this.effects = []
+  }
 
   dispose(): void {
+    this.disposeEffects()
     this.layerUniforms.destroy()
     this.fxUniforms.destroy()
     this.blurUniforms.destroy()
     this.accumA.destroy()
     this.accumB.destroy()
     this.layerTex.destroy()
+    this.overlayTex.destroy()
   }
 }
