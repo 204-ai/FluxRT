@@ -70,10 +70,14 @@ export interface LayerOptions {
 /** The render payload for ONE layer the compositor draws: its mix + geometry +
  *  per-layer selfie flip, tagged with the layer id so frames can be matched to
  *  it. `mirror` replaces the old global camera-only flip (it now belongs to the
- *  layer, seeded from the active clip's kind). */
+ *  layer, seeded from the active clip's kind). An EFFECT layer instead carries
+ *  `effectName` (+ config): it has no frame, and at its stack position it
+ *  transforms everything composited below it. */
 export interface LayerRender extends LayerOptions {
   id: LayerId
   mirror: boolean
+  effectName?: string
+  effectConfig?: Record<string, unknown>
 }
 
 /** The whole compositing stack, ORDERED front → back (top row first). */

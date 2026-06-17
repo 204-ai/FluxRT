@@ -42,7 +42,11 @@ function dimsOf(src: FrameSource): { w: number; h: number } {
 
 export class Compositor {
   readonly bus = new AnalyzerBus()
+  // Legacy GLOBAL effect chain (marker/drawLayer), rendered after all layers.
+  // Kept until the UI moves draw/marker to effect clips.
   private effects: CanvasEffect[] = []
+  // Effect LAYERS, addressed by layer id — interleaved at their stack position.
+  private effectLayers = new Map<LayerId, CanvasEffect>()
   composite: Composite = defaultComposite()
 
   constructor(
@@ -65,6 +69,37 @@ export class Compositor {
     } else {
       applyCompositeOp(this.composite, value)
     }
+    this.reconcileEffectLayers()
+  }
+
+  /** Create/configure/dispose effect-layer CanvasEffect instances to match the
+   *  composite. Each effect layer owns its own instance (keyed by layer id), so
+   *  two draw layers are independent. */
+  private reconcileEffectLayers(): void {
+    const wanted = new Set<LayerId>()
+    for (const l of this.composite) {
+      if (!l.effectName) continue
+      wanted.add(l.id)
+      let fx = this.effectLayers.get(l.id)
+      if (!fx) {
+        fx = createEffect(l.effectName, l.effectConfig)
+        fx.init?.(this.width, this.height)
+        this.effectLayers.set(l.id, fx)
+      } else if (l.effectConfig) {
+        fx.configure(l.effectConfig)
+      }
+    }
+    for (const [id, fx] of this.effectLayers) {
+      if (!wanted.has(id)) {
+        fx.dispose?.()
+        this.effectLayers.delete(id)
+      }
+    }
+  }
+
+  /** Forward an out-of-band message (e.g. a draw stroke) to one effect LAYER. */
+  effectLayerMessage(layerId: LayerId, data: unknown): void {
+    this.effectLayers.get(layerId)?.message?.(data)
   }
 
   configureEffect(name: string, patch: Record<string, unknown>): void {
@@ -112,17 +147,33 @@ export class Compositor {
     ctx.globalAlpha = 1
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, W, H)
+    const info = { width: W, height: H, tsMs }
+    // Back-to-front: source layers draw their frame; effect layers run their
+    // CanvasEffect at this position, transforming everything composited below.
     for (let i = this.composite.length - 1; i >= 0; i--) {
       const layer = this.composite[i]
+      if (layer.effectName) {
+        const fx = this.effectLayers.get(layer.id)
+        if (fx && layer.opacity > 0) {
+          ctx.save()
+          ctx.globalAlpha = layer.opacity
+          ctx.globalCompositeOperation = 'source-over'
+          fx.render(ctx, info, this.bus)
+          ctx.restore()
+        }
+        continue
+      }
       const src = frames[layer.id]
       if (src) this.drawLayer(src, layer, layer.mirror)
     }
-    const info = { width: W, height: H, tsMs }
+    // Legacy global effects run last (compat until the UI uses effect clips).
     for (const e of this.effects) e.render(ctx, info, this.bus)
   }
 
   disposeEffects(): void {
     for (const e of this.effects) e.dispose?.()
     this.effects = []
+    for (const fx of this.effectLayers.values()) fx.dispose?.()
+    this.effectLayers.clear()
   }
 }

@@ -199,19 +199,46 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     recomputeLeak()
   }
 
+  // ~30fps ticker for base-less compositions (effect / feedback / image only).
+  const TICK_MS = 33
+  let lastOutTs = 0
+
   try {
     while (running) {
       const baseSlot = slots.get(baseLayerId)
-      if (!baseSlot || !baseSlot.valve.pending) {
+      let baseFrame: VideoFrame | null
+      if (baseSlot) {
+        // A base source is present → block on its frames (it sets the cadence).
+        if (!baseSlot.valve.pending) {
+          await new Promise<void>((res) => {
+            wake = res
+            const b = slots.get(baseLayerId)
+            if ((b && b.valve.pending) || !running) res() // re-check after registering: avoids lost wakeup
+          })
+          wake = null
+          continue
+        }
+        baseFrame = baseSlot.valve.take()
+      } else {
+        // No base → the ticker drives: composite retained frames + effects every
+        // TICK_MS (wakes early if a frame arrives). A frame-source becoming the
+        // base again switches back to base-driven cadence next iteration.
         await new Promise<void>((res) => {
-          wake = res
-          const b = slots.get(baseLayerId)
-          if ((b && b.valve.pending) || !running) res() // re-check after registering: avoids lost wakeup
+          let settled = false
+          const done = () => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            wake = null
+            res()
+          }
+          const timer = setTimeout(done, TICK_MS)
+          wake = done
+          if (!running) done()
         })
-        wake = null
-        continue
+        if (!running) break
+        baseFrame = null
       }
-      const baseFrame: VideoFrame = baseSlot.valve.take()!
 
       // Refresh the retained frame of every non-base slot from its valve.
       for (const [id, slot] of slots) {
@@ -226,7 +253,11 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         }
       }
 
-      const tsMs = baseFrame.timestamp / 1000
+      // Monotonic output timestamp — the base frame's when present, else advance
+      // by the tick so the encoder sees an increasing timeline in ticker mode.
+      const tsOut = baseFrame ? Math.max(baseFrame.timestamp, lastOutTs + 1) : lastOutTs + TICK_MS * 1000
+      lastOutTs = tsOut
+      const tsMs = tsOut / 1000
       const frames: FrameMap = {}
       for (const [id, slot] of slots) {
         frames[id] = id === baseLayerId ? baseFrame : slot.retained
@@ -245,9 +276,11 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         }
       }
 
-      const out = new VideoFrame(canvas, { timestamp: baseFrame.timestamp })
-      baseFrame.close()
-      openFrames--
+      const out = new VideoFrame(canvas, { timestamp: tsOut })
+      if (baseFrame) {
+        baseFrame.close()
+        openFrames--
+      }
       try {
         await writer.write(out)
       } catch {
