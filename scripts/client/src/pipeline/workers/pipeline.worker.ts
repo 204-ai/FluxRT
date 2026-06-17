@@ -61,6 +61,14 @@ let wake: (() => void) | null = null
 let visionPort: MessagePort | null = null
 // Step-0 profiling: rolling per-frame composite/tap timing, summarized to onLog.
 let profile = false
+// Init gating: in the WebGPU path run() awaits the GPU device BEFORE its message
+// handlers (setLayerSource/baseSetter) and the compositor exist. Messages that
+// arrive during that await are buffered here and flushed in order once run() is
+// ready — otherwise a non-base layer-source binding (posted right after start)
+// hits a null setLayerSource and is dropped, leaving that layer uncomposited.
+let initialized = false
+let stopRequested = false
+const preInit: Exclude<InMsg, { type: 'init' }>[] = []
 let setLayerSource: ((id: LayerId, readable: ReadableStream<VideoFrame> | null) => void) | null = null
 let baseSetter: ((id: LayerId) => void) | null = null
 
@@ -154,7 +162,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   compositor.setEffects(msg.effects)
 
   const writer = writable.getWriter()
-  running = true
+  running = !stopRequested // a stop during async init must not start the loop
 
   // Step-0 profiling accumulators (only touched when `profile`).
   profile = !!msg.profile
@@ -245,6 +253,12 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     recomputeLeak()
   }
 
+  // Init complete: flush any messages buffered during async setup, in order, so
+  // layer-source bindings / composite ops that raced the GPU await are applied.
+  initialized = true
+  for (const m of preInit) handle(m)
+  preInit.length = 0
+
   // ~30fps ticker for base-less compositions (effect / feedback / image only).
   const TICK_MS = 33
   let lastOutTs = 0
@@ -317,13 +331,15 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       if (tapIntervalMs > 0 && tsMs - lastTapMs >= tapIntervalMs) {
         lastTapMs = tsMs
         const tap0 = profile ? performance.now() : 0
+        let tapFrame: VideoFrame | null = null
         try {
           if (visionPort) {
             // Direct worker→worker handoff: a SYNCHRONOUS canvas snapshot (no
             // createImageBitmap await stalling the loop) transferred straight to
             // the vision worker — no main-thread bounce.
-            const frame = new VideoFrame(canvas, { timestamp: tsOut })
-            visionPort.postMessage({ type: 'detect', frame, tsMs }, [frame])
+            tapFrame = new VideoFrame(canvas, { timestamp: tsOut })
+            visionPort.postMessage({ type: 'detect', frame: tapFrame, tsMs }, [tapFrame])
+            tapFrame = null // ownership transferred to the vision worker
           } else {
             // Fallback when no vision port is wired (e.g. vision inactive): the
             // legacy bitmap relay via the main thread.
@@ -331,7 +347,8 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
             post({ type: 'tap-frame', bitmap, tsMs }, [bitmap])
           }
         } catch {
-          /* frame raced close — skip */
+          // post failed before transfer (e.g. stale port) — close so it can't leak.
+          tapFrame?.close()
         }
         if (profile) {
           profTapMs += performance.now() - tap0
@@ -399,12 +416,10 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   }
 }
 
-self.onmessage = (e: MessageEvent<InMsg>) => {
-  const m = e.data
+/** Dispatch a non-init message against run()'s live state. Called directly once
+ *  initialized, or replayed from `preInit` when init finishes. */
+function handle(m: Exclude<InMsg, { type: 'init' }>): void {
   switch (m.type) {
-    case 'init':
-      void run(m)
-      break
     case 'composite':
       compositor?.setComposite(m.op)
       break
@@ -422,6 +437,7 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       break
     case 'stop':
       running = false
+      stopRequested = true
       wake?.()
       break
     case 'layer-source':
@@ -435,4 +451,25 @@ self.onmessage = (e: MessageEvent<InMsg>) => {
       visionPort = m.port
       break
   }
+}
+
+self.onmessage = (e: MessageEvent<InMsg>) => {
+  const m = e.data
+  if (m.type === 'init') {
+    void run(m)
+    return
+  }
+  // 'stop' must act immediately, even mid-init, so an early abort is honored.
+  if (m.type === 'stop') {
+    running = false
+    stopRequested = true
+    wake?.()
+    return
+  }
+  // Buffer everything that needs run()'s setup until init finishes (see preInit).
+  if (!initialized) {
+    preInit.push(m)
+    return
+  }
+  handle(m)
 }
