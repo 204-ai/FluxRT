@@ -180,7 +180,7 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       depthRef.s = null
     })
   }
-  const DEPTH_EVERY_N = 6 // ~5fps depth under a 30fps composite
+  const DEPTH_EVERY_N = 3 // kick off more often (skip-when-busy caps at inference rate)
   let depthCount = 0
   let depthBusy = false
 
