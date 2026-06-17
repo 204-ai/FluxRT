@@ -131,6 +131,16 @@ export function TransformOverlay() {
   const presentLayers = layers.filter((l) => isPresent(l.id)).map((l) => l.id)
   const labelOf = (id: LayerId): string => layerById(layers, id)?.name ?? id
 
+  // The live transform lives on the layer's ACTIVE CLIP (that's where
+  // setLayerTransform writes it) — fall back to a layer-level transform, then
+  // identity. Reading layer.transform directly (the old bug) made the box ignore
+  // the current move/scale and let a crop drag reset the whole transform.
+  const transformOf = (id: LayerId): LayerTransform => {
+    const layer = layerById(layers, id)
+    const clip = layer ? activeClip(layer) : null
+    return (clip ? clip.transform : layer?.transform) ?? identityTransform()
+  }
+
   // Measure the preview element's rect relative to our container so the box
   // tracks the actual displayed media (works maximized/letterboxed too).
   const measure = useCallback(() => {
@@ -205,7 +215,7 @@ export function TransformOverlay() {
     cleanupRef.current?.()
     const layer = layoutLayer
     const crop = cropMode
-    const startTransform = layerById(layers, layer)?.transform ?? identityTransform()
+    const startTransform = transformOf(layer)
     const start: LayerTransform = {
       frame: { ...startTransform.frame },
       crop: { ...startTransform.crop },
@@ -237,7 +247,7 @@ export function TransformOverlay() {
 
   if (!layoutLayer || !active) return <div ref={containerRef} className="layout-overlay" />
 
-  const transform = layerById(layers, layoutLayer)?.transform ?? identityTransform()
+  const transform = transformOf(layoutLayer)
   const dest = layerDestRect(transform)
   // In crop mode the handles act on the visible (dest) rect; in move mode on the
   // full frame. The other rect is shown faintly for context.
