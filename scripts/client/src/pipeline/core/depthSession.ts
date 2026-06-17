@@ -50,6 +50,9 @@ export class DepthSession {
   private runMin = 0
   private runMax = 0
   private haveRange = false
+  // Temporal smoothing of the output map (eased toward each new inference) so the
+  // depth glides across the low-fps updates instead of snapping.
+  private smoothU8: Uint8Array | null = null
 
   /** Load the model on WebGPU (sharing the compositor's adapter). Returns null
    *  if WebGPU is unavailable or anything fails — depth then simply stays off. */
@@ -131,7 +134,18 @@ export class DepthSession {
         const t = (depth[i] - lo) * inv
         u8[i] = t < 0 ? 0 : t > 255 ? 255 : t
       }
-      return { data: u8, w, h }
+      // Temporal smoothing: ease the output toward the new map so the depth
+      // glides across (low-fps) inferences instead of snapping. (Per-frame GPU
+      // ease is a future improvement; this is CPU-side and can't break the
+      // shader module.) writeTexture copies the data, so reusing the array is OK.
+      if (!this.smoothU8 || this.smoothU8.length !== n) {
+        this.smoothU8 = u8.slice()
+      } else {
+        const a = 0.5
+        const s = this.smoothU8
+        for (let i = 0; i < n; i++) s[i] = s[i] + (u8[i] - s[i]) * a
+      }
+      return { data: this.smoothU8, w, h }
     } catch (e) {
       console.error('[depth] run failed:', e)
       return null

@@ -187,16 +187,6 @@ fn depth_fs(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(mix(c, outc, DU.params.x), 1.0);
 }
 
-// ---- depth temporal ease: glide the displayed depth toward the latest raw map
-// so it doesn't step between (low-fps) inferences. binding 3 = previous smoothed,
-// binding 9 = latest raw; output r8.
-@fragment
-fn depth_ease_fs(in: VSOut) -> @location(0) vec4<f32> {
-  let prev = textureSampleLevel(accumTex, samp, in.uv, 0.0).r;
-  let target = textureSampleLevel(depthTex, samp, in.uv, 0.0).r;
-  return vec4<f32>(mix(prev, target, 0.18), 0.0, 0.0, 1.0);
-}
-
 // ---- final blit: accum → canvas --------------------------------------------
 @fragment
 fn blit_fs(in: VSOut) -> @location(0) vec4<f32> {
@@ -359,15 +349,6 @@ export class WebGpuCompositor {
   private depthDataView: GPUTextureView | null = null
   private depthW = 0
   private depthH = 0
-  // Ping-pong smoothed depth (eased toward the raw map each frame) so the depth
-  // effect glides between inferences instead of stepping at the model's low fps.
-  private depthSmooth: [GPUTexture, GPUTexture] | null = null
-  private depthSmoothViews: [GPUTextureView, GPUTextureView] | null = null
-  private depthSmoothCur = 0
-  // Temporarily off: the ease pipeline is producing an invalid pipeline that
-  // blacks out the composite. Disabled so depth still renders (reuse-last) while
-  // the constructor's error capture pinpoints the cause; re-enable once fixed.
-  private easeEnabled = false
   // Cache the composed colour matrix + blur radius per effect layer; recompute
   // only when its filter string changes (keyed by layer id, not string, so an
   // animated hue-rotate doesn't grow the map unboundedly).
@@ -385,7 +366,6 @@ export class WebGpuCompositor {
   private mixLayout: GPUBindGroupLayout
   private overlayLayout: GPUBindGroupLayout
   private depthLayout: GPUBindGroupLayout
-  private depthEaseLayout: GPUBindGroupLayout
   private blitLayout: GPUBindGroupLayout
   private layerPipeline: GPURenderPipeline
   private blendPipeline: GPURenderPipeline
@@ -395,7 +375,6 @@ export class WebGpuCompositor {
   private mixPipeline: GPURenderPipeline
   private overlayPipeline: GPURenderPipeline
   private depthPipeline: GPURenderPipeline
-  private depthEasePipeline: GPURenderPipeline
   private blitPipeline: GPURenderPipeline
 
   private accumA!: GPUTexture
@@ -498,13 +477,6 @@ export class WebGpuCompositor {
         { binding: 10, visibility: F, buffer: { type: 'uniform' } },
       ],
     })
-    this.depthEaseLayout = this.device.createBindGroupLayout({
-      entries: [
-        { binding: 1, visibility: F, sampler: { type: 'filtering' } },
-        { binding: 3, visibility: F, texture: { sampleType: 'float' } }, // prev smoothed
-        { binding: 9, visibility: F, texture: { sampleType: 'float' } }, // latest raw
-      ],
-    })
     this.blitLayout = this.device.createBindGroupLayout({
       entries: [
         { binding: 1, visibility: F, sampler: { type: 'filtering' } },
@@ -543,9 +515,6 @@ export class WebGpuCompositor {
     this.mixPipeline = pipe(this.mixLayout, 'fullscreen_vs', 'fxmix_fs', ACCUM_FORMAT, 'triangle-list')
     this.overlayPipeline = pipe(this.overlayLayout, 'fullscreen_vs', 'overlay_fs', ACCUM_FORMAT, 'triangle-list')
     this.depthPipeline = pipe(this.depthLayout, 'fullscreen_vs', 'depth_fs', ACCUM_FORMAT, 'triangle-list')
-    // Ease target is rgba16float (the proven render format) — r8unorm-as-target
-    // produced an invalid pipeline on the target adapter. Depth lives in .r.
-    this.depthEasePipeline = pipe(this.depthEaseLayout, 'fullscreen_vs', 'depth_ease_fs', ACCUM_FORMAT, 'triangle-list')
     this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
     void this.device.popErrorScope().then((e) => {
       if (e) console.error('[webgpu] pipeline creation error:', e.message)
@@ -648,22 +617,12 @@ export class WebGpuCompositor {
     const size = { width: w, height: h }
     if (!this.depthDataTex || this.depthW !== w || this.depthH !== h) {
       this.depthDataTex?.destroy()
-      this.depthSmooth?.forEach((t) => t.destroy())
       this.depthDataTex = this.device.createTexture({
         size,
         format: 'r8unorm',
         usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
       })
       this.depthDataView = this.depthDataTex.createView()
-      // Ping-pong smoothed pair, rgba16float (proven render-target format; depth
-      // is carried in .r). Not seeded — the ease ramps up from the raw map over a
-      // few frames (a brief fade-in on first depth, acceptable for a live effect).
-      const su = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-      const a = this.device.createTexture({ size, format: ACCUM_FORMAT, usage: su })
-      const b = this.device.createTexture({ size, format: ACCUM_FORMAT, usage: su })
-      this.depthSmooth = [a, b]
-      this.depthSmoothViews = [a.createView(), b.createView()]
-      this.depthSmoothCur = 0
       this.depthW = w
       this.depthH = h
     }
@@ -734,25 +693,6 @@ export class WebGpuCompositor {
       })
       .end()
 
-    // Temporal-ease the depth map once per frame (only when a depth layer is
-    // active + data has arrived): smoothNext = mix(smoothPrev, raw, 0.18), so the
-    // depth effect glides between low-fps inferences instead of stepping.
-    if (
-      this.easeEnabled &&
-      this.depthDataView &&
-      this.depthSmoothViews &&
-      this.composite.some((l) => l.effectName === 'depth' && l.opacity > 0)
-    ) {
-      const prev = this.depthSmoothViews[this.depthSmoothCur]
-      const next = this.depthSmoothViews[this.depthSmoothCur ^ 1]
-      this.fsPass(encoder, next, this.depthEasePipeline, this.depthEaseLayout, [
-        { binding: 1, resource: this.sampler },
-        { binding: 3, resource: prev },
-        { binding: 9, resource: this.depthDataView },
-      ])
-      this.depthSmoothCur ^= 1
-    }
-
     let layerSlot = 0
     let fxSlot = 0
     let blurSlot = 0
@@ -767,19 +707,13 @@ export class WebGpuCompositor {
         if (layer.effectName === 'depth') {
           // No depth data yet → skip (reuse-last is free: the texture persists).
           if (!this.depthDataView || depthSlot >= MAX_LAYERS) continue
+          const depthView = this.depthDataView
           const dcfg = (layer.effectConfig ?? {}) as Record<string, unknown>
           this.writeDepth(depthSlot, layer.opacity, depthModeNum(dcfg.mode))
           this.fsPass(encoder, this.accumView(writeTex), this.depthPipeline, this.depthLayout, [
             { binding: 1, resource: this.sampler },
             { binding: 3, resource: this.accumView(readTex) },
-            // Sample the eased (smoothed) depth when enabled, else the raw map.
-            {
-              binding: 9,
-              resource:
-                this.easeEnabled && this.depthSmoothViews
-                  ? this.depthSmoothViews[this.depthSmoothCur]
-                  : this.depthDataView,
-            },
+            { binding: 9, resource: depthView },
             { binding: 10, resource: depthUni(depthSlot) },
           ])
           ;[readTex, writeTex] = [writeTex, readTex]
@@ -976,6 +910,5 @@ export class WebGpuCompositor {
     this.layerTex.destroy()
     this.overlayTex.destroy()
     this.depthDataTex?.destroy()
-    this.depthSmooth?.forEach((t) => t.destroy())
   }
 }
