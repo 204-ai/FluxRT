@@ -62,6 +62,9 @@ export const CLIP_KINDS: Record<ClipKind, ClipKindMeta> = {
   draw: { kind: 'draw', role: 'effect', label: 'Draw', mirrorable: false, canBeBase: false, effectName: 'drawLayer', acquire: 'none' },
   marker: { kind: 'marker', role: 'effect', label: 'Marker', mirrorable: false, canBeBase: false, effectName: 'marker', acquire: 'none' },
   shader: { kind: 'shader', role: 'effect', label: 'Shader', mirrorable: false, canBeBase: false, effectName: 'shader', acquire: 'none' },
+  // Monocular depth (Depth Anything V2, WebGPU only). Renders a depth-keyed
+  // pass over everything below; a no-op on the 2D fallback. Needs the depth flag.
+  depth: { kind: 'depth', role: 'effect', label: 'Depth', mirrorable: false, canBeBase: false, effectName: 'depth', acquire: 'none' },
 }
 
 /** Per-kind glyph for compact cell chips. */
@@ -74,12 +77,13 @@ export const CLIP_ICON: Record<ClipKind, string> = {
   draw: '✏️',
   marker: '⌖',
   shader: '✨',
+  depth: '🌫',
 }
 
 /** Source kinds offered in the cell picker. */
 export const SOURCE_CLIP_KINDS: ClipKind[] = ['camera', 'video', 'feedback', 'screen', 'image']
 /** Effect kinds offered in the cell picker (draw stays a global tool for now). */
-export const EFFECT_CLIP_KINDS: ClipKind[] = ['marker', 'shader']
+export const EFFECT_CLIP_KINDS: ClipKind[] = ['marker', 'shader', 'depth']
 /** All kinds a user can pick when filling an empty cell. */
 export const ADDABLE_CLIP_KINDS: ClipKind[] = [...SOURCE_CLIP_KINDS, ...EFFECT_CLIP_KINDS]
 

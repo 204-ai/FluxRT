@@ -21,7 +21,7 @@ const BLEND_SHORT: Record<BlendMode, string> = {
 // Cell picker, grouped. (image: static-frame path pending; draw/marker: global
 // tools for now.)
 const PICK_SOURCES: ClipKind[] = ['camera', 'video', 'feedback', 'screen']
-const PICK_EFFECTS: ClipKind[] = ['shader']
+const PICK_EFFECTS: ClipKind[] = ['shader', 'depth']
 const ALL_PICKABLE: ClipKind[] = [...PICK_SOURCES, ...PICK_EFFECTS]
 
 // Drag-and-drop a clip between cells (within a layer or across layers).

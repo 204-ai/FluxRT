@@ -117,12 +117,37 @@ function ShaderDetail({ clip }: { clip: Clip }) {
   )
 }
 
+const DEPTH_MODES = [
+  { label: 'Fog', value: 'fog' },
+  { label: 'Replace (show depth)', value: 'replace' },
+  { label: 'Mask (keep near)', value: 'mask' },
+]
+
+function DepthDetail({ clip }: { clip: Clip }) {
+  const setEffectConfig = usePipelineStore((s) => s.setEffectConfig)
+  const mode = (clip.effectConfig?.mode as string) ?? 'fog'
+  return (
+    <div className="clip-detail-row">
+      <span className="dim">mode</span>
+      <select className="device-pick" value={mode} onChange={(e) => setEffectConfig(clip.id, { mode: e.target.value })}>
+        {DEPTH_MODES.map((m) => (
+          <option key={m.value} value={m.value}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+      <span className="dim">strength = layer opacity · needs WebGPU + depth flag</span>
+    </div>
+  )
+}
+
 function ClipDetailBody({ clip }: { clip: Clip }) {
   if (clip.kind === 'camera') return <CameraDetail clip={clip} />
   if (clip.kind === 'video') return <VideoDetail clip={clip} />
   if (clip.kind === 'feedback') return <FeedbackDetail />
   if (clip.kind === 'screen') return <span className="dim">screen share — live</span>
   if (clip.kind === 'shader') return <ShaderDetail clip={clip} />
+  if (clip.kind === 'depth') return <DepthDetail clip={clip} />
   return <span className="dim">no details for this clip</span>
 }
 
