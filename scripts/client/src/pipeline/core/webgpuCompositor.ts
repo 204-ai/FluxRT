@@ -28,10 +28,14 @@ import type { FrameMap } from './compositor'
 const UNIFORM_STRIDE = 256 // ≥ minUniformBufferOffsetAlignment; one slice per layer
 const LAYER_UNIFORM_BYTES = 48 // 3×vec4<f32>
 const FX_UNIFORM_BYTES = 80 // mat4x4<f32> + vec4<f32>
+const BLUR_UNIFORM_BYTES = 32 // 2×vec4<f32>
 const MAX_LAYERS = 16
 const ACCUM_FORMAT: GPUTextureFormat = 'rgba16float'
 
 const BLEND_NUM: Record<BlendMode, number> = { normal: 0, screen: 1, multiply: 2, difference: 3 }
+// Column-major identity — fed to the colour-matrix uniform when a shader is
+// blur-only (no colour change), so the fxmix opacity field is still valid.
+const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
 
 const WGSL = /* wgsl */ `
 struct Layer {
@@ -105,6 +109,46 @@ fn fx_fs(in: VSOut) -> @location(0) vec4<f32> {
   let c = textureSampleLevel(accumTex, samp, in.uv, 0.0);
   let f = (FX.cmat * vec4<f32>(c.rgb, 1.0)).rgb;
   return vec4<f32>(mix(c.rgb, clamp(f, vec3<f32>(0.0), vec3<f32>(1.0)), FX.params.x), 1.0);
+}
+
+// ---- blur (separable Gaussian) + full-strength colour + mix ----------------
+struct Blur { p0: vec4<f32>, p1: vec4<f32> }; // p0: texelX,texelY,dirX,dirY ; p1.x: radius(px)
+@group(0) @binding(6) var<uniform> BL: Blur;
+@group(0) @binding(7) var blurredTex: texture_2d<f32>;
+
+// colour matrix at full strength (no opacity mix) — feeds the blur chain
+@fragment
+fn fxfull_fs(in: VSOut) -> @location(0) vec4<f32> {
+  let c = textureSampleLevel(accumTex, samp, in.uv, 0.0);
+  let f = (FX.cmat * vec4<f32>(c.rgb, 1.0)).rgb;
+  return vec4<f32>(clamp(f, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+// one separable-Gaussian direction over accumTex (binding 3)
+@fragment
+fn blur_fs(in: VSOut) -> @location(0) vec4<f32> {
+  let texel = BL.p0.xy;
+  let dir = BL.p0.zw;
+  let radius = BL.p1.x;
+  let sigma = max(radius * 0.5, 1.0);
+  let r = i32(ceil(radius));
+  var sum = vec3<f32>(0.0);
+  var wsum = 0.0;
+  for (var i = -r; i <= r; i = i + 1) {
+    let fi = f32(i);
+    let w = exp(-(fi * fi) / (2.0 * sigma * sigma));
+    sum = sum + textureSampleLevel(accumTex, samp, in.uv + dir * texel * fi, 0.0).rgb * w;
+    wsum = wsum + w;
+  }
+  return vec4<f32>(sum / wsum, 1.0);
+}
+
+// mix original (binding 3) with the fully-filtered result (binding 7) by opacity
+@fragment
+fn fxmix_fs(in: VSOut) -> @location(0) vec4<f32> {
+  let orig = textureSampleLevel(accumTex, samp, in.uv, 0.0).rgb;
+  let filt = textureSampleLevel(blurredTex, samp, in.uv, 0.0).rgb;
+  return vec4<f32>(mix(orig, filt, FX.params.x), 1.0);
 }
 
 // ---- final blit: accum → canvas --------------------------------------------
@@ -237,6 +281,15 @@ function colorMatrix(filter: string): Float32Array | null {
   ])
 }
 
+const MAX_BLUR_PX = 32
+
+/** Extract the blur(Npx) radius from a CSS filter string, clamped. 0 = none. */
+function blurRadius(filter: string): number {
+  const m = /blur\(\s*([\d.]+)\s*px\s*\)/.exec(filter)
+  if (!m) return 0
+  return Math.min(MAX_BLUR_PX, Math.max(0, parseFloat(m[1]) || 0))
+}
+
 export class WebGpuCompositor {
   readonly bus = new AnalyzerBus()
   composite: Composite = defaultComposite()
@@ -247,21 +300,28 @@ export class WebGpuCompositor {
   private sampler: GPUSampler
   private layerUniforms: GPUBuffer
   private fxUniforms: GPUBuffer
+  private blurUniforms: GPUBuffer
   private scratch = new Float32Array(12)
   private fxScratch = new Float32Array(20)
+  private blurScratch = new Float32Array(8)
   private diag = 0
-  // Cache the composed colour matrix per effect layer; recompute only when its
-  // filter string changes (keyed by layer id, not string, so an animated
-  // hue-rotate doesn't grow the map unboundedly).
-  private fxCache = new Map<LayerId, { filter: string; matrix: Float32Array | null }>()
+  // Cache the composed colour matrix + blur radius per effect layer; recompute
+  // only when its filter string changes (keyed by layer id, not string, so an
+  // animated hue-rotate doesn't grow the map unboundedly).
+  private fxCache = new Map<LayerId, { filter: string; matrix: Float32Array | null; blur: number }>()
 
   private layerLayout: GPUBindGroupLayout
   private blendLayout: GPUBindGroupLayout
   private fxLayout: GPUBindGroupLayout
+  private blurLayout: GPUBindGroupLayout
+  private mixLayout: GPUBindGroupLayout
   private blitLayout: GPUBindGroupLayout
   private layerPipeline: GPURenderPipeline
   private blendPipeline: GPURenderPipeline
   private fxPipeline: GPURenderPipeline
+  private fxFullPipeline: GPURenderPipeline
+  private blurPipeline: GPURenderPipeline
+  private mixPipeline: GPURenderPipeline
   private blitPipeline: GPURenderPipeline
 
   private accumA!: GPUTexture
@@ -295,6 +355,11 @@ export class WebGpuCompositor {
       size: UNIFORM_STRIDE * MAX_LAYERS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
+    // Two slices per effect layer (horizontal + vertical blur direction).
+    this.blurUniforms = this.device.createBuffer({
+      size: UNIFORM_STRIDE * MAX_LAYERS * 2,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    })
 
     const VF = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT
     const F = GPUShaderStage.FRAGMENT
@@ -318,6 +383,21 @@ export class WebGpuCompositor {
         { binding: 1, visibility: F, sampler: { type: 'filtering' } },
         { binding: 3, visibility: F, texture: { sampleType: 'float' } },
         { binding: 5, visibility: F, buffer: { type: 'uniform' } },
+      ],
+    })
+    this.blurLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 1, visibility: F, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: F, texture: { sampleType: 'float' } },
+        { binding: 6, visibility: F, buffer: { type: 'uniform' } },
+      ],
+    })
+    this.mixLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 1, visibility: F, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: F, texture: { sampleType: 'float' } },
+        { binding: 5, visibility: F, buffer: { type: 'uniform' } },
+        { binding: 7, visibility: F, texture: { sampleType: 'float' } },
       ],
     })
     this.blitLayout = this.device.createBindGroupLayout({
@@ -344,6 +424,9 @@ export class WebGpuCompositor {
     this.layerPipeline = pipe(this.layerLayout, 'layer_vs', 'layer_fs', ACCUM_FORMAT, 'triangle-strip')
     this.blendPipeline = pipe(this.blendLayout, 'fullscreen_vs', 'blend_fs', ACCUM_FORMAT, 'triangle-list')
     this.fxPipeline = pipe(this.fxLayout, 'fullscreen_vs', 'fx_fs', ACCUM_FORMAT, 'triangle-list')
+    this.fxFullPipeline = pipe(this.fxLayout, 'fullscreen_vs', 'fxfull_fs', ACCUM_FORMAT, 'triangle-list')
+    this.blurPipeline = pipe(this.blurLayout, 'fullscreen_vs', 'blur_fs', ACCUM_FORMAT, 'triangle-list')
+    this.mixPipeline = pipe(this.mixLayout, 'fullscreen_vs', 'fxmix_fs', ACCUM_FORMAT, 'triangle-list')
     this.blitPipeline = pipe(this.blitLayout, 'fullscreen_vs', 'blit_fs', this.canvasFormat, 'triangle-list')
 
     this.allocTargets()
@@ -409,6 +492,35 @@ export class WebGpuCompositor {
     this.device.queue.writeBuffer(this.fxUniforms, slot * UNIFORM_STRIDE, this.fxScratch)
   }
 
+  private writeBlur(slot: number, dirX: number, dirY: number, radius: number): void {
+    this.blurScratch[0] = 1 / this.width
+    this.blurScratch[1] = 1 / this.height
+    this.blurScratch[2] = dirX
+    this.blurScratch[3] = dirY
+    this.blurScratch[4] = radius
+    this.blurScratch[5] = 0
+    this.blurScratch[6] = 0
+    this.blurScratch[7] = 0
+    this.device.queue.writeBuffer(this.blurUniforms, slot * UNIFORM_STRIDE, this.blurScratch)
+  }
+
+  /** One full-screen pass: pipeline + bind group entries → target view. */
+  private fsPass(
+    encoder: GPUCommandEncoder,
+    target: GPUTextureView,
+    pipeline: GPURenderPipeline,
+    layout: GPUBindGroupLayout,
+    entries: GPUBindGroupEntry[],
+  ): void {
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target, loadOp: 'clear', storeOp: 'store' }],
+    })
+    pass.setPipeline(pipeline)
+    pass.setBindGroup(0, this.device.createBindGroup({ layout, entries }))
+    pass.draw(3)
+    pass.end()
+  }
+
   /** Composite back-to-front into the accumulator (ping-pong) then blit to the
    *  canvas. Source layers blend their frame; 'shader' effect layers run a colour
    *  filter over everything below. All external-texture imports are synchronous
@@ -428,6 +540,11 @@ export class WebGpuCompositor {
       offset: slot * UNIFORM_STRIDE,
       size: FX_UNIFORM_BYTES,
     })
+    const blurUni = (slot: number): GPUBufferBinding => ({
+      buffer: this.blurUniforms,
+      offset: slot * UNIFORM_STRIDE,
+      size: BLUR_UNIFORM_BYTES,
+    })
 
     // Seed the accumulator with opaque black.
     encoder
@@ -440,6 +557,7 @@ export class WebGpuCompositor {
 
     let layerSlot = 0
     let fxSlot = 0
+    let blurSlot = 0
     let drawn = 0
     // Composite is ordered front→back; iterate in reverse to draw back-to-front.
     for (let i = this.composite.length - 1; i >= 0; i--) {
@@ -451,29 +569,57 @@ export class WebGpuCompositor {
         const filter = (layer.effectConfig?.filter as string | undefined) ?? 'none'
         let cached = this.fxCache.get(layer.id)
         if (!cached || cached.filter !== filter) {
-          cached = { filter, matrix: colorMatrix(filter) }
+          cached = { filter, matrix: colorMatrix(filter), blur: blurRadius(filter) }
           this.fxCache.set(layer.id, cached)
         }
-        if (!cached.matrix) continue // none / blur-only / unsupported → no colour change
-        this.writeFx(fxSlot, cached.matrix, layer.opacity)
-        const pass = encoder.beginRenderPass({
-          colorAttachments: [{ view: this.accumView(writeTex), loadOp: 'clear', storeOp: 'store' }],
-        })
-        pass.setPipeline(this.fxPipeline)
-        pass.setBindGroup(
-          0,
-          this.device.createBindGroup({
-            layout: this.fxLayout,
-            entries: [
+        const { matrix, blur } = cached
+        if (!matrix && blur <= 0) continue // none / unsupported → no change
+        // opacity (params.x) is the EFFECT STRENGTH: fx_fs / fxmix_fs both
+        // mix(original, filtered, opacity) — 0 = off, 1 = full.
+        this.writeFx(fxSlot, matrix ?? IDENTITY_MAT4, layer.opacity)
+
+        if (blur <= 0) {
+          // Colour-only — one pass, opacity mix built in.
+          this.fsPass(encoder, this.accumView(writeTex), this.fxPipeline, this.fxLayout, [
+            { binding: 1, resource: this.sampler },
+            { binding: 3, resource: this.accumView(readTex) },
+            { binding: 5, resource: fxUni(fxSlot) },
+          ])
+          ;[readTex, writeTex] = [writeTex, readTex]
+        } else {
+          // colour(full) → blurH → blurV → mix(original, blurred, opacity).
+          // readTex ("below") is only ever READ here, so it survives to the mix.
+          let colorView = this.accumView(readTex)
+          if (matrix) {
+            this.fsPass(encoder, this.layerTexView, this.fxFullPipeline, this.fxLayout, [
               { binding: 1, resource: this.sampler },
               { binding: 3, resource: this.accumView(readTex) },
               { binding: 5, resource: fxUni(fxSlot) },
-            ],
-          }),
-        )
-        pass.draw(3)
-        pass.end()
-        ;[readTex, writeTex] = [writeTex, readTex]
+            ])
+            colorView = this.layerTexView
+          }
+          this.writeBlur(blurSlot, 1, 0, blur)
+          this.fsPass(encoder, this.accumView(writeTex), this.blurPipeline, this.blurLayout, [
+            { binding: 1, resource: this.sampler },
+            { binding: 3, resource: colorView },
+            { binding: 6, resource: blurUni(blurSlot) },
+          ])
+          blurSlot++
+          this.writeBlur(blurSlot, 0, 1, blur)
+          this.fsPass(encoder, this.layerTexView, this.blurPipeline, this.blurLayout, [
+            { binding: 1, resource: this.sampler },
+            { binding: 3, resource: this.accumView(writeTex) },
+            { binding: 6, resource: blurUni(blurSlot) },
+          ])
+          blurSlot++
+          this.fsPass(encoder, this.accumView(writeTex), this.mixPipeline, this.mixLayout, [
+            { binding: 1, resource: this.sampler },
+            { binding: 3, resource: this.accumView(readTex) },
+            { binding: 5, resource: fxUni(fxSlot) },
+            { binding: 7, resource: this.layerTexView },
+          ])
+          ;[readTex, writeTex] = [writeTex, readTex]
+        }
         fxSlot++
         drawn++
         continue
@@ -576,6 +722,7 @@ export class WebGpuCompositor {
   dispose(): void {
     this.layerUniforms.destroy()
     this.fxUniforms.destroy()
+    this.blurUniforms.destroy()
     this.accumA.destroy()
     this.accumB.destroy()
     this.layerTex.destroy()
