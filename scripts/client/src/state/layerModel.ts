@@ -10,17 +10,29 @@
 
 import type { BlendMode, ClipId, ClipKind, LayerId, LayerTransform } from '../pipeline/core/types'
 import { CAMERA_LAYER, VIDEO_LAYER, FEEDBACK_LAYER } from '../pipeline/core/types'
+import type { ClipRole } from '../pipeline/core/clipKinds'
 import { clipMeta, defaultMirror } from '../pipeline/core/clipKinds'
 
 /** One clip occupying a cell. Holds only descriptors — live media handles
- *  (camera stream, <video> element, remote clone) live in runtime singletons
- *  keyed by clip/layer id. */
+ *  (camera stream, <video> element, remote clone, effect instance) live in
+ *  runtime maps keyed by clip id. */
 export interface Clip {
   id: ClipId
   kind: ClipKind
   label: string
   /** Per-clip selfie flip; defaults from the kind (camera = true). */
   mirror: boolean
+  /** Per-clip OBS framing (absent = cover-fit). */
+  transform?: LayerTransform
+  // --- kind-specific payloads (only the relevant one set) ---
+  /** camera: chosen device (empty = default). */
+  deviceId?: string
+  /** video / image: the picked file (in-memory; not persisted — see needsFile). */
+  file?: File
+  /** True when a persisted file-backed clip needs the user to re-pick its file. */
+  needsFile?: boolean
+  /** effect: config for the CanvasEffect instance. */
+  effectConfig?: Record<string, unknown>
 }
 
 /** A grid cell — empty (clip === null → the "+ add clip" slot) or holding one clip. */
@@ -29,15 +41,19 @@ export interface Cell {
   clip: Clip | null
 }
 
-/** A compositing layer: a stack slot with its own mix + geometry and a track of
- *  cells, one of which is active. */
+/** A compositing layer: a stack slot with its own mix and a track of cells, one
+ *  of which is active. A layer is homogeneous: its `kind`/`role` are fixed by the
+ *  first clip added; extra cells are the same kind. Empty layer = kind null. */
 export interface Layer {
   id: LayerId
   name: string
+  /** Fixed by the first clip; null until the layer has one. */
+  kind: ClipKind | null
+  role: ClipRole | null
   opacity: number
   blend: BlendMode
-  /** OBS-style framing for this layer (absent = legacy cover-fit). Per-layer in
-   *  P1; moves onto the active clip in P3. */
+  /** OBS-style framing for this layer (absent = legacy cover-fit). Per-layer
+   *  fallback; the active clip's own transform takes precedence when set. */
   transform?: LayerTransform
   cells: Cell[]
   /** Which cell's clip is live; null = layer muted (no active clip). */
@@ -92,10 +108,28 @@ export function makeLayer(kind: ClipKind, name: string, id?: LayerId): Layer {
   return {
     id: id ?? freshId('layer'),
     name,
+    kind,
+    role: clipMeta(kind).role,
     opacity: 1,
     blend: 'normal',
     cells: [cell],
     activeCellId: cell.id,
+  }
+}
+
+/** A fresh empty layer: one empty cell, no kind yet (the grid's starting state
+ *  and what [+ layer] appends). Click its empty cell to pick a kind. */
+export function newEmptyLayer(name = 'Layer'): Layer {
+  const cell: Cell = { id: freshId('cell'), clip: null }
+  return {
+    id: freshId('layer'),
+    name,
+    kind: null,
+    role: null,
+    opacity: 1,
+    blend: 'normal',
+    cells: [cell],
+    activeCellId: null,
   }
 }
 

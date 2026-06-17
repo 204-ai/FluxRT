@@ -18,29 +18,46 @@ export type ClipKind = string // open union; 'camera' | 'video' | 'feedback' tod
  *                        (a video file; the element's playback state is owned
  *                        elsewhere and survives rail restarts).
  */
-export type ClipSourceForm = 'mediastream' | 'mediastream-clone' | 'element'
+export type ClipSourceForm = 'mediastream' | 'mediastream-clone' | 'element' | 'bitmap'
+
+/** A clip is either a frame SOURCE (camera/video/…) or an EFFECT that transforms
+ *  the composite of everything below it in the stack (draw/marker/shader). */
+export type ClipRole = 'source' | 'effect'
+
+/** How the store acquires a source clip's live media. */
+export type ClipAcquire = 'getUserMedia' | 'getDisplayMedia' | 'file' | 'remote' | 'none'
 
 export interface ClipKindMeta {
   kind: ClipKind
+  role: ClipRole
   label: string
-  /** Selfie flip belongs to the kind (camera = true). The layer's active clip
-   *  seeds its `mirror` from this. */
+  /** Selfie flip belongs to the kind (camera = true). A fresh clip seeds its
+   *  `mirror` from this. */
   mirrorable: boolean
-  /** May this kind drive the worker wake loop / set canvas dims / be the vision
-   *  tap base? camera & video = true; feedback = false (no own cadence). */
+  /** May this kind drive the worker wake loop / vision tap base? Frame-producing
+   *  inputs (camera/video/screen) = true; feedback/effects = false. When no base
+   *  is active the worker runs on a ticker. */
   canBeBase: boolean
-  sourceForm: ClipSourceForm
-  /** DropZone `accept` for cells that load media from a file. */
+  /** Source clips: how the live media crosses into a backend. Effect clips: none. */
+  sourceForm?: ClipSourceForm
+  /** Effect clips: the CanvasEffect registry name to instantiate. */
+  effectName?: string
+  /** How the store obtains the live source (source clips only). */
+  acquire?: ClipAcquire
+  /** DropZone `accept` for file-backed kinds. */
   accept?: string
 }
 
 export const CLIP_KINDS: Record<ClipKind, ClipKindMeta> = {
-  camera: { kind: 'camera', label: 'Camera', mirrorable: true, canBeBase: true, sourceForm: 'mediastream' },
-  video: { kind: 'video', label: 'Video', mirrorable: false, canBeBase: true, sourceForm: 'element', accept: 'video/*' },
-  feedback: { kind: 'feedback', label: 'Feedback', mirrorable: false, canBeBase: false, sourceForm: 'mediastream-clone' },
-  // A new mediastream kind reuses the camera source path verbatim — proof that a
-  // kind is one registry entry + an acquire (getDisplayMedia), no pipeline change.
-  screen: { kind: 'screen', label: 'Screen', mirrorable: false, canBeBase: true, sourceForm: 'mediastream' },
+  camera: { kind: 'camera', role: 'source', label: 'Camera', mirrorable: true, canBeBase: true, sourceForm: 'mediastream', acquire: 'getUserMedia' },
+  video: { kind: 'video', role: 'source', label: 'Video', mirrorable: false, canBeBase: true, sourceForm: 'element', acquire: 'file', accept: 'video/*' },
+  feedback: { kind: 'feedback', role: 'source', label: 'Feedback', mirrorable: false, canBeBase: false, sourceForm: 'mediastream-clone', acquire: 'remote' },
+  screen: { kind: 'screen', role: 'source', label: 'Screen', mirrorable: false, canBeBase: true, sourceForm: 'mediastream', acquire: 'getDisplayMedia' },
+  // Effect clips — interleaved into the back-to-front loop at their layer's
+  // position, transforming everything composited below. Reuse the existing
+  // CanvasEffect registry (effects/registry.ts) by name.
+  draw: { kind: 'draw', role: 'effect', label: 'Draw', mirrorable: false, canBeBase: false, effectName: 'drawLayer', acquire: 'none' },
+  marker: { kind: 'marker', role: 'effect', label: 'Marker', mirrorable: false, canBeBase: false, effectName: 'marker', acquire: 'none' },
 }
 
 /** Per-kind glyph for compact cell chips. */
@@ -49,16 +66,21 @@ export const CLIP_ICON: Record<ClipKind, string> = {
   video: '🎞',
   feedback: '🔁',
   screen: '🖥',
+  draw: '✏️',
+  marker: '⌖',
 }
 
-/** The kinds a user can ADD as a new layer/cell. (feedback is auto-wired from
- *  the remote output; camera is the seeded layer.) Ordered for the "+" menu. */
-export const ADDABLE_CLIP_KINDS: ClipKind[] = ['video', 'screen']
+/** The kinds a user can pick when filling an empty cell, ordered for the picker. */
+export const ADDABLE_CLIP_KINDS: ClipKind[] = ['camera', 'video', 'feedback', 'screen', 'draw', 'marker']
 
 export function clipMeta(kind: ClipKind): ClipKindMeta {
   const m = CLIP_KINDS[kind]
   if (!m) throw new Error('unknown clip kind: ' + kind)
   return m
+}
+
+export function isEffectKind(kind: ClipKind): boolean {
+  return CLIP_KINDS[kind]?.role === 'effect'
 }
 
 /** Default mirror for a fresh clip of this kind (selfie flip for the camera). */

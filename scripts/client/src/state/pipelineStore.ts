@@ -539,6 +539,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
         const layer: Layer = {
           id: layerId,
           name: file.name,
+          kind: 'video',
+          role: 'source',
           opacity: 1,
           blend: 'normal',
           cells: [{ id: cellId, clip }],
@@ -653,6 +655,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       const layer: Layer = {
         id: layerId,
         name: 'Screen',
+        kind: 'screen',
+        role: 'source',
         opacity: 1,
         blend: 'normal',
         cells: [{ id: cellId, clip }],
