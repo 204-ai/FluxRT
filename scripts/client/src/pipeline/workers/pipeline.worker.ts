@@ -416,7 +416,9 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       // refcount; the depth worker drop-and-replaces and closes it.
       if (depthWorker && baseFrame) {
         const dframe = baseFrame.clone()
-        depthWorker.postMessage({ type: 'frame', frame: dframe, tsMs }, [dframe])
+        // Match the base layer's selfie mirror so the depth aligns with the display.
+        const baseMirror = !!compositor?.composite.find((l) => l.id === baseLayerId)?.mirror
+        depthWorker.postMessage({ type: 'frame', frame: dframe, tsMs, mirror: baseMirror }, [dframe])
       }
 
       if (baseFrame) {

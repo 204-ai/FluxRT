@@ -10,13 +10,13 @@ import { DepthSession } from '../core/depthSession'
 
 type InMsg =
   | { type: 'init'; size?: number }
-  | { type: 'frame'; frame: VideoFrame; tsMs: number }
+  | { type: 'frame'; frame: VideoFrame; tsMs: number; mirror?: boolean }
   | { type: 'config'; size: number }
   | { type: 'close' }
 
 let session: DepthSession | null = null
 let busy = false
-let pending: { frame: VideoFrame; tsMs: number } | null = null
+let pending: { frame: VideoFrame; tsMs: number; mirror: boolean } | null = null
 // Throughput logging: compare our depth fps to the realtime demo's ~10fps.
 let fpsCount = 0
 let fpsMs = 0
@@ -27,11 +27,11 @@ function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
 }
 
 /** Run one inference; the freshly-allocated depth map is transferred back. */
-async function process(frame: VideoFrame, tsMs: number): Promise<void> {
+async function process(frame: VideoFrame, tsMs: number, mirror: boolean): Promise<void> {
   busy = true
   try {
     const t0 = performance.now()
-    const r = session ? await session.run(frame) : null
+    const r = session ? await session.run(frame, mirror) : null
     if (r) post({ type: 'depth', data: r.data, w: r.w, h: r.h, tsMs }, [r.data.buffer])
     // Log inference cost + achieved depth fps every ~2s (vs the demo's ~10fps).
     fpsCount++
@@ -52,7 +52,7 @@ async function process(frame: VideoFrame, tsMs: number): Promise<void> {
     if (pending) {
       const next = pending
       pending = null
-      void process(next.frame, next.tsMs)
+      void process(next.frame, next.tsMs, next.mirror)
     }
   }
 }
@@ -71,10 +71,10 @@ self.onmessage = async (e: MessageEvent<InMsg>) => {
     }
     if (busy) {
       pending?.frame.close()
-      pending = { frame: m.frame, tsMs: m.tsMs }
+      pending = { frame: m.frame, tsMs: m.tsMs, mirror: !!m.mirror }
       return
     }
-    void process(m.frame, m.tsMs)
+    void process(m.frame, m.tsMs, !!m.mirror)
   } else if (m.type === 'close') {
     pending?.frame.close()
     pending = null

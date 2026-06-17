@@ -94,12 +94,22 @@ export class DepthSession {
 
   /** Run one inference on a source frame/bitmap → normalized 8-bit depth map.
    *  Crosses the ORT-device → CPU boundary once via getData. null on failure. */
-  async run(src: VideoFrame | ImageBitmap): Promise<DepthResult | null> {
+  async run(src: VideoFrame | ImageBitmap, mirror = false): Promise<DepthResult | null> {
     if (!this.session || !this.inputTensor || !this.preCtx) return null
     try {
       const dim = this.dim
       // CPU preprocess: cover-fit into dim×dim, RGB, NCHW planar, ImageNet-normalize.
-      this.preCtx.drawImage(src as CanvasImageSource, 0, 0, dim, dim)
+      // Apply the source layer's selfie mirror so the depth map aligns L-R with the
+      // mirrored composite (depth runs on the raw base, which is pre-mirror).
+      if (mirror) {
+        this.preCtx.save()
+        this.preCtx.translate(dim, 0)
+        this.preCtx.scale(-1, 1)
+        this.preCtx.drawImage(src as CanvasImageSource, 0, 0, dim, dim)
+        this.preCtx.restore()
+      } else {
+        this.preCtx.drawImage(src as CanvasImageSource, 0, 0, dim, dim)
+      }
       const px = this.preCtx.getImageData(0, 0, dim, dim).data
       const plane = dim * dim
       for (let i = 0; i < plane; i++) {
