@@ -9,8 +9,9 @@
 import { DepthSession } from '../core/depthSession'
 
 type InMsg =
-  | { type: 'init' }
+  | { type: 'init'; size?: number }
   | { type: 'frame'; frame: VideoFrame; tsMs: number }
+  | { type: 'config'; size: number }
   | { type: 'close' }
 
 let session: DepthSession | null = null
@@ -59,8 +60,10 @@ async function process(frame: VideoFrame, tsMs: number): Promise<void> {
 self.onmessage = async (e: MessageEvent<InMsg>) => {
   const m = e.data
   if (m.type === 'init') {
-    session = await DepthSession.create()
+    session = await DepthSession.create(m.size)
     post(session ? { type: 'ready' } : { type: 'error', message: 'depth session failed to load' })
+  } else if (m.type === 'config') {
+    session?.setSize(m.size)
   } else if (m.type === 'frame') {
     if (!session) {
       m.frame.close()

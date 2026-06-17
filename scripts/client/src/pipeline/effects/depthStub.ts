@@ -13,10 +13,12 @@ export interface DepthConfig {
   mode: 'fog' | 'replace' | 'mask'
   near: number
   far: number
+  /** Model input size (multiple of 14). Bigger = sharper depth + slower. */
+  size: number
 }
 
 export function createDepthStub(config?: Record<string, unknown>): CanvasEffect<DepthConfig> {
-  const cfg: DepthConfig = { strength: 1, mode: 'fog', near: 0, far: 1, ...(config as Partial<DepthConfig>) }
+  const cfg: DepthConfig = { strength: 1, mode: 'replace', near: 0, far: 1, size: 518, ...(config as Partial<DepthConfig>) }
   return {
     name: 'depth',
     config: cfg,

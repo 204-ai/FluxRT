@@ -24,7 +24,7 @@ import { clipMeta, isEffectKind } from '../pipeline/core/clipKinds'
 /** Default config for a fresh effect clip of a kind. */
 function defaultEffectConfig(kind: ClipKind): Record<string, unknown> {
   if (kind === 'shader') return { filter: 'hue-rotate(90deg)' }
-  if (kind === 'depth') return { strength: 1, mode: 'fog', near: 0, far: 1 }
+  if (kind === 'depth') return { strength: 1, mode: 'replace', near: 0, far: 1, size: 518 }
   return {}
 }
 import type { Clip, Layer } from './layerModel'

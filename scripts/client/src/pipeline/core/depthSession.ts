@@ -3,21 +3,27 @@
 // Runs inside a DEDICATED depth worker (depth.worker.ts), continuously
 // (drop-and-replace) and off the compositing thread — mirroring the smooth
 // transformers.js webgpu-realtime-depth demo: depth-only execution, as fast as
-// the GPU allows, nothing else competing. ort owns its own GPUDevice (it can't
-// reuse an external one — microsoft/onnxruntime#26107), so the depth map crosses
-// back to the compositor via a small GPU->CPU readback (getData) per inference.
+// the GPU allows. ort owns its own GPUDevice (it can't reuse an external one —
+// microsoft/onnxruntime#26107), so the depth map crosses back to the compositor
+// via a small GPU->CPU readback (getData) per inference.
 //
-// ort is lazy-imported so the (multi-MB) runtime loads only when depth is on.
-// Model + ort wasm are vendored under public/ (no CDN — LAN demos).
+// Input size is configurable (the demo's "Image size" slider, default 518). It
+// MUST be a multiple of 14 (DINOv2 patch size). Bigger = sharper depth + slower
+// (e.g. ~504-518 ≈ the realtime demo's quality at ~7fps; 280 is faster + blurrier).
 
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
 
-// 20*14 — a patch-multiple (DINOv2 patch size 14). Smaller = far fewer ViT tokens
-// = much faster inference (tokens scale with (DIM/14)²) and cheaper CPU preprocess.
-const DIM = 280
+type Ort = typeof import('onnxruntime-web/webgpu')
+
+const DEFAULT_DIM = 518 // 37*14 — matches the model's native config + the demo's quality
 const MEAN = [0.485, 0.456, 0.406]
 const STD = [0.229, 0.224, 0.225]
 const MODEL_URL = '/models/depth/depth_anything_v2_vits_fp16.onnx'
+
+/** Snap to a multiple of 14, clamped to a sane range. */
+export function snapDim(n: number): number {
+  return Math.max(140, Math.min(700, Math.round(n / 14) * 14))
+}
 
 /** IEEE half (Uint16 bits) → float32. */
 function halfToFloat(h: number): number {
@@ -30,19 +36,21 @@ function halfToFloat(h: number): number {
 }
 
 export interface DepthResult {
-  data: Uint8Array // normalized 0..255, 0=far 1(255)=near
+  data: Uint8Array // normalized 0..255, 0=far 255=near
   w: number
   h: number
 }
 
 export class DepthSession {
   private session: InferenceSession | null = null
+  private ort: Ort | null = null
   private inputName = ''
   private outputName = ''
-  private pre = new OffscreenCanvas(DIM, DIM)
-  private preCtx = this.pre.getContext('2d', { willReadFrequently: true })
-  private input = new Float32Array(3 * DIM * DIM)
-  private inputTensor: Tensor | null = null
+  private dim = DEFAULT_DIM
+  private pre!: OffscreenCanvas
+  private preCtx!: OffscreenCanvasRenderingContext2D
+  private input!: Float32Array
+  private inputTensor!: Tensor
   // Running depth range (EMA) so the normalized brightness doesn't jump per frame.
   private runMin = 0
   private runMax = 0
@@ -50,27 +58,22 @@ export class DepthSession {
 
   /** Load the model on WebGPU (ort owns its own device). Returns null if WebGPU
    *  is unavailable or anything fails — depth then simply stays off. */
-  static async create(): Promise<DepthSession | null> {
+  static async create(dim = DEFAULT_DIM): Promise<DepthSession | null> {
     if (typeof navigator === 'undefined' || !navigator.gpu) return null
     try {
       const ort = await import('onnxruntime-web/webgpu')
       ort.env.wasm.wasmPaths = '/onnx/' // vendored jsep wasm (mirrors /mediapipe/wasm)
       ort.env.wasm.numThreads = 1 // WebGPU EP needs no threads → no COOP/COEP requirement
-      // Do NOT hand ort our adapter: the compositor already consumed it
-      // (a GPUAdapter creates exactly one device), so ort's requestDevice() would
-      // throw "adapter is consumed". Let ort request its OWN adapter+device — the
-      // depth map crosses back to the compositor device via the getData readback
-      // regardless (ort's device != the compositor's, by WebGPU design). The gpu
-      // probe above is only a "is WebGPU usable at all" gate.
       const s = new DepthSession()
+      s.ort = ort
       s.session = await ort.InferenceSession.create(MODEL_URL, {
         executionProviders: ['webgpu'],
-        preferredOutputLocation: 'gpu-buffer', // output stays on ORT's device during run
+        preferredOutputLocation: 'gpu-buffer',
       })
       s.inputName = s.session.inputNames[0] // expect 'pixel_values'
       s.outputName = s.session.outputNames[0] // expect 'predicted_depth'
-      s.inputTensor = new ort.Tensor('float32', s.input, [1, 3, DIM, DIM])
-      console.info('[depth] session ready', { in: s.inputName, out: s.outputName })
+      s.setSize(dim)
+      console.info('[depth] session ready', { in: s.inputName, out: s.outputName, dim: s.dim })
       return s
     } catch (e) {
       console.error('[depth] session create failed:', e)
@@ -78,16 +81,27 @@ export class DepthSession {
     }
   }
 
+  /** (Re)allocate the preprocess canvas + input tensor for a new input size. */
+  setSize(dim: number): void {
+    const d = snapDim(dim)
+    if (this.pre && d === this.dim) return
+    this.dim = d
+    this.pre = new OffscreenCanvas(d, d)
+    this.preCtx = this.pre.getContext('2d', { willReadFrequently: true })!
+    this.input = new Float32Array(3 * d * d)
+    if (this.ort) this.inputTensor = new this.ort.Tensor('float32', this.input, [1, 3, d, d])
+  }
+
   /** Run one inference on a source frame/bitmap → normalized 8-bit depth map.
-   *  Crosses the ORT-device → CPU boundary once via getData (required: ORT's
-   *  device != the compositor's). null on failure. */
+   *  Crosses the ORT-device → CPU boundary once via getData. null on failure. */
   async run(src: VideoFrame | ImageBitmap): Promise<DepthResult | null> {
     if (!this.session || !this.inputTensor || !this.preCtx) return null
     try {
-      // CPU preprocess: cover-fit into DIM×DIM, RGB, NCHW planar, ImageNet-normalize.
-      this.preCtx.drawImage(src as CanvasImageSource, 0, 0, DIM, DIM)
-      const px = this.preCtx.getImageData(0, 0, DIM, DIM).data
-      const plane = DIM * DIM
+      const dim = this.dim
+      // CPU preprocess: cover-fit into dim×dim, RGB, NCHW planar, ImageNet-normalize.
+      this.preCtx.drawImage(src as CanvasImageSource, 0, 0, dim, dim)
+      const px = this.preCtx.getImageData(0, 0, dim, dim).data
+      const plane = dim * dim
       for (let i = 0; i < plane; i++) {
         this.input[i] = (px[i * 4] / 255 - MEAN[0]) / STD[0]
         this.input[plane + i] = (px[i * 4 + 1] / 255 - MEAN[1]) / STD[1]
@@ -97,7 +111,6 @@ export class DepthSession {
       const out = outputs[this.outputName]
       const raw = (await out.getData(true)) as Float32Array | Uint16Array
       const [h, w] = out.dims.slice(-2) as [number, number]
-      // predicted_depth is unbounded relative inverse depth → per-frame min-max.
       const n = w * h
       const u8 = new Uint8Array(n)
       const isHalf = raw instanceof Uint16Array
@@ -110,8 +123,8 @@ export class DepthSession {
         if (v < mn) mn = v
         if (v > mx) mx = v
       }
-      // Running min/max (EMA): per-frame min-max makes the depth brightness jump
-      // frame-to-frame (visible flicker); smoothing the range stabilizes it.
+      // Running min/max (EMA): per-frame min-max makes brightness flicker; smoothing
+      // the range stabilizes it without per-pixel temporal lag.
       if (!this.haveRange) {
         this.runMin = mn
         this.runMax = mx
@@ -127,10 +140,6 @@ export class DepthSession {
         const t = (depth[i] - lo) * inv
         u8[i] = t < 0 ? 0 : t > 255 ? 255 : t
       }
-      // No per-pixel temporal smoothing: running continuously (off the composite
-      // thread) keeps the map fresh, like the realtime demo. The range EMA above
-      // is enough to stop brightness flicker. (The old Uint8 EMA also truncated
-      // fractional steps → systematic dark drift; removed.)
       return { data: u8, w, h }
     } catch (e) {
       console.error('[depth] run failed:', e)
@@ -141,6 +150,6 @@ export class DepthSession {
   dispose(): void {
     void this.session?.release()
     this.session = null
-    this.inputTensor = null
+    this.inputTensor = null as unknown as Tensor
   }
 }

@@ -62,6 +62,29 @@ let wake: (() => void) | null = null
 let visionPort: MessagePort | null = null
 // Step-0 profiling: rolling per-frame composite/tap timing, summarized to onLog.
 let profile = false
+// Dedicated depth worker + the last depth input size forwarded to it (the depth
+// effect layer's `size` config — the demo's "Image size" knob).
+let depthWorker: Worker | null = null
+let lastDepthSize = 0
+
+/** The depth effect layer's configured input size from the live composite, 0 if none. */
+function depthSizeFromComposite(): number {
+  if (!compositor) return 0
+  for (const l of compositor.composite) {
+    if (l.effectName === 'depth') return Number((l.effectConfig as Record<string, unknown> | undefined)?.size) || 0
+  }
+  return 0
+}
+
+/** Forward an image-size change to the depth worker (re-allocates its tensor). */
+function syncDepthSize(): void {
+  if (!depthWorker) return
+  const s = depthSizeFromComposite()
+  if (s > 0 && s !== lastDepthSize) {
+    lastDepthSize = s
+    depthWorker.postMessage({ type: 'config', size: s })
+  }
+}
 // Init gating: in the WebGPU path run() awaits the GPU device BEFORE its message
 // handlers (setLayerSource/baseSetter) and the compositor exist. Messages that
 // arrive during that await are buffered here and flushed in order once run() is
@@ -167,7 +190,6 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   // Depth Anything V2 runs in a DEDICATED worker (off this compositing thread),
   // continuously — so its inference never janks the 30fps composite. We stream
   // it composite frames and upload the depth maps it returns. Only on WebGPU.
-  let depthWorker: Worker | null = null
   if (msg.depth && webgpuComp) {
     depthWorker = new Worker(new URL('./depth.worker.ts', import.meta.url), { type: 'module' })
     depthWorker.onmessage = (de) => {
@@ -176,7 +198,8 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
       else if (dm.type === 'ready') post({ type: 'info', text: 'depth: ready' })
       else if (dm.type === 'error') post({ type: 'error', message: 'depth: ' + dm.message })
     }
-    depthWorker.postMessage({ type: 'init' })
+    lastDepthSize = depthSizeFromComposite()
+    depthWorker.postMessage({ type: 'init', size: lastDepthSize || undefined })
   }
 
   // Compositor (not depth) device loss freezes output forever otherwise — halt
@@ -466,6 +489,7 @@ function handle(m: Exclude<InMsg, { type: 'init' }>): void {
   switch (m.type) {
     case 'composite':
       compositor?.setComposite(m.op)
+      syncDepthSize() // forward a changed depth "image size" to the depth worker
       break
     case 'effect-config':
       compositor?.configureEffect(m.name, m.patch)

@@ -118,26 +118,46 @@ function ShaderDetail({ clip }: { clip: Clip }) {
 }
 
 const DEPTH_MODES = [
-  { label: 'Fog', value: 'fog' },
   { label: 'Replace (show depth)', value: 'replace' },
+  { label: 'Fog', value: 'fog' },
   { label: 'Mask (keep near)', value: 'mask' },
 ]
+// Model input size (multiple of 14). Bigger = sharper depth + slower — the
+// realtime demo's "Image size" knob (it runs ~504px). 252 is fast/blurry.
+const DEPTH_SIZES = [252, 392, 518, 686]
 
 function DepthDetail({ clip }: { clip: Clip }) {
   const setEffectConfig = usePipelineStore((s) => s.setEffectConfig)
-  const mode = (clip.effectConfig?.mode as string) ?? 'fog'
+  const mode = (clip.effectConfig?.mode as string) ?? 'replace'
+  const size = Number(clip.effectConfig?.size) || 518
   return (
-    <div className="clip-detail-row">
-      <span className="dim">mode</span>
-      <select className="device-pick" value={mode} onChange={(e) => setEffectConfig(clip.id, { mode: e.target.value })}>
-        {DEPTH_MODES.map((m) => (
-          <option key={m.value} value={m.value}>
-            {m.label}
-          </option>
-        ))}
-      </select>
-      <span className="dim">strength = layer opacity · needs WebGPU + depth flag</span>
-    </div>
+    <>
+      <div className="clip-detail-row">
+        <span className="dim">mode</span>
+        <select className="device-pick" value={mode} onChange={(e) => setEffectConfig(clip.id, { mode: e.target.value })}>
+          {DEPTH_MODES.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="clip-detail-row">
+        <span className="dim">image size</span>
+        <select
+          className="device-pick"
+          value={size}
+          onChange={(e) => setEffectConfig(clip.id, { size: Number(e.target.value) })}
+        >
+          {DEPTH_SIZES.map((s) => (
+            <option key={s} value={s}>
+              {s}px
+            </option>
+          ))}
+        </select>
+        <span className="dim">bigger = sharper + slower · strength = layer opacity · needs WebGPU</span>
+      </div>
+    </>
   )
 }
 
