@@ -228,6 +228,8 @@ __marimo__/
 
 # Per-machine generated / runtime-local files (untracked to avoid pull conflicts)
 scripts/saved_prompts.json
+# ComfyUI workflow exports — locally re-exported per machine (see /comfy/edit)
+scripts/comfy_workflows/*.json
 
 # npm lockfiles — this project uses yarn only; ignore any stray npm output
 package-lock.json
