@@ -250,6 +250,10 @@ export class WebGpuCompositor {
   private scratch = new Float32Array(12)
   private fxScratch = new Float32Array(20)
   private diag = 0
+  // Cache the composed colour matrix per effect layer; recompute only when its
+  // filter string changes (keyed by layer id, not string, so an animated
+  // hue-rotate doesn't grow the map unboundedly).
+  private fxCache = new Map<LayerId, { filter: string; matrix: Float32Array | null }>()
 
   private layerLayout: GPUBindGroupLayout
   private blendLayout: GPUBindGroupLayout
@@ -263,6 +267,11 @@ export class WebGpuCompositor {
   private accumA!: GPUTexture
   private accumB!: GPUTexture
   private layerTex!: GPUTexture
+  // Stable views for the persistent targets, created once (the canvas view must
+  // still be taken per-frame from getCurrentTexture).
+  private accumAView!: GPUTextureView
+  private accumBView!: GPUTextureView
+  private layerTexView!: GPUTextureView
 
   constructor(
     gpu: GpuContext,
@@ -346,6 +355,14 @@ export class WebGpuCompositor {
     this.accumA = this.device.createTexture({ size, format: ACCUM_FORMAT, usage })
     this.accumB = this.device.createTexture({ size, format: ACCUM_FORMAT, usage })
     this.layerTex = this.device.createTexture({ size, format: ACCUM_FORMAT, usage })
+    this.accumAView = this.accumA.createView()
+    this.accumBView = this.accumB.createView()
+    this.layerTexView = this.layerTex.createView()
+  }
+
+  /** Stable view for one of the two ping-pong accumulators. */
+  private accumView(tex: GPUTexture): GPUTextureView {
+    return tex === this.accumA ? this.accumAView : this.accumBView
   }
 
   setComposite(value: Composite | CompositeOp): void {
@@ -400,7 +417,7 @@ export class WebGpuCompositor {
     const encoder = this.device.createCommandEncoder()
     let readTex = this.accumA
     let writeTex = this.accumB
-    const layerView = this.layerTex.createView()
+    const layerView = this.layerTexView
     const layerUni = (slot: number): GPUBufferBinding => ({
       buffer: this.layerUniforms,
       offset: slot * UNIFORM_STRIDE,
@@ -416,7 +433,7 @@ export class WebGpuCompositor {
     encoder
       .beginRenderPass({
         colorAttachments: [
-          { view: readTex.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' },
+          { view: this.accumView(readTex), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' },
         ],
       })
       .end()
@@ -432,11 +449,15 @@ export class WebGpuCompositor {
       if (layer.effectName) {
         if (layer.effectName !== 'shader' || fxSlot >= MAX_LAYERS) continue // only 'shader' ported
         const filter = (layer.effectConfig?.filter as string | undefined) ?? 'none'
-        const matrix = colorMatrix(filter)
-        if (!matrix) continue // none / blur-only / unsupported → no colour change
-        this.writeFx(fxSlot, matrix, layer.opacity)
+        let cached = this.fxCache.get(layer.id)
+        if (!cached || cached.filter !== filter) {
+          cached = { filter, matrix: colorMatrix(filter) }
+          this.fxCache.set(layer.id, cached)
+        }
+        if (!cached.matrix) continue // none / blur-only / unsupported → no colour change
+        this.writeFx(fxSlot, cached.matrix, layer.opacity)
         const pass = encoder.beginRenderPass({
-          colorAttachments: [{ view: writeTex.createView(), loadOp: 'clear', storeOp: 'store' }],
+          colorAttachments: [{ view: this.accumView(writeTex), loadOp: 'clear', storeOp: 'store' }],
         })
         pass.setPipeline(this.fxPipeline)
         pass.setBindGroup(
@@ -445,7 +466,7 @@ export class WebGpuCompositor {
             layout: this.fxLayout,
             entries: [
               { binding: 1, resource: this.sampler },
-              { binding: 3, resource: readTex.createView() },
+              { binding: 3, resource: this.accumView(readTex) },
               { binding: 5, resource: fxUni(fxSlot) },
             ],
           }),
@@ -488,7 +509,7 @@ export class WebGpuCompositor {
       // Pass B: blend(read, scratch) → write, then ping-pong.
       {
         const pass = encoder.beginRenderPass({
-          colorAttachments: [{ view: writeTex.createView(), loadOp: 'clear', storeOp: 'store' }],
+          colorAttachments: [{ view: this.accumView(writeTex), loadOp: 'clear', storeOp: 'store' }],
         })
         pass.setPipeline(this.blendPipeline)
         pass.setBindGroup(
@@ -498,7 +519,7 @@ export class WebGpuCompositor {
             entries: [
               { binding: 0, resource: layerUni(layerSlot) },
               { binding: 1, resource: this.sampler },
-              { binding: 3, resource: readTex.createView() },
+              { binding: 3, resource: this.accumView(readTex) },
               { binding: 4, resource: layerView },
             ],
           }),
@@ -540,7 +561,7 @@ export class WebGpuCompositor {
         layout: this.blitLayout,
         entries: [
           { binding: 1, resource: this.sampler },
-          { binding: 3, resource: readTex.createView() },
+          { binding: 3, resource: this.accumView(readTex) },
         ],
       }),
     )
