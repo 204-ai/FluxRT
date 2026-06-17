@@ -98,11 +98,40 @@ function FeedbackDetail() {
   return <span className="dim">{live ? 'output → input loop (live)' : 'waiting for the stream to run'}</span>
 }
 
+const SHADER_FILTERS: { label: string; value: string }[] = [
+  { label: 'Hue rotate', value: 'hue-rotate(90deg)' },
+  { label: 'Invert', value: 'invert(1)' },
+  { label: 'Saturate', value: 'saturate(2)' },
+  { label: 'Grayscale', value: 'grayscale(1)' },
+  { label: 'Sepia', value: 'sepia(1)' },
+  { label: 'Contrast', value: 'contrast(1.6)' },
+  { label: 'Blur', value: 'blur(4px)' },
+  { label: 'None', value: 'none' },
+]
+
+function ShaderDetail({ clip }: { clip: Clip }) {
+  const setEffectConfig = usePipelineStore((s) => s.setEffectConfig)
+  const filter = (clip.effectConfig?.filter as string) ?? 'none'
+  return (
+    <div className="clip-detail-row">
+      <span className="dim">filter</span>
+      <select className="device-pick" value={filter} onChange={(e) => setEffectConfig(clip.id, { filter: e.target.value })}>
+        {SHADER_FILTERS.map((f) => (
+          <option key={f.value} value={f.value}>
+            {f.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
 function ClipDetailBody({ clip }: { clip: Clip }) {
   if (clip.kind === 'camera') return <CameraDetail clip={clip} />
   if (clip.kind === 'video') return <VideoDetail clip={clip} />
   if (clip.kind === 'feedback') return <FeedbackDetail />
   if (clip.kind === 'screen') return <span className="dim">screen share — live</span>
+  if (clip.kind === 'shader') return <ShaderDetail clip={clip} />
   return <span className="dim">no details for this clip</span>
 }
 

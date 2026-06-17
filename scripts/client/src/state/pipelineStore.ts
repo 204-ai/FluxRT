@@ -18,8 +18,14 @@ import {
   releaseVideoSource,
 } from './runtime'
 import { getHealthz } from '../lib/api'
-import type { BaseSource, BlendMode, ClipId, Composite, LayerId, LayerTransform } from '../pipeline/core/types'
+import type { BaseSource, BlendMode, ClipId, ClipKind, Composite, LayerId, LayerTransform } from '../pipeline/core/types'
 import { clipMeta, isEffectKind } from '../pipeline/core/clipKinds'
+
+/** Default config for a fresh effect clip of a kind. */
+function defaultEffectConfig(kind: ClipKind): Record<string, unknown> {
+  if (kind === 'shader') return { filter: 'hue-rotate(90deg)' }
+  return {}
+}
 import type { Clip, Layer } from './layerModel'
 import {
   activeClip,
@@ -93,6 +99,8 @@ interface PipelineState {
   fillCellVideo(layerId: LayerId, cellId: string, file: File): Promise<void>
   fillCellScreen(layerId: LayerId, cellId: string): Promise<void>
   fillCellFeedback(layerId: LayerId, cellId: string): Promise<void>
+  fillCellEffect(layerId: LayerId, cellId: string, kind: ClipKind): Promise<void>
+  setEffectConfig(clipId: ClipId, patch: Record<string, unknown>): void
 
   // --- per-clip / per-layer controls ---
   setClipDevice(clipId: ClipId, deviceId: string): Promise<void>
@@ -526,6 +534,30 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       const clip = makeClip('feedback', 'Feedback')
       placeClip(layerId, cellId, clip)
       await syncPipeline()
+    },
+
+    async fillCellEffect(layerId, cellId, kind) {
+      const clip = makeClip(kind, clipMeta(kind).label)
+      clip.effectConfig = defaultEffectConfig(kind)
+      placeClip(layerId, cellId, clip)
+      await syncPipeline()
+    },
+
+    setEffectConfig(clipId, patch) {
+      const found = findClip(get().layers, clipId)
+      if (!found) return
+      const merged = { ...found.clip.effectConfig, ...patch }
+      set((s) => ({
+        layers: s.layers.map((l) => ({
+          ...l,
+          cells: l.cells.map((c) =>
+            c.clip?.id === clipId ? { ...c, clip: { ...c.clip, effectConfig: merged } } : c,
+          ),
+        })),
+      }))
+      if (activeClip(found.layer)?.id === clipId) {
+        rail.setComposite({ op: 'patch', layers: [{ id: found.layer.id, effectConfig: merged }] })
+      }
     },
 
     async setClipDevice(clipId, deviceId) {

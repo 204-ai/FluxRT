@@ -5,10 +5,12 @@
 import type { CanvasEffect } from '../core/types'
 import { createMarkerEffect } from './marker'
 import { createDrawLayerEffect } from './drawLayer'
+import { createShaderEffect } from './shader'
 
 const FACTORIES: Record<string, (config?: Record<string, unknown>) => CanvasEffect<any>> = {
   marker: (c) => createMarkerEffect(c),
   drawLayer: (c) => createDrawLayerEffect(c),
+  shader: (c) => createShaderEffect(c),
 }
 
 export function createEffect(name: string, config?: Record<string, unknown>): CanvasEffect<any> {

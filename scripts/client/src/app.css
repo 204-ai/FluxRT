@@ -275,7 +275,8 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px;
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;
 }
-.cell-track { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; }
+/* No overflow clipping here — it would hide the absolutely-positioned kind menu. */
+.cell-track { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .clip-cell {
   flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
   height: 26px; max-width: 140px; padding: 0 6px;
@@ -299,6 +300,8 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   font-size: 12px; padding: 5px 8px; border-radius: 4px; cursor: pointer;
 }
 .kind-opt:hover { background: #2e2e2e; }
+.kind-group { font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #777; padding: 4px 8px 2px; }
+.kind-backdrop { position: fixed; inset: 0; z-index: 29; }
 .layer-row {
   display: flex; align-items: center; gap: 8px;
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 8px;

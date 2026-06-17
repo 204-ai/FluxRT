@@ -7,9 +7,9 @@
 import { useRef, useState } from 'react'
 import { usePipelineStore } from '../../state/pipelineStore'
 import { useSessionStore } from '../../state/sessionStore'
-import { activeClip, layerKind, type Cell, type Layer } from '../../state/layerModel'
+import { activeClip, type Cell, type Layer } from '../../state/layerModel'
 import type { BlendMode, ClipKind, LayerId } from '../../pipeline/core/types'
-import { CLIP_ICON, clipMeta } from '../../pipeline/core/clipKinds'
+import { CLIP_ICON, clipMeta, isEffectKind } from '../../pipeline/core/clipKinds'
 
 const BLENDS: BlendMode[] = ['normal', 'screen', 'multiply', 'difference']
 const BLEND_SHORT: Record<BlendMode, string> = {
@@ -18,8 +18,11 @@ const BLEND_SHORT: Record<BlendMode, string> = {
   multiply: 'mul',
   difference: 'dif',
 }
-// Source kinds offered in the cell picker (effect clips arrive in a later phase).
-const SOURCE_KINDS: ClipKind[] = ['camera', 'video', 'feedback', 'screen']
+// Cell picker, grouped. (image: static-frame path pending; draw/marker: global
+// tools for now.)
+const PICK_SOURCES: ClipKind[] = ['camera', 'video', 'feedback', 'screen']
+const PICK_EFFECTS: ClipKind[] = ['shader']
+const ALL_PICKABLE: ClipKind[] = [...PICK_SOURCES, ...PICK_EFFECTS]
 
 /** Per-layer mix: frame button + blend cycle + opacity fader. */
 function LayerMix({ layer }: { layer: Layer }) {
@@ -61,37 +64,59 @@ function LayerMix({ layer }: { layer: Layer }) {
   )
 }
 
-/** Kind picker shown over an empty cell. Camera/feedback/screen fill immediately;
- *  video opens a file picker. */
+/** Grouped dropdown shown over an empty cell. Camera/feedback/screen/effects
+ *  fill immediately; video opens a file picker. */
 function KindPicker({ layerId, cellId, allowed }: { layerId: LayerId; cellId: string; allowed: ClipKind[] }) {
   const fillCamera = usePipelineStore((s) => s.fillCellCamera)
   const fillVideo = usePipelineStore((s) => s.fillCellVideo)
   const fillFeedback = usePipelineStore((s) => s.fillCellFeedback)
   const fillScreen = usePipelineStore((s) => s.fillCellScreen)
+  const fillEffect = usePipelineStore((s) => s.fillCellEffect)
   const fileRef = useRef<HTMLInputElement>(null)
   const [open, setOpen] = useState(false)
 
   const pick = (kind: ClipKind) => {
     setOpen(false)
-    if (kind === 'camera') void fillCamera(layerId, cellId, '')
+    if (kind === 'video') fileRef.current?.click()
+    else if (kind === 'camera') void fillCamera(layerId, cellId, '')
     else if (kind === 'feedback') void fillFeedback(layerId, cellId)
     else if (kind === 'screen') void fillScreen(layerId, cellId)
-    else if (kind === 'video') fileRef.current?.click()
+    else if (isEffectKind(kind)) void fillEffect(layerId, cellId, kind)
   }
+
+  const sources = PICK_SOURCES.filter((k) => allowed.includes(k))
+  const effects = PICK_EFFECTS.filter((k) => allowed.includes(k))
 
   return (
     <div className="cell-add">
-      <button className="clip-cell empty" title="Add a clip" onClick={() => setOpen((v) => !v)}>
+      <button
+        className="clip-cell empty"
+        title="Add a clip"
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen((v) => !v)
+        }}
+      >
         +
       </button>
       {open && (
-        <div className="kind-menu" onClick={(e) => e.stopPropagation()}>
-          {allowed.map((k) => (
-            <button key={k} className="kind-opt" title={clipMeta(k).label} onClick={() => pick(k)}>
-              {CLIP_ICON[k] ?? '◻'} {clipMeta(k).label}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="kind-backdrop" onClick={() => setOpen(false)} />
+          <div className="kind-menu" onClick={(e) => e.stopPropagation()}>
+            {sources.length > 0 && <div className="kind-group">Sources</div>}
+            {sources.map((k) => (
+              <button key={k} className="kind-opt" onClick={() => pick(k)}>
+                {CLIP_ICON[k] ?? '◻'} {clipMeta(k).label}
+              </button>
+            ))}
+            {effects.length > 0 && <div className="kind-group">Effects</div>}
+            {effects.map((k) => (
+              <button key={k} className="kind-opt" onClick={() => pick(k)}>
+                {CLIP_ICON[k] ?? '◻'} {clipMeta(k).label}
+              </button>
+            ))}
+          </div>
+        </>
       )}
       <input
         ref={fileRef}
@@ -116,7 +141,7 @@ function ClipCell({ layer, cell }: { layer: Layer; cell: Cell }) {
   const clip = cell.clip
 
   if (!clip) {
-    const allowed = layer.kind ? [layer.kind] : SOURCE_KINDS
+    const allowed = layer.kind ? [layer.kind] : ALL_PICKABLE
     return <KindPicker layerId={layer.id} cellId={cell.id} allowed={allowed} />
   }
   const isActive = layer.activeCellId === cell.id
@@ -159,9 +184,6 @@ function LayerRow({ layer, index, count }: { layer: Layer; index: number; count:
         <button className="icon-btn" title="Move down" disabled={index === count - 1} onClick={(e) => { e.stopPropagation(); moveLayer(layer.id, 1) }}>▼</button>
       </div>
       <div className="layer-grid-row">
-        <span className="layer-name" title={layerKind(layer) ?? 'empty'}>
-          {layerKind(layer) ? `${CLIP_ICON[layerKind(layer)!] ?? ''} ${layer.name}` : layer.name}
-        </span>
         <div className="cell-track">
           {layer.cells.map((cell) => (
             <ClipCell key={cell.id} layer={layer} cell={cell} />

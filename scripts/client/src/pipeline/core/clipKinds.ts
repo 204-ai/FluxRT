@@ -53,11 +53,15 @@ export const CLIP_KINDS: Record<ClipKind, ClipKindMeta> = {
   video: { kind: 'video', role: 'source', label: 'Video', mirrorable: false, canBeBase: true, sourceForm: 'element', acquire: 'file', accept: 'video/*' },
   feedback: { kind: 'feedback', role: 'source', label: 'Feedback', mirrorable: false, canBeBase: false, sourceForm: 'mediastream-clone', acquire: 'remote' },
   screen: { kind: 'screen', role: 'source', label: 'Screen', mirrorable: false, canBeBase: true, sourceForm: 'mediastream', acquire: 'getDisplayMedia' },
+  // A still image — a static frame; can't drive cadence (the worker ticker
+  // composites it). One registry entry + a bitmap source path.
+  image: { kind: 'image', role: 'source', label: 'Image', mirrorable: false, canBeBase: false, sourceForm: 'bitmap', acquire: 'file', accept: 'image/*' },
   // Effect clips — interleaved into the back-to-front loop at their layer's
   // position, transforming everything composited below. Reuse the existing
   // CanvasEffect registry (effects/registry.ts) by name.
   draw: { kind: 'draw', role: 'effect', label: 'Draw', mirrorable: false, canBeBase: false, effectName: 'drawLayer', acquire: 'none' },
   marker: { kind: 'marker', role: 'effect', label: 'Marker', mirrorable: false, canBeBase: false, effectName: 'marker', acquire: 'none' },
+  shader: { kind: 'shader', role: 'effect', label: 'Shader', mirrorable: false, canBeBase: false, effectName: 'shader', acquire: 'none' },
 }
 
 /** Per-kind glyph for compact cell chips. */
@@ -66,12 +70,18 @@ export const CLIP_ICON: Record<ClipKind, string> = {
   video: '🎞',
   feedback: '🔁',
   screen: '🖥',
+  image: '🖼',
   draw: '✏️',
   marker: '⌖',
+  shader: '✨',
 }
 
-/** The kinds a user can pick when filling an empty cell, ordered for the picker. */
-export const ADDABLE_CLIP_KINDS: ClipKind[] = ['camera', 'video', 'feedback', 'screen', 'draw', 'marker']
+/** Source kinds offered in the cell picker. */
+export const SOURCE_CLIP_KINDS: ClipKind[] = ['camera', 'video', 'feedback', 'screen', 'image']
+/** Effect kinds offered in the cell picker (draw stays a global tool for now). */
+export const EFFECT_CLIP_KINDS: ClipKind[] = ['marker', 'shader']
+/** All kinds a user can pick when filling an empty cell. */
+export const ADDABLE_CLIP_KINDS: ClipKind[] = [...SOURCE_CLIP_KINDS, ...EFFECT_CLIP_KINDS]
 
 export function clipMeta(kind: ClipKind): ClipKindMeta {
   const m = CLIP_KINDS[kind]
