@@ -30,12 +30,16 @@ export function createShaderEffect(config?: Record<string, unknown>): CanvasEffe
         tmpCtx = tmp.getContext('2d')
       }
       if (!tmpCtx) return
-      // Snapshot what's been composited below, then paint it back filtered.
+      // Snapshot what's been composited below, then paint the FILTERED copy back
+      // ON TOP at the compositor's globalAlpha (= the layer opacity). Source-over
+      // of filtered@opacity over the untouched original yields
+      // mix(original, filtered, opacity) — opacity is the effect STRENGTH, 0=off,
+      // 1=full — matching the WebGPU compositor. (Clearing first instead would
+      // drop the original and make opacity fade to transparent/black.)
       tmpCtx.clearRect(0, 0, W, H)
       tmpCtx.drawImage(ctx.canvas as CanvasImageSource, 0, 0)
       ctx.save()
       ctx.filter = cfg.filter
-      ctx.clearRect(0, 0, W, H)
       ctx.drawImage(tmp as CanvasImageSource, 0, 0)
       ctx.restore()
       ctx.filter = 'none'
