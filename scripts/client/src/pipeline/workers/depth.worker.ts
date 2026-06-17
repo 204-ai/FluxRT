@@ -16,6 +16,10 @@ type InMsg =
 let session: DepthSession | null = null
 let busy = false
 let pending: { frame: VideoFrame; tsMs: number } | null = null
+// Throughput logging: compare our depth fps to the realtime demo's ~10fps.
+let fpsCount = 0
+let fpsMs = 0
+let fpsLast = performance.now()
 
 function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
   ;(self as unknown as Worker).postMessage(msg, transfer)
@@ -25,8 +29,19 @@ function post(msg: Record<string, unknown>, transfer: Transferable[] = []) {
 async function process(frame: VideoFrame, tsMs: number): Promise<void> {
   busy = true
   try {
+    const t0 = performance.now()
     const r = session ? await session.run(frame) : null
     if (r) post({ type: 'depth', data: r.data, w: r.w, h: r.h, tsMs }, [r.data.buffer])
+    // Log inference cost + achieved depth fps every ~2s (vs the demo's ~10fps).
+    fpsCount++
+    fpsMs += performance.now() - t0
+    const now = performance.now()
+    if (now - fpsLast >= 2000) {
+      console.info(`[depth] ${(fpsMs / fpsCount).toFixed(1)}ms/infer · ${((fpsCount * 1000) / (now - fpsLast)).toFixed(1)} fps`)
+      fpsCount = 0
+      fpsMs = 0
+      fpsLast = now
+    }
   } catch (e) {
     post({ type: 'error', message: e instanceof Error ? e.message : String(e) })
   } finally {
