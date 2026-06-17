@@ -17,7 +17,6 @@
 import { Compositor, type FrameMap } from '../core/compositor'
 import { WebGpuCompositor } from '../core/webgpuCompositor'
 import { getGpuContext, setGpuLostHandler } from '../core/gpu'
-import { DepthSession } from '../core/depthSession'
 import type { Composite, CompositeOp, EffectInit, LayerId } from '../core/types'
 
 interface LayerInit {
@@ -163,26 +162,32 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
   compositor.setComposite(msg.composite)
   compositor.setEffects(msg.effects)
 
-  // Depth Anything V2 (WebGPU + ort-web). Loaded ASYNC and fire-and-forget so the
-  // composite loop starts immediately; depth kicks in once the model is ready. A
-  // `depth` effect layer samples the map. Only on the WebGPU compositor.
   const webgpuComp = comp instanceof WebGpuCompositor ? comp : null
-  // Ref object (not a bare `let`): the session is assigned inside an async
-  // callback, which TS would otherwise narrow the `let` away from.
-  const depthRef: { s: DepthSession | null } = { s: null }
+
+  // Depth Anything V2 runs in a DEDICATED worker (off this compositing thread),
+  // continuously — so its inference never janks the 30fps composite. We stream
+  // it composite frames and upload the depth maps it returns. Only on WebGPU.
+  let depthWorker: Worker | null = null
   if (msg.depth && webgpuComp) {
-    void DepthSession.create().then((s) => {
-      depthRef.s = s
-      post(s ? { type: 'info', text: 'depth: ready' } : { type: 'error', message: 'depth: failed to load' })
-    })
-    setGpuLostHandler(() => {
-      depthRef.s?.dispose()
-      depthRef.s = null
+    depthWorker = new Worker(new URL('./depth.worker.ts', import.meta.url), { type: 'module' })
+    depthWorker.onmessage = (de) => {
+      const dm = de.data
+      if (dm.type === 'depth') webgpuComp.setDepthData(dm.data as Uint8Array, dm.w as number, dm.h as number)
+      else if (dm.type === 'ready') post({ type: 'info', text: 'depth: ready' })
+      else if (dm.type === 'error') post({ type: 'error', message: 'depth: ' + dm.message })
+    }
+    depthWorker.postMessage({ type: 'init' })
+  }
+
+  // Compositor (not depth) device loss freezes output forever otherwise — halt
+  // the loop and signal so the host can restart the pipeline.
+  if (webgpuComp) {
+    setGpuLostHandler((info) => {
+      post({ type: 'error', message: 'webgpu device lost — restart pipeline: ' + (info?.message ?? '') })
+      running = false
+      wake?.()
     })
   }
-  const DEPTH_EVERY_N = 3 // kick off more often (skip-when-busy caps at inference rate)
-  let depthCount = 0
-  let depthBusy = false
 
   const writer = writable.getWriter()
   running = !stopRequested // a stop during async init must not start the loop
@@ -379,25 +384,16 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
         }
       }
 
-      // Depth cadence: every Nth frame, snapshot the composite and run DAv2 OFF
-      // the loop (skip ticks while a run is in flight). The depth texture persists
-      // between runs, so the depth layer reuses the last map on intervening frames.
-      if (depthRef.s && webgpuComp && ++depthCount % DEPTH_EVERY_N === 0 && !depthBusy) {
-        const ds = depthRef.s
-        depthBusy = true
-        const snap = new VideoFrame(canvas, { timestamp: tsOut })
-        void ds
-          .run(snap)
-          .then((r) => {
-            if (r) webgpuComp.setDepthData(r.data, r.w, r.h)
-          })
-          .finally(() => {
-            snap.close()
-            depthBusy = false
-          })
+      const out = new VideoFrame(canvas, { timestamp: tsOut })
+
+      // Stream the composite to the depth worker every frame; it drop-and-replaces
+      // and runs as fast as it can (continuous = smooth, like the realtime demo).
+      // clone() is a cheap refcount, not a pixel copy — coalesces the capture.
+      if (depthWorker) {
+        const dframe = out.clone()
+        depthWorker.postMessage({ type: 'frame', frame: dframe, tsMs }, [dframe])
       }
 
-      const out = new VideoFrame(canvas, { timestamp: tsOut })
       if (baseFrame) {
         baseFrame.close()
         openFrames--
@@ -435,8 +431,12 @@ async function run(msg: Extract<InMsg, { type: 'init' }>) {
     baseSetter = null
     visionPort?.close()
     visionPort = null
-    depthRef.s?.dispose()
-    depthRef.s = null
+    if (depthWorker) {
+      depthWorker.postMessage({ type: 'close' }) // dispose the ort session, then terminate
+      const dw = depthWorker
+      setTimeout(() => dw.terminate(), 250)
+      depthWorker = null
+    }
     setGpuLostHandler(null)
     for (const slot of slots.values()) {
       try {

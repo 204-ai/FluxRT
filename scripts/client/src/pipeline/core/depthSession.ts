@@ -1,19 +1,16 @@
 // Depth Anything V2 (small) depth estimation via onnxruntime-web on WebGPU.
 //
-// IMPORTANT (verified against ort-web source + issue microsoft/onnxruntime#26107):
-// ort-web does NOT let you reuse an external GPUDevice — it always derives its
-// OWN device from the adapter, and WebGPU forbids using device-A resources on
-// device-B. So we share only the ADAPTER (capability consistency) and accept
-// that ort runs on its own device. The depth map crosses back to the compositor
-// device via ONE GPU->CPU readback (getData) of a small map (~392x392), at the
-// reduced cadence the worker drives — NOT per composite frame.
+// Runs inside a DEDICATED depth worker (depth.worker.ts), continuously
+// (drop-and-replace) and off the compositing thread — mirroring the smooth
+// transformers.js webgpu-realtime-depth demo: depth-only execution, as fast as
+// the GPU allows, nothing else competing. ort owns its own GPUDevice (it can't
+// reuse an external one — microsoft/onnxruntime#26107), so the depth map crosses
+// back to the compositor via a small GPU->CPU readback (getData) per inference.
 //
-// ort is lazy-imported so the (multi-MB) runtime is only fetched when depth is
-// actually enabled; with the flag off it never loads. Model + ort wasm are
-// vendored under public/ (no CDN — LAN demos), like the MediaPipe assets.
+// ort is lazy-imported so the (multi-MB) runtime loads only when depth is on.
+// Model + ort wasm are vendored under public/ (no CDN — LAN demos).
 
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
-import { getGpuContext } from './gpu'
 
 // 20*14 — a patch-multiple (DINOv2 patch size 14). Smaller = far fewer ViT tokens
 // = much faster inference (tokens scale with (DIM/14)²) and cheaper CPU preprocess.
@@ -50,15 +47,11 @@ export class DepthSession {
   private runMin = 0
   private runMax = 0
   private haveRange = false
-  // Temporal smoothing of the output map (eased toward each new inference) so the
-  // depth glides across the low-fps updates instead of snapping.
-  private smoothU8: Uint8Array | null = null
 
-  /** Load the model on WebGPU (sharing the compositor's adapter). Returns null
-   *  if WebGPU is unavailable or anything fails — depth then simply stays off. */
+  /** Load the model on WebGPU (ort owns its own device). Returns null if WebGPU
+   *  is unavailable or anything fails — depth then simply stays off. */
   static async create(): Promise<DepthSession | null> {
-    const gpu = await getGpuContext()
-    if (!gpu) return null
+    if (typeof navigator === 'undefined' || !navigator.gpu) return null
     try {
       const ort = await import('onnxruntime-web/webgpu')
       ort.env.wasm.wasmPaths = '/onnx/' // vendored jsep wasm (mirrors /mediapipe/wasm)
@@ -134,18 +127,11 @@ export class DepthSession {
         const t = (depth[i] - lo) * inv
         u8[i] = t < 0 ? 0 : t > 255 ? 255 : t
       }
-      // Temporal smoothing: ease the output toward the new map so the depth
-      // glides across (low-fps) inferences instead of snapping. (Per-frame GPU
-      // ease is a future improvement; this is CPU-side and can't break the
-      // shader module.) writeTexture copies the data, so reusing the array is OK.
-      if (!this.smoothU8 || this.smoothU8.length !== n) {
-        this.smoothU8 = u8.slice()
-      } else {
-        const a = 0.5
-        const s = this.smoothU8
-        for (let i = 0; i < n; i++) s[i] = s[i] + (u8[i] - s[i]) * a
-      }
-      return { data: this.smoothU8, w, h }
+      // No per-pixel temporal smoothing: running continuously (off the composite
+      // thread) keeps the map fresh, like the realtime demo. The range EMA above
+      // is enough to stop brightness flicker. (The old Uint8 EMA also truncated
+      // fractional steps → systematic dark drift; removed.)
+      return { data: u8, w, h }
     } catch (e) {
       console.error('[depth] run failed:', e)
       return null
