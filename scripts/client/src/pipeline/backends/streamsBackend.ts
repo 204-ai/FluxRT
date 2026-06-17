@@ -15,7 +15,6 @@ import type {
   SourceSet,
   TapCallback,
 } from '../core/types'
-import { CAMERA_LAYER, VIDEO_LAYER } from '../core/types'
 import { clipMeta } from '../core/clipKinds'
 
 /** Backend-owned resources for one layer's live source, stopped on replace /
@@ -48,31 +47,29 @@ export class StreamsBackend implements RailBackend {
     this.previewEl.autoplay = true
   }
 
-  async start(opts: RailStartOptions, sources: SourceSet): Promise<void> {
-    const layers: { id: LayerId; readable: ReadableStream<VideoFrame> | null }[] = []
+  async start(opts: RailStartOptions, { base }: SourceSet): Promise<void> {
     const transfer: Transferable[] = []
 
-    let cameraReadable: ReadableStream<VideoFrame> | null = null
-    if (sources.cameraStream) {
-      const [track] = sources.cameraStream.getVideoTracks()
-      cameraReadable = new MediaStreamTrackProcessor({ track }).readable
-      layers.push({ id: CAMERA_LAYER, readable: cameraReadable })
-      transfer.push(cameraReadable as unknown as Transferable)
-    }
-
-    let videoReadable: ReadableStream<VideoFrame> | null = null
-    if (sources.videoEl) {
+    // Build the base layer's readable from its acquired source.
+    let readable: ReadableStream<VideoFrame>
+    if (base.stream) {
+      const [track] = base.stream.getVideoTracks()
+      if (!track) throw new Error('base source has no video track')
+      readable = new MediaStreamTrackProcessor({ track }).readable
+    } else if (base.videoEl) {
       // Don't touch the element itself — playback state belongs to its owner.
-      const captured = sources.videoEl.captureStream()
-      this.owned.set(VIDEO_LAYER, { capturedStream: captured })
+      const captured = base.videoEl.captureStream()
+      this.owned.set(base.layerId, { capturedStream: captured })
       const [track] = captured.getVideoTracks()
-      videoReadable = new MediaStreamTrackProcessor({ track }).readable
-      layers.push({ id: VIDEO_LAYER, readable: videoReadable })
-      transfer.push(videoReadable as unknown as Transferable)
+      readable = new MediaStreamTrackProcessor({ track }).readable
+    } else {
+      throw new Error('no base source')
     }
-
-    // Camera drives cadence/dims/tap when present; otherwise the video file.
-    const baseLayerId = sources.cameraStream ? CAMERA_LAYER : VIDEO_LAYER
+    transfer.push(readable as unknown as Transferable)
+    const layers: { id: LayerId; readable: ReadableStream<VideoFrame> | null }[] = [
+      { id: base.layerId, readable },
+    ]
+    const baseLayerId = base.layerId
 
     this.generator = new MediaStreamTrackGenerator<VideoFrame>({ kind: 'video' })
     this.outputStream = new MediaStream([this.generator])

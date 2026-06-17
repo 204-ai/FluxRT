@@ -7,6 +7,7 @@ import { detectBackend } from './backends/detect'
 import { StreamsBackend } from './backends/streamsBackend'
 import { CanvasBackend } from './backends/canvasBackend'
 import type {
+  BaseSource,
   ClipKind,
   Composite,
   CompositeOp,
@@ -29,15 +30,6 @@ import type { MarkerConfig } from './effects/marker'
 
 export interface RailEvents {
   onLog?: (msg: string) => void
-}
-
-export interface RailSources {
-  deviceId: string | null
-  camera: boolean
-  videoEl: HTMLVideoElement | null
-  /** Force the output/canvas aspect ratio (width/height); the source is
-   *  cover-cropped into it. Used to match the server's generation aspect. */
-  targetAspect?: number | null
 }
 
 /** Longest output edge when the video file is the sole source. */
@@ -72,7 +64,6 @@ function aspectDims(srcHeight: number, aspect: number): { width: number; height:
 
 export class Rail {
   private backend: RailBackend | null = null
-  private rawStream: MediaStream | null = null
   private markerConfig: Partial<MarkerConfig> = {}
   private drawConfig: Partial<DrawLayerConfig> = {}
   private composite: Composite = defaultComposite()
@@ -110,39 +101,35 @@ export class Rail {
     return this.backend?.outputStream ?? null
   }
 
-  async start(sources: RailSources): Promise<{ label: string }> {
+  /** Start the pipeline on an already-acquired BASE source (the store owns
+   *  getUserMedia/getDisplayMedia/file). Dims come from the base; every other
+   *  clip hot-attaches afterward via setLayerSource. */
+  async start(base: BaseSource, targetAspect?: number | null): Promise<{ label: string }> {
     if (this.backend) this.stop()
-    if (!sources.camera && !sources.videoEl) throw new Error('no input source')
 
-    let label = 'video file'
+    let label: string
     let width: number
     let height: number
-    if (sources.camera) {
-      this.rawStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 },
-          ...(sources.deviceId ? { deviceId: { exact: sources.deviceId } } : {}),
-        },
-      })
-      const [track] = this.rawStream.getVideoTracks()
+    if (base.stream) {
+      const [track] = base.stream.getVideoTracks()
+      if (!track) throw new Error('base source has no video track')
       const s = track.getSettings()
       width = s.width || 1280
       height = s.height || 720
-      label = track.label || 'camera'
-      if (sources.videoEl) label += ' + video file'
+      label = track.label || base.kind
+    } else if (base.videoEl) {
+      ;({ width, height } = videoDims(base.videoEl))
+      label = 'video file'
     } else {
-      ;({ width, height } = videoDims(sources.videoEl!))
+      throw new Error('no base source')
     }
 
     // Force the output aspect to match the server's generation aspect; the
     // source is cover-cropped into it (no stretch/letterbox). Dims are fixed at
     // start and never derive from a single layer's liveness, so activating or
     // deactivating a clip can never change them and force a restart.
-    if (sources.targetAspect && sources.targetAspect > 0) {
-      ;({ width, height } = aspectDims(height, sources.targetAspect))
+    if (targetAspect && targetAspect > 0) {
+      ;({ width, height } = aspectDims(height, targetAspect))
     }
 
     const kind = detectBackend()
@@ -160,7 +147,7 @@ export class Rail {
           { name: 'drawLayer', config: this.drawConfig },
         ],
       },
-      { cameraStream: this.rawStream, videoEl: sources.videoEl },
+      { base },
     )
     if (this.tap) this.backend.setTap(this.tap.intervalMs, this.tap.cb)
     // Replay any persisted drawing onto the freshly-built draw layer so a
@@ -218,43 +205,10 @@ export class Rail {
     this.backend?.setLayerSource(VIDEO_LAYER, 'video', null)
   }
 
-  /** Hot-swap the camera device in place (no restart): acquire the new device's
-   *  stream, feed it to the backend, then stop the old one. Keeps the output
-   *  track / WebRTC sender alive. */
-  async swapCameraDevice(deviceId: string | null): Promise<void> {
-    if (!this.backend) return
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 },
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      },
-    })
-    this.backend.setLayerSource(CAMERA_LAYER, 'camera', newStream)
-    // Stop the previous camera track now that the new one is feeding.
-    this.rawStream?.getTracks().forEach((t) => {
-      try {
-        t.stop()
-      } catch {
-        /* already stopped */
-      }
-    })
-    this.rawStream = newStream
-  }
-
   stop(): void {
     this.backend?.stop()
     this.backend = null
-    this.rawStream?.getTracks().forEach((t) => {
-      try {
-        t.stop()
-      } catch {
-        /* already stopped */
-      }
-    })
-    this.rawStream = null
+    // Camera/screen streams are owned by the store now (it acquires + releases).
   }
 
   /** Per-layer selfie flip. In the migration era this targets the camera layer

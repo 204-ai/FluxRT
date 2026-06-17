@@ -3,10 +3,22 @@
 // renderable state.
 
 import { create } from 'zustand'
-import { acquireVideoSource, inputVision, rail, releaseVideoSource, videoSource } from './runtime'
+import {
+  acquireCamera,
+  acquireVideoSource,
+  inputVision,
+  rail,
+  releaseCamera,
+  releaseVideoSource,
+  videoSource,
+} from './runtime'
 import { getHealthz } from '../lib/api'
-import type { BlendMode, ClipId, LayerId, LayerTransform } from '../pipeline/core/types'
-import { hasVideoTrack } from '../pipeline/core/types'
+import type { BaseSource, BlendMode, ClipId, LayerId, LayerTransform } from '../pipeline/core/types'
+import { CAMERA_LAYER, hasVideoTrack, VIDEO_LAYER } from '../pipeline/core/types'
+
+// Stable key for the seeded camera clip's stream in the runtime camera pool
+// (one webcam in the seeded model; generic per-clip keys arrive in G3).
+const SEED_CAMERA = 'seed-camera'
 import type { Layer } from './layerModel'
 import { activeClip, freshId, layerById, makeClip, seedLayers } from './layerModel'
 
@@ -276,6 +288,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
     async disableCam() {
       set({ camEnabled: false, mirror: false })
       rail.setMirror(false)
+      releaseCamera(SEED_CAMERA)
       await restartSources().catch((e) =>
         get().log('Pipeline restart failed: ' + (e instanceof Error ? e.message : e)),
       )
@@ -287,7 +300,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       // Hot-swap the camera track in place — keeps the output stream alive
       // instead of restarting the whole pipeline (which froze the output).
       try {
-        await rail.swapCameraDevice(deviceId || null)
+        const stream = await acquireCamera(SEED_CAMERA, deviceId)
+        rail.setLayerSource(CAMERA_LAYER, 'camera', stream)
       } catch (e) {
         get().log('Camera switch failed: ' + (e instanceof Error ? e.message : e))
         // Fall back to a full restart if the in-place swap couldn't acquire.
@@ -326,18 +340,25 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
       } catch {
         /* server resolution unknown — fall back to the source aspect */
       }
-      const { label } = await rail.start({
-        deviceId: deviceId || null,
-        camera: camEnabled,
-        videoEl: videoLoaded ? videoSource.el : null,
-        targetAspect,
-      })
+      // Acquire + build the BASE source (the store owns acquisition now). Camera
+      // is base when enabled; otherwise the seeded video file.
+      let base: BaseSource
+      if (camEnabled) {
+        const stream = await acquireCamera(SEED_CAMERA, deviceId)
+        base = { layerId: CAMERA_LAYER, kind: 'camera', stream, videoEl: null }
+      } else if (videoLoaded) {
+        base = { layerId: VIDEO_LAYER, kind: 'video', stream: null, videoEl: videoSource.el }
+      } else {
+        throw new Error('no input source')
+      }
+      const { label } = await rail.start(base, targetAspect)
       log('Input pipeline started: ' + label)
       set({ active: true })
+      // Camera is the base → attach the seeded video file as an overlay (both on).
+      if (camEnabled && videoLoaded) rail.setLayerSource(VIDEO_LAYER, 'video', videoSource.el)
       // Re-bind any added (overlay) video layers onto the freshly-built backend
       // so a source-set restart doesn't drop them — their mix already rode along
       // in rail.composite (op:'add'); only the live source needs re-attaching.
-      // The seeded camera/video/feedback re-attach via the SourceSet/feedback.
       for (const layer of get().layers) {
         const clip = activeClip(layer)
         if (clip && get().extraVideo[clip.id]) {
@@ -351,6 +372,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => {
 
     stopPipeline() {
       rail.stop()
+      releaseCamera(SEED_CAMERA)
       set({ active: false, drawMode: 'off', layoutLayer: null })
     },
 

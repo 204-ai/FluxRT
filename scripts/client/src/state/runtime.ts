@@ -46,6 +46,78 @@ export function releaseVideoSource(clipId: string): void {
   }
 }
 
+// Camera device-stream pool. One getUserMedia per device (keyed '' = default);
+// each camera clip gets a CLONE of that device's track, so the same webcam can
+// back several camera clips and different devices open independently. The base
+// device stream is stopped once its last clone is released.
+const deviceStreams = new Map<string, MediaStream>()
+const deviceRefs = new Map<string, Set<string>>()
+const cameraClones = new Map<string, MediaStreamTrack>()
+const cloneDevice = new Map<string, string>() // clipId → deviceKey
+
+function camConstraints(deviceId: string): MediaStreamConstraints {
+  return {
+    audio: false,
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30 },
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    },
+  }
+}
+
+/** Acquire a camera MediaStream for a clip — clones the device's shared track.
+ *  Re-acquiring for the same clip releases its prior clone first. */
+export async function acquireCamera(clipId: string, deviceId: string): Promise<MediaStream> {
+  const key = deviceId || ''
+  let base = deviceStreams.get(key)
+  if (!base || base.getVideoTracks()[0]?.readyState !== 'live') {
+    base = await navigator.mediaDevices.getUserMedia(camConstraints(deviceId))
+    deviceStreams.set(key, base)
+    deviceRefs.set(key, deviceRefs.get(key) ?? new Set())
+  }
+  releaseCamera(clipId)
+  const track = base.getVideoTracks()[0]
+  if (!track) throw new Error('camera has no video track')
+  const clone = track.clone()
+  cameraClones.set(clipId, clone)
+  cloneDevice.set(clipId, key)
+  deviceRefs.get(key)!.add(clipId)
+  return new MediaStream([clone])
+}
+
+/** Stop a clip's camera clone; stop the device's base stream when its last clone
+ *  is released (clears the browser "camera in use" indicator). */
+export function releaseCamera(clipId: string): void {
+  const clone = cameraClones.get(clipId)
+  if (clone) {
+    try {
+      clone.stop()
+    } catch {
+      /* already stopped */
+    }
+    cameraClones.delete(clipId)
+  }
+  const key = cloneDevice.get(clipId)
+  if (key === undefined) return
+  cloneDevice.delete(clipId)
+  const refs = deviceRefs.get(key)
+  if (!refs) return
+  refs.delete(clipId)
+  if (refs.size === 0) {
+    deviceStreams.get(key)?.getTracks().forEach((t) => {
+      try {
+        t.stop()
+      } catch {
+        /* already stopped */
+      }
+    })
+    deviceStreams.delete(key)
+    deviceRefs.delete(key)
+  }
+}
+
 export type VisionConsumer = 'marker' | 'sense'
 
 /**

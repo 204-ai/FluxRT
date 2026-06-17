@@ -16,7 +16,6 @@ import type {
   SourceSet,
   TapCallback,
 } from '../core/types'
-import { CAMERA_LAYER, VIDEO_LAYER } from '../core/types'
 import { clipMeta } from '../core/clipKinds'
 
 /** One layer's draw source: a <video> element. `owned` elements were created
@@ -34,7 +33,7 @@ export class CanvasBackend implements RailBackend {
   outputStream: MediaStream = new MediaStream()
 
   private sources = new Map<LayerId, ElementSource>()
-  private baseLayerId: LayerId = CAMERA_LAYER
+  private baseLayerId: LayerId = ''
   private compositor: Compositor | null = null
   private rafId = 0
   private rvfcId = 0
@@ -50,20 +49,21 @@ export class CanvasBackend implements RailBackend {
     this.previewEl = document.createElement('canvas')
   }
 
-  async start(opts: RailStartOptions, sources: SourceSet): Promise<void> {
-    if (sources.cameraStream) {
+  async start(opts: RailStartOptions, { base }: SourceSet): Promise<void> {
+    if (base.stream) {
       const video = document.createElement('video')
-      video.srcObject = sources.cameraStream
+      video.srcObject = base.stream
       video.muted = true
       video.playsInline = true
       await video.play()
-      this.sources.set(CAMERA_LAYER, { el: video, owned: true, kind: 'camera' })
-    }
-    if (sources.videoEl) {
+      this.sources.set(base.layerId, { el: video, owned: true, kind: base.kind })
+    } else if (base.videoEl) {
       // Direct reference — playback state belongs to the element's owner.
-      this.sources.set(VIDEO_LAYER, { el: sources.videoEl, owned: false, kind: 'video' })
+      this.sources.set(base.layerId, { el: base.videoEl, owned: false, kind: base.kind })
+    } else {
+      throw new Error('no base source')
     }
-    this.baseLayerId = sources.cameraStream ? CAMERA_LAYER : VIDEO_LAYER
+    this.baseLayerId = base.layerId
 
     this.previewEl.width = opts.width
     this.previewEl.height = opts.height

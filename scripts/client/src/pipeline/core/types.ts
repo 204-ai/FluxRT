@@ -277,15 +277,22 @@ export function hasVideoTrack(stream: MediaStream | null | undefined): boolean {
 }
 
 /**
- * Input layers for a rail START. At least one must be non-null. The camera
- * layer (when present) is the base: it sets canvas dims, drives the frame
- * cadence, and is the vision-tap source; otherwise the video file is the base.
- * Additional layers (feedback, extra clips) hot-attach after start via
- * RailBackend.setLayerSource — start carries only the cadence-eligible sources.
+ * The single BASE source a rail starts on — it sets the canvas dims, drives the
+ * frame cadence, and is the vision-tap source. Acquired by the store (no
+ * getUserMedia inside the rail) and identified by its layer id (not hardcoded to
+ * a camera/video slot). Every other clip hot-attaches after start via
+ * RailBackend.setLayerSource. A mediastream base (camera/screen/feedback) sets
+ * `stream`; an element base (video file) sets `videoEl`.
  */
-export interface SourceSet {
-  cameraStream: MediaStream | null
+export interface BaseSource {
+  layerId: LayerId
+  kind: ClipKind
+  stream: MediaStream | null
   videoEl: HTMLVideoElement | null
+}
+
+export interface SourceSet {
+  base: BaseSource
 }
 
 export interface RailStartOptions {
