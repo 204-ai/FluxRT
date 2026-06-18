@@ -1131,6 +1131,19 @@ async def _index():
     return JSONResponse({"service": "fluxrt-webrtc", "ok": True})
 
 
+@app.get("/test")
+async def _test_client():
+    """Minimal standalone WebRTC test client (same-origin), with an ICE
+    diagnostics panel — for comparing the FluxRT connection candidate-by-candidate
+    against the StreamDiffusion (sd-webrtc) client. Open http://<server>/test."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc_test_client.html")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return Response(f.read(), media_type="text/html")
+    except OSError:
+        raise HTTPException(status_code=404, detail="webrtc_test_client.html not found")
+
+
 @app.get("/healthz")
 async def _health():
     return {

@@ -1,0 +1,129 @@
+<!doctype html><html><head><meta charset=utf-8>
+<title>FluxRT WebRTC test</title>
+<style>
+ body{font-family:system-ui;background:#111;color:#eee;margin:0;padding:16px}
+ .row{display:flex;gap:16px;flex-wrap:wrap}
+ video{width:512px;max-width:46vw;background:#000;border-radius:8px}
+ .bar{margin:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+ .panel{margin-top:14px;max-width:560px;display:grid;grid-template-columns:120px 1fr auto;gap:8px 10px;align-items:center}
+ input[type=text],input[type=number]{font-size:14px;padding:6px;background:#222;color:#eee;border:1px solid #444;border-radius:5px}
+ button{font-size:13px;padding:6px 10px;background:#2a6cd4;color:#fff;border:0;border-radius:5px;cursor:pointer}
+ label{color:#9ab;font-size:13px}
+ #stat{margin-left:10px;font-size:13px}
+ #readout,#ice{margin-top:12px;font-size:12px;white-space:pre-wrap;font-family:ui-monospace,monospace}
+ #readout{color:#8ad}#ice{color:#cda;border-top:1px solid #333;padding-top:8px}
+ .live{color:#3f6}.dead{color:#f66}
+</style></head><body>
+<h3>FluxRT WebRTC test <span id=stat>idle</span></h3>
+<div class=bar>
+ <label>server</label>
+ <input id=server type=text style="width:300px" placeholder="same-origin — or http://host:port">
+ <button onclick="reconnect()">connect</button>
+ <span style="color:#789;font-size:12px">cross-origin needs CORS + secure-context (flag for http)</span>
+</div>
+<div class=row>
+ <div><div>camera (you)</div><video id=local autoplay muted playsinline></video></div>
+ <div><div>FluxRT output</div><video id=remote autoplay playsinline></video></div>
+</div>
+
+<div class=panel>
+ <label>prompt</label><input id=prompt type=text><button onclick="send('prompt:'+v('prompt'))">set</button>
+ <label>seed</label><input id=seed type=number value=0><button onclick="send('seed:'+v('seed'))">set</button>
+ <label>steps</label><input id=steps type=number value=2 min=1 max=8><button onclick="send('steps:'+v('steps'))">set</button>
+</div>
+
+<div id=readout>loading…</div>
+<div id=ice>ICE: —</div>
+
+<script>
+let pc, dc;
+const $=id=>document.getElementById(id), v=id=>$(id).value;
+const srv=()=>(($('server').value||'').trim().replace(/\/+$/,''));
+const S=p=>srv()+p;
+function send(m){ if(dc&&dc.readyState==='open') dc.send(m); }
+function reconnect(){ try{pc&&pc.close()}catch(_){} localStorage.setItem('fluxrt_server',srv());
+  $('stat').textContent='connecting…'; start().catch(e=>{$('stat').textContent='error: '+e.message;console.error(e);}); }
+
+// --- ICE diagnostics: this is the comparison surface vs sd-webrtc ---
+let iceLines=[];
+function ice(msg){ iceLines.push(msg); if(iceLines.length>40) iceLines.shift(); $('ice').textContent='ICE\n'+iceLines.join('\n'); }
+function shortCand(c){ // candidate string → "typ host 192.168.x udp"
+  const s=(c&&c.candidate)||''; const m=s.match(/candidate:\S+ \d+ (\S+) \d+ (\S+) (\d+) typ (\S+)/);
+  return m ? `typ ${m[4]} ${m[2]}:${m[3]} ${m[1].toLowerCase()}` : (s||'(end-of-candidates)');
+}
+async function logSelectedPair(conn){
+  try{ const stats=await conn.getStats();
+    let pair=null, loc={}, rem={};
+    stats.forEach(r=>{ if(r.type==='candidate-pair'&&(r.selected||r.nominated||r.state==='succeeded')) pair=r;
+      if(r.type==='local-candidate') loc[r.id]=r; if(r.type==='remote-candidate') rem[r.id]=r; });
+    if(pair){ const l=loc[pair.localCandidateId], r=rem[pair.remoteCandidateId];
+      ice(`SELECTED pair: ${l?l.candidateType+' '+(l.address||l.ip)+':'+l.port:''}  ↔  ${r?r.candidateType+' '+(r.address||r.ip)+':'+r.port:''}  (${pair.state})`);
+    } else ice('no selected candidate-pair yet');
+  }catch(e){ ice('getStats err: '+e.message); }
+}
+
+async function start(){
+  if(pc){ try{pc.close()}catch(_){} pc=null; }
+  iceLines=[]; ice('start');
+  const hz = await (await fetch(S('/healthz'))).json();
+  const w=hz.resolution?.width||512, h=hz.resolution?.height||512;
+  if(hz.prompt) $('prompt').value=hz.prompt;
+  if(hz.seed!=null) $('seed').value=hz.seed;
+  if(hz.steps!=null) $('steps').value=hz.steps;
+
+  const cam = await navigator.mediaDevices.getUserMedia(
+    {video:{width:{ideal:w},height:{ideal:h},frameRate:{ideal:30,max:30}},audio:false});
+  $('local').srcObject = cam;
+
+  // Negotiate on a LOCAL conn (race-safe — same fix as sd-webrtc).
+  // Client-side STUN is LOAD-BEARING: without it the client gathers only mDNS
+  // host candidates (no public srflx), so the server's public srflx has nothing
+  // to pair with → ICE fails. realtime-client has this; bare RTCPeerConnection()
+  // is why the standalone clients failed against the remote server.
+  const conn = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  pc = conn;
+  conn.addTransceiver(cam.getVideoTracks()[0], {direction:'sendrecv', streams:[cam]});
+  conn.ontrack = e => { $('remote').srcObject = e.streams[0];
+    try{ e.receiver.jitterBufferTarget = 0; }catch(_){}
+    try{ e.receiver.playoutDelayHint = 0; }catch(_){}
+  };
+  conn.onicecandidate = e => { if(e.candidate) ice('local  cand: '+shortCand(e.candidate)); else ice('local  gathering complete'); };
+  conn.oniceconnectionstatechange = () => { ice('ICE state: '+conn.iceConnectionState);
+    if(conn.iceConnectionState==='connected'||conn.iceConnectionState==='completed') logSelectedPair(conn); };
+  conn.onconnectionstatechange = () => ice('PC state: '+conn.connectionState);
+
+  dc = conn.createDataChannel('ctrl');
+  dc.onmessage = e => { const d=e.data||''; if(d.startsWith('state:')) {/* server state echoes */} };
+
+  const offer = await conn.createOffer(); await conn.setLocalDescription(offer);
+  await new Promise(r=>{ if(conn.iceGatheringState==='complete')return r();
+    const t=setTimeout(r,2000);
+    conn.onicegatheringstatechange=()=>{ if(conn.iceGatheringState==='complete'){clearTimeout(t);r();} }; });
+  const ans = await (await fetch(S('/offer'),{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({sdp:conn.localDescription.sdp,type:conn.localDescription.type})})).json();
+  if(pc!==conn || conn.signalingState!=='have-local-offer'){ try{conn.close()}catch(_){} return; }
+  await conn.setRemoteDescription(ans);
+  // The server's candidates arrive in the answer SDP — list them for comparison.
+  (ans.sdp||'').split('\n').filter(l=>l.startsWith('a=candidate')).forEach(l=>ice('server cand: '+shortCand({candidate:l.slice(2).trim()})));
+  $('stat').textContent='connected'; poll();
+}
+
+let prev=null, prevT=0;
+async function poll(){
+  try{
+    const hz = await (await fetch(S('/healthz'),{cache:'no-store'})).json();
+    const live = hz.input_source && hz.input_source!=='none';
+    $('readout').innerHTML =
+      `peers     : ${hz.peers}   input_source: ${hz.input_source}\n`+
+      `resolution: ${hz.resolution?.width}x${hz.resolution?.height}\n`+
+      `<span class="${live?'live':'dead'}">pipeline  : ${hz.fps_pipeline??'-'} fps   interp ${hz.fps_interpolated??'-'}   proc ${hz.proc_time_ms??'-'}ms   vram ${hz.vram_mb??'-'}MB</span>\n`+
+      `prompt/seed/steps: ${hz.prompt} / ${hz.seed} / ${hz.steps}`;
+    $('stat').textContent = live ? 'connected · input live' : 'connected · NO INPUT';
+  }catch(e){ $('stat').textContent='poll error'; }
+  setTimeout(poll, 1000);
+}
+
+const _q=new URLSearchParams(location.search);
+$('server').value = _q.get('server') || localStorage.getItem('fluxrt_server') || '';
+start().catch(e=>{ $('stat').textContent='error: '+e.message; console.error(e); });
+</script></body></html>
