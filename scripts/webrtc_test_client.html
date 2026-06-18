@@ -76,7 +76,11 @@ async function start(){
   $('local').srcObject = cam;
 
   // Negotiate on a LOCAL conn (race-safe — same fix as sd-webrtc).
-  const conn = new RTCPeerConnection();
+  // Client-side STUN is LOAD-BEARING: without it the client gathers only mDNS
+  // host candidates (no public srflx), so the server's public srflx has nothing
+  // to pair with → ICE fails. realtime-client has this; bare RTCPeerConnection()
+  // is why the standalone clients failed against the remote server.
+  const conn = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   pc = conn;
   conn.addTransceiver(cam.getVideoTracks()[0], {direction:'sendrecv', streams:[cam]});
   conn.ontrack = e => { $('remote').srcObject = e.streams[0];
