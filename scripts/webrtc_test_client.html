@@ -3,7 +3,7 @@
 <style>
  body{font-family:system-ui;background:#111;color:#eee;margin:0;padding:16px}
  .row{display:flex;gap:16px;flex-wrap:wrap}
- video{width:512px;max-width:46vw;background:#000;border-radius:8px}
+ video,#inputimg{width:512px;max-width:46vw;background:#000;border-radius:8px}
  .bar{margin:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
  .panel{margin-top:14px;max-width:560px;display:grid;grid-template-columns:120px 1fr auto;gap:8px 10px;align-items:center}
  input[type=text],input[type=number]{font-size:14px;padding:6px;background:#222;color:#eee;border:1px solid #444;border-radius:5px}
@@ -23,7 +23,7 @@
  <span style="color:#789;font-size:12px">cross-origin needs CORS + secure-context (flag for http)</span>
 </div>
 <div class=row>
- <div><div id=locallabel>camera — off (listening)</div><video id=local autoplay muted playsinline></video></div>
+ <div><div id=locallabel>input — none (listening)</div><video id=local autoplay muted playsinline style="display:none"></video><img id=inputimg alt=""></div>
  <div><div>FluxRT output</div><video id=remote autoplay playsinline></video></div>
 </div>
 
@@ -48,11 +48,39 @@ function send(m){ if(dc&&dc.readyState==='open') dc.send(m); }
 function reconnect(){ try{pc&&pc.close()}catch(_){} localStorage.setItem('fluxrt_server',srv());
   $('stat').textContent='connecting…'; start().catch(e=>{$('stat').textContent='error: '+e.message;console.error(e);}); }
 function setModeLabel(){
-  $('modebtn').textContent = 'mode: '+(mode==='publish'?'publish 🔴':'listen 👂');
-  $('locallabel').textContent = mode==='publish' ? 'camera (you)' : 'camera — off (listening)';
+  const listen = mode!=='publish';
+  $('modebtn').textContent = 'mode: '+(listen?'listen 👂':'publish 🔴');
+  // listen: left pane shows the live pipeline input (GET /input.jpg) instead of
+  // our own camera, since a recvonly client sends nothing.
+  $('local').style.display    = listen ? 'none' : '';
+  $('inputimg').style.display = listen ? '' : 'none';
+  if(!listen){ $('inputimg').removeAttribute('src'); $('locallabel').textContent='camera (you)'; }
+  else $('locallabel').textContent='input — none (listening)';
 }
 function toggleMode(){ mode = mode==='publish' ? 'listen' : 'publish';
   localStorage.setItem('fluxrt_mode', mode); setModeLabel(); reconnect(); }
+
+// While listening, poll the server's current input frame into the left pane.
+let inputObjUrl=null;
+async function inputTick(){
+  if(mode!=='publish' && pc){
+    try{
+      const r = await fetch(S('/input.jpg'),{cache:'no-store'});
+      if(r.status===200){
+        const u = URL.createObjectURL(await r.blob());
+        $('inputimg').src = u;
+        if(inputObjUrl) URL.revokeObjectURL(inputObjUrl);
+        inputObjUrl = u;
+        $('locallabel').textContent='input (live)';
+      } else { // 204 = nothing driving input
+        $('inputimg').removeAttribute('src');
+        if(inputObjUrl){ URL.revokeObjectURL(inputObjUrl); inputObjUrl=null; }
+        $('locallabel').textContent='input — none (listening)';
+      }
+    }catch(_){ /* transient — keep last frame */ }
+  }
+  setTimeout(inputTick, mode!=='publish' ? 150 : 1000);
+}
 
 // --- ICE diagnostics: this is the comparison surface vs sd-webrtc ---
 let iceLines=[];
@@ -148,5 +176,6 @@ $('server').value = _q.get('server') || localStorage.getItem('fluxrt_server') ||
 // Boot in listening mode by default (?mode=publish or a prior toggle overrides).
 mode = _q.get('mode') || localStorage.getItem('fluxrt_mode') || 'listen';
 setModeLabel();
+inputTick();   // left-pane input preview while listening
 start().catch(e=>{ $('stat').textContent='error: '+e.message; console.error(e); });
 </script></body></html>
