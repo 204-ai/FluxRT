@@ -19,10 +19,11 @@
  <label>server</label>
  <input id=server type=text style="width:300px" placeholder="same-origin — or http://host:port">
  <button onclick="reconnect()">connect</button>
+ <button id=modebtn onclick="toggleMode()">mode: listen 👂</button>
  <span style="color:#789;font-size:12px">cross-origin needs CORS + secure-context (flag for http)</span>
 </div>
 <div class=row>
- <div><div>camera (you)</div><video id=local autoplay muted playsinline></video></div>
+ <div><div id=locallabel>camera — off (listening)</div><video id=local autoplay muted playsinline></video></div>
  <div><div>FluxRT output</div><video id=remote autoplay playsinline></video></div>
 </div>
 
@@ -37,12 +38,21 @@
 
 <script>
 let pc, dc;
+// 'listen' = receive-only (no camera, just watch the FluxRT output — the default
+// the page boots into). 'publish' = also send the local camera as pipeline input.
+let mode = 'listen';
 const $=id=>document.getElementById(id), v=id=>$(id).value;
 const srv=()=>(($('server').value||'').trim().replace(/\/+$/,''));
 const S=p=>srv()+p;
 function send(m){ if(dc&&dc.readyState==='open') dc.send(m); }
 function reconnect(){ try{pc&&pc.close()}catch(_){} localStorage.setItem('fluxrt_server',srv());
   $('stat').textContent='connecting…'; start().catch(e=>{$('stat').textContent='error: '+e.message;console.error(e);}); }
+function setModeLabel(){
+  $('modebtn').textContent = 'mode: '+(mode==='publish'?'publish 🔴':'listen 👂');
+  $('locallabel').textContent = mode==='publish' ? 'camera (you)' : 'camera — off (listening)';
+}
+function toggleMode(){ mode = mode==='publish' ? 'listen' : 'publish';
+  localStorage.setItem('fluxrt_mode', mode); setModeLabel(); reconnect(); }
 
 // --- ICE diagnostics: this is the comparison surface vs sd-webrtc ---
 let iceLines=[];
@@ -71,9 +81,18 @@ async function start(){
   if(hz.seed!=null) $('seed').value=hz.seed;
   if(hz.steps!=null) $('steps').value=hz.steps;
 
-  const cam = await navigator.mediaDevices.getUserMedia(
-    {video:{width:{ideal:w},height:{ideal:h},frameRate:{ideal:30,max:30}},audio:false});
-  $('local').srcObject = cam;
+  // Listen mode (default): no camera — just receive the output. Publish mode:
+  // grab the local camera and feed it to the pipeline. The server always sends
+  // its FluxRTTrack regardless (POST /offer addTrack), so a recvonly client gets
+  // the output and simply contributes no input.
+  let cam = null;
+  if (mode === 'publish') {
+    cam = await navigator.mediaDevices.getUserMedia(
+      {video:{width:{ideal:w},height:{ideal:h},frameRate:{ideal:30,max:30}},audio:false});
+    $('local').srcObject = cam;
+  } else {
+    $('local').srcObject = null;
+  }
 
   // Negotiate on a LOCAL conn (race-safe — same fix as sd-webrtc).
   // Client-side STUN is LOAD-BEARING: without it the client gathers only mDNS
@@ -82,7 +101,8 @@ async function start(){
   // is why the standalone clients failed against the remote server.
   const conn = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   pc = conn;
-  conn.addTransceiver(cam.getVideoTracks()[0], {direction:'sendrecv', streams:[cam]});
+  if (cam) conn.addTransceiver(cam.getVideoTracks()[0], {direction:'sendrecv', streams:[cam]});
+  else     conn.addTransceiver('video', {direction:'recvonly'}); // listen: receive output only
   conn.ontrack = e => { $('remote').srcObject = e.streams[0];
     try{ e.receiver.jitterBufferTarget = 0; }catch(_){}
     try{ e.receiver.playoutDelayHint = 0; }catch(_){}
@@ -118,12 +138,15 @@ async function poll(){
       `resolution: ${hz.resolution?.width}x${hz.resolution?.height}\n`+
       `<span class="${live?'live':'dead'}">pipeline  : ${hz.fps_pipeline??'-'} fps   interp ${hz.fps_interpolated??'-'}   proc ${hz.proc_time_ms??'-'}ms   vram ${hz.vram_mb??'-'}MB</span>\n`+
       `prompt/seed/steps: ${hz.prompt} / ${hz.seed} / ${hz.steps}`;
-    $('stat').textContent = live ? 'connected · input live' : 'connected · NO INPUT';
+    $('stat').textContent = (mode==='publish'?'publish':'listen')+' · '+(live ? 'input live' : 'NO INPUT');
   }catch(e){ $('stat').textContent='poll error'; }
   setTimeout(poll, 1000);
 }
 
 const _q=new URLSearchParams(location.search);
 $('server').value = _q.get('server') || localStorage.getItem('fluxrt_server') || '';
+// Boot in listening mode by default (?mode=publish or a prior toggle overrides).
+mode = _q.get('mode') || localStorage.getItem('fluxrt_mode') || 'listen';
+setModeLabel();
 start().catch(e=>{ $('stat').textContent='error: '+e.message; console.error(e); });
 </script></body></html>
