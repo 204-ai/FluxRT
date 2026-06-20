@@ -3,6 +3,8 @@ import time
 import cv2
 import numpy as np
 import json
+import os
+import signal
 from safetensors.torch import load_file
 from multiprocessing import Process, Value, Manager
 from queue import Empty
@@ -300,6 +302,11 @@ class ModelInferenceSubprocess:
             max_sequence_length=512,
             text_encoder_out_layers=(9, 18, 27),
         )
+        # Full-frame execute (the expensive spatial-cache-disabling dense pass)
+        # is applied only every `stride` frames during the morph instead of
+        # every frame; >=1, default 2 (~halves the dense-execute cost). Override
+        # with config "prompt_travel_full_execute_every" (1 = old behaviour).
+        stride = max(1, int(self.config.get("prompt_travel_full_execute_every", 2)))
         self._travel = {
             "src": self.prompt_embeds,
             "tgt": target_embeds,
@@ -307,13 +314,18 @@ class ModelInferenceSubprocess:
             "i": 0,
             "mode": mode,
             "prompt": target_prompt,
+            "stride": stride,
         }
 
     def _advance_prompt_travel(self) -> None:
         """
         Called once per generated frame. Advances an in-progress morph by one
-        step: blends src->tgt embeddings and forces a full-frame execute so the
-        new conditioning actually reaches every pixel.
+        step: blends src->tgt embeddings so the new conditioning reaches the
+        frame. To keep the morph cheap, the EXPENSIVE full-frame execute (which
+        disables the spatial sparse cache and recomputes every image token) is
+        applied only every `stride` frames; the cheap text-K/V recompute runs
+        every frame so MOVING regions keep morphing smoothly, while STATIC
+        regions catch up on the strided full-execute frames.
         """
         tv = self._travel
         if tv is None:
@@ -329,15 +341,22 @@ class ModelInferenceSubprocess:
         else:
             self.prompt_embeds = slerp(tv["src"], tv["tgt"], t)
 
-        # Force the whole image to execute this frame. The spatial cache would
-        # otherwise skip static tokens and the interpolated prompt would never
-        # appear (text-only invalidation does not propagate to cached image
-        # tokens). Recompute text K/V too, but leave the reference-image cache
-        # intact so it is not re-encoded every frame.
-        self.update_controller.requires_reset = True
+        # Recompute text K/V every frame (cheap — 512 text tokens). Executing
+        # image tokens (the moving regions the spatial cache doesn't skip) cross-
+        # attend to the fresh K/V and pick up the new conditioning, so motion
+        # morphs smoothly every frame without a full dense execute.
         self.update_controller.text_is_valid = False
 
-        if tv["i"] >= tv["n"]:
+        # Full-frame execute (requires_reset -> ALL image tokens recompute) is
+        # the costly part that also drags STATIC/cached tokens onto the new
+        # conditioning. Stride it: the first frame, every `stride`th frame, and
+        # the final frame (which must land the exact target everywhere). Caps the
+        # dense-execute cost at ~1/stride of the per-frame version.
+        last = tv["i"] >= tv["n"]
+        if last or tv["i"] == 1 or tv["i"] % tv["stride"] == 0:
+            self.update_controller.requires_reset = True
+
+        if last:
             # Final frame was rendered at t=1.0 above; snap exactly onto the
             # target embeds and update tracked prompt state.
             self.prompt_embeds = tv["tgt"]
@@ -412,6 +431,22 @@ class ModelInferenceSubprocess:
             if self.process.is_alive():
                 self.process.kill()
                 self.process.join(timeout=2)
+            if self.process.is_alive():
+                # SIGKILL didn't reap within 2s — typically a child stuck in an
+                # uninterruptible CUDA driver syscall (D state). Re-signal and
+                # DETACH it from multiprocessing's _children so the interpreter-
+                # exit atexit join (which has NO timeout) can never block on this
+                # pid and leave an orphaned GPU process needing a manual kill.
+                try:
+                    os.kill(self.process.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+                try:
+                    import multiprocessing.process as _mpp
+
+                    _mpp._children.discard(self.process)
+                except Exception:
+                    pass
             self.process = None
         # Tear down the Manager process spawned in __init__; otherwise it
         # lingers as an orphan after the main process exits.
@@ -637,6 +672,12 @@ class ModelInferenceSubprocess:
         return frame
 
     def process_main(self):
+        # Ignore SIGINT in the child. With the "spawn" start method the child
+        # shares the parent's process group, so Ctrl+C is delivered here too;
+        # the default handler would raise KeyboardInterrupt mid-CUDA and can
+        # leave a half-torn context (D state) that resists kill. Shut down only
+        # via running.value (parent flips it in stop()) / parent terminate+kill.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         self.process_init()
         prev_time = time.time()
         while self.running.value:

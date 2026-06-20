@@ -27,6 +27,7 @@ import itertools
 import json
 import logging
 import os
+import signal
 import threading
 import time
 from typing import Optional
@@ -284,7 +285,15 @@ async def consume_peer_input(track, pc: RTCPeerConnection, seq: int) -> None:
                 was_waiting = True
                 log.info("Peer %x (seq %d) waiting — view-only", id(pc), seq)
             try:
-                await track.recv()
+                # Bounded: a track that registered but never delivers frames
+                # (ICE stuck / muted / media stall on a reconnect) must NOT park
+                # here forever — that pins this seq at the head of input_waiters
+                # and keeps peer_input_active set, freezing output. On timeout,
+                # bail so the finally pops this seq and a live peer can claim.
+                await asyncio.wait_for(track.recv(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.info("Waiting peer %x (seq %d) stalled — evicting", id(pc), seq)
+                return
             except MediaStreamError:
                 return
             except Exception as exc:
@@ -327,8 +336,17 @@ async def _pump_owner_frames(track, pc: RTCPeerConnection) -> None:
     async def _reader():
         try:
             while True:
-                latest[0] = await track.recv()
+                # Bounded so a silent-but-not-ended owner track (reconnect with
+                # ICE consent still alive) can't park the reader forever and pin
+                # ownership. TimeoutError falls through to the `except Exception`
+                # arm below → finally sets `stopped` → pump exits → ownership is
+                # released and the server camera / next waiter takes over.
+                latest[0] = await asyncio.wait_for(track.recv(), timeout=5.0)
                 new_frame.set()
+        except asyncio.TimeoutError:
+            # Deliberate eviction, not an error: owner stopped delivering frames
+            # for 5s. Fall through to finally → release input (don't log as error).
+            log.info("Owner %x stalled (no frames for 5s) — releasing input", id(pc))
         except MediaStreamError:
             pass
         except Exception as exc:
@@ -408,19 +426,40 @@ async def _graceful_cleanup() -> None:
     log.info("Shutting down — stopping producer, peers, pipeline...")
     producer_stop.set()
 
-    # Close all peer connections (best-effort, bounded).
-    for pc in list(pcs):
+    # Hard-deadline watchdog. uvicorn routes Ctrl+C here via the lifespan
+    # shutdown; if any teardown step wedges (a D-state CUDA child, a stuck
+    # transport), guarantee the whole process group — server AND subprocesses —
+    # dies instead of hanging forever (e.g. in multiprocessing's no-timeout
+    # atexit join). killpg, not os._exit, so a child is never orphaned.
+    def _hard_exit():
         with contextlib.suppress(Exception):
-            await pc.close()
-    pcs.clear()
+            os.killpg(os.getpgrp(), signal.SIGKILL)
 
-    # sp.stop() does blocking joins; run it off the event loop so a wedged
-    # subprocess can't stall the loop while it escalates to terminate/kill.
-    if sp is not None:
-        loop = asyncio.get_running_loop()
-        with contextlib.suppress(Exception):
-            await loop.run_in_executor(None, sp.stop)
-    log.info("Shutdown complete.")
+    watchdog = threading.Timer(30.0, _hard_exit)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        # Close all peers concurrently and bounded: a half-open peer's
+        # pc.close() can await a transport teardown that never completes
+        # (contextlib.suppress does NOT bound a hang), which would otherwise
+        # block shutdown before sp.stop() ever runs.
+        async def _close(pc):
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(pc.close(), timeout=3.0)
+
+        if pcs:
+            await asyncio.gather(*[_close(pc) for pc in list(pcs)])
+        pcs.clear()
+
+        # sp.stop() does blocking joins; run it off the event loop so a wedged
+        # subprocess can't stall the loop while it escalates to terminate/kill.
+        if sp is not None:
+            loop = asyncio.get_running_loop()
+            with contextlib.suppress(Exception):
+                await loop.run_in_executor(None, sp.stop)
+        log.info("Shutdown complete.")
+    finally:
+        watchdog.cancel()
 
 
 @contextlib.asynccontextmanager
@@ -484,6 +523,15 @@ async def offer(request: Request):
     async def _on_state():
         log.info("PC state: %s", pc.connectionState)
         if pc.connectionState in ("failed", "closed", "disconnected"):
+            # Cancel the input consumer directly — do NOT rely solely on
+            # pc.close() ending the track to make recv() raise. aiortc's
+            # receiver.stop() is a no-op when the receiver never started (DTLS
+            # never connected on a failed reconnect), so the consumer's
+            # `await track.recv()` would never raise and the task would leak as
+            # a phantom waiter that pins peer_input_active and freezes output.
+            t = getattr(pc, "_fluxrt_consume_task", None)
+            if t is not None:
+                t.cancel()
             await pc.close()
             pcs.discard(pc)
             ctrl_channels.difference_update(pc_channels)
@@ -496,6 +544,9 @@ async def offer(request: Request):
             task = asyncio.ensure_future(consume_peer_input(track, pc, seq))
             peer_input_tasks.add(task)
             task.add_done_callback(peer_input_tasks.discard)
+            # Let _on_state cancel this consumer on disconnect (recv() may never
+            # raise if the receiver never started — see _on_state).
+            pc._fluxrt_consume_task = task
 
     @pc.on("datachannel")
     def _on_dc(channel):
