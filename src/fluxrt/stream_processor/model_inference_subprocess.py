@@ -419,34 +419,14 @@ class ModelInferenceSubprocess:
         self.process.start()
 
     def stop(self):
+        # Reap the child with a bounded escalation that also detaches a SIGKILL
+        # survivor from multiprocessing._children (so the no-timeout atexit join
+        # can't hang the parent). See fluxrt.webrtc.proc.reap_process.
+        from fluxrt.webrtc.proc import reap_process
+
         self.running.value = False
         if self.process:
-            # Graceful first: let process_main observe running=False and exit
-            # its loop. Escalate to terminate/kill if it is wedged in CUDA,
-            # torch.compile, or a blocking call so Ctrl+C never hangs.
-            self.process.join(timeout=5)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=3)
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=2)
-            if self.process.is_alive():
-                # SIGKILL didn't reap within 2s — typically a child stuck in an
-                # uninterruptible CUDA driver syscall (D state). Re-signal and
-                # DETACH it from multiprocessing's _children so the interpreter-
-                # exit atexit join (which has NO timeout) can never block on this
-                # pid and leave an orphaned GPU process needing a manual kill.
-                try:
-                    os.kill(self.process.pid, signal.SIGKILL)
-                except Exception:
-                    pass
-                try:
-                    import multiprocessing.process as _mpp
-
-                    _mpp._children.discard(self.process)
-                except Exception:
-                    pass
+            reap_process(self.process)
             self.process = None
         # Tear down the Manager process spawned in __init__; otherwise it
         # lingers as an orphan after the main process exits.
@@ -672,12 +652,6 @@ class ModelInferenceSubprocess:
         return frame
 
     def process_main(self):
-        # Ignore SIGINT in the child. With the "spawn" start method the child
-        # shares the parent's process group, so Ctrl+C is delivered here too;
-        # the default handler would raise KeyboardInterrupt mid-CUDA and can
-        # leave a half-torn context (D state) that resists kill. Shut down only
-        # via running.value (parent flips it in stop()) / parent terminate+kill.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
         self.process_init()
         prev_time = time.time()
         while self.running.value:

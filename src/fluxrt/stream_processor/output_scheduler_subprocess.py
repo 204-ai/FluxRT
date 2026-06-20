@@ -34,28 +34,11 @@ class OutputSchedulerSubprocess:
         self.process.start()
 
     def stop(self) -> None:
+        from fluxrt.webrtc.proc import reap_process
+
         self.running.value = False
         if self.process:
-            self.process.join(timeout=5)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=3)
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=2)
-            if self.process.is_alive():
-                # Detach a SIGKILL survivor from multiprocessing's _children so
-                # the no-timeout atexit join can't hang the parent on exit.
-                try:
-                    os.kill(self.process.pid, signal.SIGKILL)
-                except Exception:
-                    pass
-                try:
-                    import multiprocessing.process as _mpp
-
-                    _mpp._children.discard(self.process)
-                except Exception:
-                    pass
+            reap_process(self.process)
             self.process = None
 
     def process_init(self) -> None:
@@ -78,9 +61,6 @@ class OutputSchedulerSubprocess:
         )
 
     def process_main(self) -> None:
-        # See ModelInferenceSubprocess.process_main: ignore SIGINT in the child
-        # so Ctrl+C doesn't KeyboardInterrupt it mid-loop; exit via running.value.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
         self.process_init()
 
         while self.running.value:
