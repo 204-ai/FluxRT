@@ -73,6 +73,9 @@ resolution = None
 out_resolution = None
 
 latest_rgb: Optional[np.ndarray] = None
+# Latest pipeline INPUT frame (cropped BGR), so a recvonly/listening client can
+# preview what's being sent in. Guarded by latest_lock alongside latest_rgb.
+latest_input_bgr: Optional[np.ndarray] = None
 latest_lock = threading.Lock()
 producer_stop = threading.Event()
 
@@ -194,7 +197,7 @@ def send_to_pc(pc: RTCPeerConnection, msg: str) -> None:
 # camera producer thread and per-peer track consumers.
 # ──────────────────────────────────────────────────────────────────────────────
 def push_input_frame(frame_bgr: np.ndarray) -> None:
-    global latest_rgb
+    global latest_rgb, latest_input_bgr
     h, w = resolution["height"], resolution["width"]
     cropped = crop_maximal_rectangle(frame_bgr, h, w)
     # Hold pipeline_lock across write+read so the producer thread and a peer's
@@ -205,6 +208,7 @@ def push_input_frame(frame_bgr: np.ndarray) -> None:
     rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
     with latest_lock:
         latest_rgb = rgb
+        latest_input_bgr = cropped  # served to listeners via GET /input.jpg
 
 
 def _decode_and_push(frame) -> None:
@@ -1014,6 +1018,25 @@ async def get_reference():
     if png is None:
         raise HTTPException(status_code=404, detail="No reference image set")
     return Response(content=png, media_type="image/png")
+
+
+@app.get("/input.jpg")
+async def get_input_jpg():
+    # Current pipeline INPUT frame as JPEG — what's actually feeding the model
+    # (a peer's stream or the server camera). Lets a recvonly/listening client
+    # preview the input it isn't sending. 204 when nothing is driving input.
+    if ownership.is_active() or ownership.has_server_camera:
+        with latest_lock:
+            frame = None if latest_input_bgr is None else latest_input_bgr.copy()
+        if frame is not None:
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                return Response(
+                    content=buf.tobytes(),
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"},
+                )
+    return Response(status_code=204)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
