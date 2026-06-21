@@ -3,6 +3,8 @@ import time
 import cv2
 import numpy as np
 import json
+import os
+import signal
 from safetensors.torch import load_file
 from multiprocessing import Process, Value, Manager
 from queue import Empty
@@ -308,6 +310,11 @@ class ModelInferenceSubprocess:
             max_sequence_length=512,
             text_encoder_out_layers=(9, 18, 27),
         )
+        # Full-frame execute (the expensive spatial-cache-disabling dense pass)
+        # is applied only every `stride` frames during the morph instead of
+        # every frame; >=1, default 2 (~halves the dense-execute cost). Override
+        # with config "prompt_travel_full_execute_every" (1 = old behaviour).
+        stride = max(1, int(self.config.get("prompt_travel_full_execute_every", 2)))
         self._travel = {
             "src": self.prompt_embeds,
             "tgt": target_embeds,
@@ -315,13 +322,18 @@ class ModelInferenceSubprocess:
             "i": 0,
             "mode": mode,
             "prompt": target_prompt,
+            "stride": stride,
         }
 
     def _advance_prompt_travel(self) -> None:
         """
         Called once per generated frame. Advances an in-progress morph by one
-        step: blends src->tgt embeddings and forces a full-frame execute so the
-        new conditioning actually reaches every pixel.
+        step: blends src->tgt embeddings so the new conditioning reaches the
+        frame. To keep the morph cheap, the EXPENSIVE full-frame execute (which
+        disables the spatial sparse cache and recomputes every image token) is
+        applied only every `stride` frames; the cheap text-K/V recompute runs
+        every frame so MOVING regions keep morphing smoothly, while STATIC
+        regions catch up on the strided full-execute frames.
         """
         tv = self._travel
         if tv is None:
@@ -337,15 +349,22 @@ class ModelInferenceSubprocess:
         else:
             self.prompt_embeds = slerp(tv["src"], tv["tgt"], t)
 
-        # Force the whole image to execute this frame. The spatial cache would
-        # otherwise skip static tokens and the interpolated prompt would never
-        # appear (text-only invalidation does not propagate to cached image
-        # tokens). Recompute text K/V too, but leave the reference-image cache
-        # intact so it is not re-encoded every frame.
-        self.update_controller.requires_reset = True
+        # Recompute text K/V every frame (cheap — 512 text tokens). Executing
+        # image tokens (the moving regions the spatial cache doesn't skip) cross-
+        # attend to the fresh K/V and pick up the new conditioning, so motion
+        # morphs smoothly every frame without a full dense execute.
         self.update_controller.text_is_valid = False
 
-        if tv["i"] >= tv["n"]:
+        # Full-frame execute (requires_reset -> ALL image tokens recompute) is
+        # the costly part that also drags STATIC/cached tokens onto the new
+        # conditioning. Stride it: the first frame, every `stride`th frame, and
+        # the final frame (which must land the exact target everywhere). Caps the
+        # dense-execute cost at ~1/stride of the per-frame version.
+        last = tv["i"] >= tv["n"]
+        if last or tv["i"] == 1 or tv["i"] % tv["stride"] == 0:
+            self.update_controller.requires_reset = True
+
+        if last:
             # Final frame was rendered at t=1.0 above; snap exactly onto the
             # target embeds and update tracked prompt state.
             self.prompt_embeds = tv["tgt"]
@@ -428,6 +447,11 @@ class ModelInferenceSubprocess:
                     raise RuntimeError("batch render timed out waiting for the inference subprocess")
 
     def stop(self):
+        # Reap the child with a bounded escalation that also detaches a SIGKILL
+        # survivor from multiprocessing._children (so the no-timeout atexit join
+        # can't hang the parent). See fluxrt.webrtc.proc.reap_process.
+        from fluxrt.webrtc.proc import reap_process
+
         self.running.value = False
         if self.batch_mode:
             # Wake the batch loop if it is blocked in request_queue.get() so it
@@ -437,16 +461,7 @@ class ModelInferenceSubprocess:
             except Exception:
                 pass
         if self.process:
-            # Graceful first: let process_main observe running=False and exit
-            # its loop. Escalate to terminate/kill if it is wedged in CUDA,
-            # torch.compile, or a blocking call so Ctrl+C never hangs.
-            self.process.join(timeout=5)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=3)
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=2)
+            reap_process(self.process)
             self.process = None
         # Tear down the Manager process spawned in __init__; otherwise it
         # lingers as an orphan after the main process exits.

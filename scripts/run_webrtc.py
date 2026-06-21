@@ -55,6 +55,8 @@ QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
+from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
+from fluxrt.webrtc.stats import connection_pool_stats
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -98,16 +100,12 @@ ref_version: int = 0
 # peers keep draining their tracks (aiortc decodes inbound RTP regardless),
 # and the oldest waiter takes over when the current steerer disconnects.
 # When a peer owns the input, the local camera producer thread pauses.
-input_owner_pc: Optional[RTCPeerConnection] = None
-input_owner_lock = threading.Lock()
-peer_input_active = threading.Event()
-# False under --no-server-camera: there is no local producer, so the input
-# handoff must not pretend a "server camera" resumes when peers leave.
-has_server_camera: bool = True
-# seq -> pc for every peer with a live video track; min(seq) is next in line.
-input_waiters: dict[int, RTCPeerConnection] = {}
-# Connection order, assigned per /offer — defines who "first connected" is.
-_peer_seq = itertools.count()
+# The input-steering state machine (owner / waiters / active flag / seq counter)
+# lives in InputOwnership so the ownership transitions and the recv-eviction
+# policy are unit-tested off-GPU (tests/webrtc/). has_server_camera is set from
+# --no-server-camera in main(); it gates whether the local camera resumes when
+# the last peer leaves.
+ownership = InputOwnership(has_server_camera=True)
 
 # Strong refs to peer-input consumer tasks. asyncio only holds weak refs to
 # tasks, so without this a consumer can be GC'd mid-run; if its `finally`
@@ -238,7 +236,7 @@ def producer_loop(camera_index: int) -> None:
     log.info("StreamProcessor ready, producing frames from local camera.")
 
     while not producer_stop.is_set():
-        if peer_input_active.is_set():
+        if ownership.is_active():
             # A peer is driving input — skip local camera frames.
             time.sleep(0.05)
             continue
@@ -256,106 +254,31 @@ def producer_loop(camera_index: int) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Per-peer input consumer — pulls VideoFrames from a remote track and feeds
-# them into the pipeline. The oldest-connected peer (lowest seq) steers;
-# the rest drain their tracks in view-only mode and the oldest waiter takes
-# over when the steerer disconnects.
+# Per-peer input consumer lives in fluxrt.webrtc.input_ownership.consume_peer_input
+# (unit-tested off-GPU). Here we only supply the frame sink (decode + pipeline
+# drive, offloaded to an executor) and the role-broadcast hook. The recv-eviction
+# POLICY — never evict a live owner on a frame gap; only drop a never-connected
+# waiter — also lives there. (c855950 regressed by evicting healthy owners on a
+# blind 5s timeout, which froze output under --no-server-camera.)
 # ──────────────────────────────────────────────────────────────────────────────
-async def consume_peer_input(track, pc: RTCPeerConnection, seq: int) -> None:
-    global input_owner_pc
+async def _frame_sink(frame) -> None:
+    """Owner-pump sink: offload decode (to_ndarray) + the pipeline write/read to
+    an executor so the asyncio event loop never blocks."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _decode_and_push, frame)
 
-    def _try_claim() -> bool:
-        global input_owner_pc
-        with input_owner_lock:
-            if input_owner_pc is pc:
-                return True
-            if input_owner_pc is None and input_waiters and seq == min(input_waiters):
-                input_owner_pc = pc
-                peer_input_active.set()
-                return True
-            return False
 
-    with input_owner_lock:
-        input_waiters[seq] = pc
-
-    try:
-        # Wait for ownership. Frames must be drained meanwhile: aiortc
-        # decodes inbound RTP into an unbounded per-track queue whether or
-        # not recv() is called, so an idle view-only track grows memory.
-        was_waiting = False
-        while not _try_claim():
-            if not was_waiting:
-                was_waiting = True
-                log.info("Peer %x (seq %d) waiting — view-only", id(pc), seq)
-            try:
-                await track.recv()
-            except MediaStreamError:
-                return
-            except Exception as exc:
-                log.warning("Waiting peer track recv error: %s", exc)
-                return
-
-        log.info("Peer %x (seq %d) now drives input", id(pc), seq)
+def _input_notify(event: str, pc, outcome=None) -> None:
+    """Role broadcasts for consume_peer_input ownership transitions."""
+    if event == "claimed":
         broadcast_ctrl("input:peer")
         send_to_pc(pc, "input:you")
-        await _pump_owner_frames(track, pc)
-    finally:
-        with input_owner_lock:
-            input_waiters.pop(seq, None)
-            if input_owner_pc is pc:
-                input_owner_pc = None
-                log.info("Peer %x (seq %d) released input", id(pc), seq)
-            # If another waiter is in line it claims ownership on its next
-            # recv() and re-broadcasts input:peer; keep peer_input_active set
-            # so the server camera doesn't flicker in during the handoff.
-            if input_owner_pc is None and not input_waiters and peer_input_active.is_set():
-                peer_input_active.clear()
-                if has_server_camera:
-                    broadcast_ctrl("input:server")
-                    log.info("No peer inputs left — server camera resumes")
-                else:
-                    log.info("No peer inputs left — no server camera; output holds the last frame")
-
-
-async def _pump_owner_frames(track, pc: RTCPeerConnection) -> None:
-    loop = asyncio.get_running_loop()
-
-    # Drain-to-latest: the reader task always overwrites `latest`, the
-    # processing loop pushes only the newest frame. Without this, a pipeline
-    # slower than the peer's camera lets decoded frames accumulate in the
-    # track queue — round-trip lag grows without bound (and so does memory).
-    latest: list = [None]
-    new_frame = asyncio.Event()
-    stopped = asyncio.Event()
-
-    async def _reader():
-        try:
-            while True:
-                latest[0] = await track.recv()
-                new_frame.set()
-        except MediaStreamError:
-            pass
-        except Exception as exc:
-            log.warning("Peer track recv error: %s", exc)
-        finally:
-            stopped.set()
-            new_frame.set()  # wake the processing loop so it can exit
-
-    reader = asyncio.ensure_future(_reader())
-    try:
-        while not (stopped.is_set() and latest[0] is None):
-            await new_frame.wait()
-            new_frame.clear()
-            frame, latest[0] = latest[0], None
-            if frame is None:
-                continue
-            # Decode + pipeline write/read are blocking/CPU-bound — offload the
-            # whole thing (including to_ndarray) so the event loop never stalls.
-            await loop.run_in_executor(None, _decode_and_push, frame)
-    finally:
-        reader.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await reader
+    elif event == "released" and outcome is not None and outcome.became_idle:
+        if outcome.server_camera_resumes:
+            broadcast_ctrl("input:server")
+            log.info("No peer inputs left — server camera resumes")
+        else:
+            log.info("No peer inputs left — output holds the last frame")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -412,26 +335,47 @@ async def _graceful_cleanup() -> None:
     log.info("Shutting down — stopping producer, peers, pipeline...")
     producer_stop.set()
 
-    # Close all peer connections (best-effort, bounded).
-    for pc in list(pcs):
-        with contextlib.suppress(Exception):
-            await pc.close()
-    pcs.clear()
+    # Hard-deadline backstop. On Ctrl+C the spawned children also receive SIGINT
+    # (shared process group) and die immediately, and reap_process detaches any
+    # SIGKILL survivor from multiprocessing._children — so the normal path exits
+    # fast. This timer only fires if a teardown step itself wedges; os._exit
+    # bypasses the atexit no-timeout child join. (No killpg: no blast radius onto
+    # the operator's shell when the server isn't its own process-group leader.)
+    def _hard_exit():
+        os._exit(1)
 
-    # Tear down any in-flight batch render: cancel + bounded-join its worker so the
-    # second model's subprocess isn't orphaned at exit. Off the loop (it blocks).
-    if _batch_manager is not None and _batch_manager.active_job_id() is not None:
-        loop = asyncio.get_running_loop()
-        with contextlib.suppress(Exception):
-            await loop.run_in_executor(None, _batch_manager.shutdown)
+    watchdog = threading.Timer(15.0, _hard_exit)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        # Close all peers concurrently and bounded: a half-open peer's
+        # pc.close() can await a transport teardown that never completes
+        # (contextlib.suppress does NOT bound a hang), which would otherwise
+        # block shutdown before sp.stop() ever runs.
+        async def _close(pc):
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(pc.close(), timeout=3.0)
 
-    # sp.stop() does blocking joins; run it off the event loop so a wedged
-    # subprocess can't stall the loop while it escalates to terminate/kill.
-    if sp is not None:
-        loop = asyncio.get_running_loop()
-        with contextlib.suppress(Exception):
-            await loop.run_in_executor(None, sp.stop)
-    log.info("Shutdown complete.")
+        if pcs:
+            await asyncio.gather(*[_close(pc) for pc in list(pcs)])
+        pcs.clear()
+
+        # Tear down any in-flight batch render: cancel + bounded-join its worker so
+        # the second model's subprocess isn't orphaned at exit. Off the loop (blocks).
+        if _batch_manager is not None and _batch_manager.active_job_id() is not None:
+            loop = asyncio.get_running_loop()
+            with contextlib.suppress(Exception):
+                await loop.run_in_executor(None, _batch_manager.shutdown)
+
+        # sp.stop() does blocking joins; run it off the event loop so a wedged
+        # subprocess can't stall the loop while it escalates to terminate/kill.
+        if sp is not None:
+            loop = asyncio.get_running_loop()
+            with contextlib.suppress(Exception):
+                await loop.run_in_executor(None, sp.stop)
+        log.info("Shutdown complete.")
+    finally:
+        watchdog.cancel()
 
 
 @contextlib.asynccontextmanager
@@ -483,8 +427,6 @@ async def offer(request: Request):
 
     pc = RTCPeerConnection(_rtc_config())
     pcs.add(pc)
-    # Connection order decides who steers the input (lowest live seq wins).
-    seq = next(_peer_seq)
     # Channels opened by this PC — pruned from the broadcast set when the
     # connection dies, since the channel "close" event may never fire then.
     # Also reachable via the pc for targeted role messages (send_to_pc).
@@ -495,6 +437,15 @@ async def offer(request: Request):
     async def _on_state():
         log.info("PC state: %s", pc.connectionState)
         if pc.connectionState in ("failed", "closed", "disconnected"):
+            # Cancel the input consumer directly — do NOT rely solely on
+            # pc.close() ending the track to make recv() raise. aiortc's
+            # receiver.stop() is a no-op when the receiver never started (DTLS
+            # never connected on a failed reconnect), so the consumer's
+            # `await track.recv()` would never raise and the task would leak as
+            # a phantom waiter that pins peer_input_active and freezes output.
+            t = getattr(pc, "_fluxrt_consume_task", None)
+            if t is not None:
+                t.cancel()
             await pc.close()
             pcs.discard(pc)
             ctrl_channels.difference_update(pc_channels)
@@ -504,9 +455,16 @@ async def offer(request: Request):
     def _on_track(track):
         log.info("Inbound track from peer: kind=%s id=%s", track.kind, track.id)
         if track.kind == "video":
-            task = asyncio.ensure_future(consume_peer_input(track, pc, seq))
+            task = asyncio.ensure_future(
+                consume_peer_input(
+                    track, pc, ownership, _frame_sink, notify=_input_notify, log=log
+                )
+            )
             peer_input_tasks.add(task)
             task.add_done_callback(peer_input_tasks.discard)
+            # Let _on_state cancel this consumer on disconnect (the pump blocks on
+            # recv() — death is detected via connectionState, not a frame gap).
+            pc._fluxrt_consume_task = task
 
     @pc.on("datachannel")
     def _on_dc(channel):
@@ -532,11 +490,10 @@ async def offer(request: Request):
         # Input-source role sync. The DataChannel usually opens after the
         # video track was claimed, so the targeted input:you from the claim
         # can be missed — resend it here.
-        if peer_input_active.is_set():
+        if ownership.is_active():
             safe_send(channel, "input:peer")
-            with input_owner_lock:
-                if input_owner_pc is pc:
-                    safe_send(channel, "input:you")
+            if ownership.owner_is(pc):
+                safe_send(channel, "input:you")
 
         @channel.on("close")
         def _on_close():
@@ -1075,7 +1032,7 @@ async def get_input_jpg():
     # Current pipeline INPUT frame as JPEG — what's actually feeding the model
     # (a peer's stream or the server camera). Lets a recvonly/listening client
     # preview the input it isn't sending. 204 when nothing is driving input.
-    if peer_input_active.is_set() or has_server_camera:
+    if ownership.is_active() or ownership.has_server_camera:
         with latest_lock:
             frame = None if latest_input_bgr is None else latest_input_bgr.copy()
         if frame is not None:
@@ -1179,18 +1136,22 @@ async def _health():
     return {
         "ready": bool(sp and sp.is_ready()),
         "peers": len(pcs),
+        # Active connection-pool breakdown (total / connected / per-state).
+        "connections": connection_pool_stats(
+            [getattr(pc, "connectionState", "unknown") for pc in list(pcs)]
+        ),
         "resolution": resolution,
         "reference_enabled": _reference_enabled(),
         "reference_set": latest_reference_png is not None,
         "reference_version": ref_version,
         "input_source": (
             "peer"
-            if peer_input_active.is_set()
+            if ownership.is_active()
             else "server"
-            if has_server_camera
+            if ownership.has_server_camera
             else "none"
         ),
-        "input_waiters": len(input_waiters),
+        "input_waiters": ownership.num_waiters(),
         "lip_enabled": _lip_enabled(),
         "lip_active": lip_active,
         "prompt": current_prompt,
@@ -1426,7 +1387,7 @@ def main() -> None:
     sp.start()
 
     # Initialize parameter mirror from config + CLI overrides.
-    global current_prompt, current_seed, current_steps, has_server_camera
+    global current_prompt, current_seed, current_steps
     current_prompt = args.initial_prompt or sp.config.get("default_prompt", "")
     current_seed = int(sp.config.get("default_seed", 0))
     current_steps = int(sp.config.get("default_steps", 2))
@@ -1448,10 +1409,9 @@ def main() -> None:
 
     if args.no_server_camera:
         log.info("--no-server-camera: skipping local camera; waiting for peer input.")
-        # No local producer exists — leave peer_input_active clear so a peer sets
-        # it on claim, and /healthz honestly reports 'none' until then (instead
-        # of a phantom 'peer'/'server' source).
-        has_server_camera = False
+        # No local producer exists — /healthz reports 'none' until a peer claims,
+        # and the ownership object will not pretend a server camera resumes.
+        ownership.has_server_camera = False
     else:
         producer_thread = threading.Thread(
             target=producer_loop, args=(args.camera,), daemon=True

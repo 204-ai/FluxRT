@@ -1,5 +1,7 @@
 from multiprocessing import Process, Value
 from fluxrt.utils.shared_tensor import SharedTensor
+import os
+import signal
 import time
 
 
@@ -32,15 +34,11 @@ class OutputSchedulerSubprocess:
         self.process.start()
 
     def stop(self) -> None:
+        from fluxrt.webrtc.proc import reap_process
+
         self.running.value = False
         if self.process:
-            self.process.join(timeout=5)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=3)
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=2)
+            reap_process(self.process)
             self.process = None
 
     def process_init(self) -> None:
