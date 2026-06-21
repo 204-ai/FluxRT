@@ -146,14 +146,17 @@ class BatchJobManager:
         self._jobs: dict[str, BatchJob] = {}
         self._active: Optional[str] = None
 
-    def submit(self, video_bytes: bytes, prompt: str, seed: int, steps: int, fps: Optional[float], interp: int = 0) -> BatchJob:
+    def submit(self, video_bytes: bytes, prompt: str, seed: int, steps: int, fps: Optional[float], interp: Optional[int] = None) -> BatchJob:
         with self._lock:
             if self._active is not None:
                 raise RuntimeError("a batch render is already running")
             if self._preflight is not None:
                 self._preflight()  # raises -> surfaced as 409 by the route
             self._prune_locked()
-            job = BatchJob(id=uuid.uuid4().hex[:12], prompt=prompt, seed=seed, steps=steps, fps=fps, interp=max(0, min(4, int(interp))))
+            # interp=None inherits the server's interpolation_exp (the --interp flag /
+            # config); an explicit value (e.g. from the UI) overrides it.
+            interp_v = self._base_config.get("interpolation_exp", 0) if interp is None else interp
+            job = BatchJob(id=uuid.uuid4().hex[:12], prompt=prompt, seed=seed, steps=steps, fps=fps, interp=max(0, min(4, int(interp_v))))
             self._jobs[job.id] = job
             self._active = job.id
         job._thread = threading.Thread(target=self._run, args=(job, video_bytes), daemon=True)

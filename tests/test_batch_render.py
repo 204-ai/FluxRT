@@ -224,11 +224,11 @@ def test_batch_config_overrides_and_isolates_base():
     }
     stubs = []
     mgr = _manager(stubs, base_config=base)
-    job = mgr.submit(make_mp4_bytes(n_frames=3), prompt="a", seed=1, steps=2, fps=None)
+    job = mgr.submit(make_mp4_bytes(n_frames=3), prompt="a", seed=1, steps=2, fps=None, interp=0)
     assert wait_until(lambda: mgr.get(job.id).state == "done")
     cfg = stubs[0].cfg
     assert cfg["batch_mode"] is True
-    assert cfg["interpolation_exp"] == 0
+    assert cfg["interpolation_exp"] == 0  # explicit interp=0 overrides the base's 3
     assert cfg["logging"] is False
     assert cfg["lip_transfer"]["enable"] is False
     # the live base config (incl. its nested dict) is untouched
@@ -284,6 +284,20 @@ def test_interpolation_multiplies_frames_and_fps():
     assert stubs[0].cfg["interpolation_exp"] == 1          # interp threaded to the batch config
     assert count_frames(j.out_path) == 10                  # 2 output frames per input
     assert round(float(_video_rate(j.out_path))) == 20     # source 10 fps × 2**1
+
+
+def test_interp_inherits_server_default_when_unset():
+    base = {"resolution": {"height": 48, "width": 64}, "interpolation_exp": 2}
+    stubs = []
+    mgr = _manager(stubs, base_config=base)
+    # None → inherit the server's interpolation_exp (the --interp flag)
+    j1 = mgr.submit(make_mp4_bytes(n_frames=2), prompt="a", seed=1, steps=2, fps=None, interp=None)
+    assert wait_until(lambda: mgr.get(j1.id).state in ("done", "error"))
+    assert mgr.get(j1.id).interp == 2
+    # explicit value overrides the server default
+    j2 = mgr.submit(make_mp4_bytes(n_frames=2), prompt="a", seed=1, steps=2, fps=None, interp=0)
+    assert wait_until(lambda: mgr.get(j2.id).state in ("done", "error"))
+    assert mgr.get(j2.id).interp == 0
 
 
 def test_interp_clamped_to_0_4():

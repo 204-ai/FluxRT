@@ -36,10 +36,11 @@ def make_batch_router(
         seed: int = Form(...),
         steps: int = Form(...),
         fps: Optional[float] = Form(None),
-        interp: int = Form(0),
+        interp: Optional[int] = Form(None),
     ):
-        """Start an offline render of an uploaded video. interp=0 → 1:1; k>0 → RIFE
-        interpolation (2**k frames per input). 202 + job status."""
+        """Start an offline render of an uploaded video. interp omitted → inherit the
+        server's --interp; 0 → 1:1; k>0 → RIFE interpolation (2**k frames per input).
+        202 + job status."""
         _require()
         size = getattr(video, "size", None)  # set by Starlette from the multipart part
         if size is not None and size > _MAX_UPLOAD_BYTES:
@@ -56,7 +57,7 @@ def make_batch_router(
                 seed=int(seed),
                 steps=int(steps),
                 fps=fps,
-                interp=int(interp),
+                interp=None if interp is None else int(interp),
             )
         except RuntimeError as exc:  # another job already running
             raise HTTPException(status_code=409, detail=str(exc))
