@@ -33,6 +33,7 @@ from accelerate import init_empty_weights
 from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
+from fluxrt.utils import crop_maximal_rectangle
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
 from fluxrt.stream_processor.postprocessors import (
@@ -727,6 +728,12 @@ class ModelInferenceSubprocess:
             if item is None:  # poison pill -> exit the loop on teardown
                 break
             seq, frame_rgb = item
+            # The model only ever sees frames at its OWN resolution — the live path
+            # crops every frame via push_input_frame before it reaches the pipeline.
+            # Batch inputs are arbitrary-size video frames, so crop+resize to
+            # (height, width) here too; otherwise the spatial-cache mask length won't
+            # match the model's token count (e.g. a 1080p frame → oversized mask).
+            frame_rgb = crop_maximal_rectangle(frame_rgb, self.height, self.width)
             # Apply any prompt/seed/steps set on this instance before the job.
             self.update_process_state()
             out = self.process_frame_with_pipeline(frame_rgb)
