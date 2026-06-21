@@ -360,19 +360,18 @@ async def _graceful_cleanup() -> None:
             await asyncio.gather(*[_close(pc) for pc in list(pcs)])
         pcs.clear()
 
-        # Tear down any in-flight batch render: cancel + bounded-join its worker so
-        # the second model's subprocess isn't orphaned at exit. Off the loop (blocks).
+        # Tear down the live processor AND any in-flight batch render CONCURRENTLY
+        # (independent processes) so neither eats the other's slice of the 15s
+        # watchdog budget. Both do blocking joins → run off the event loop. The
+        # batch join is bounded short so the live reap keeps headroom.
+        loop = asyncio.get_running_loop()
+        teardowns = []
         if _batch_manager is not None and _batch_manager.active_job_id() is not None:
-            loop = asyncio.get_running_loop()
-            with contextlib.suppress(Exception):
-                await loop.run_in_executor(None, _batch_manager.shutdown)
-
-        # sp.stop() does blocking joins; run it off the event loop so a wedged
-        # subprocess can't stall the loop while it escalates to terminate/kill.
+            teardowns.append(loop.run_in_executor(None, lambda: _batch_manager.shutdown(4.0)))
         if sp is not None:
-            loop = asyncio.get_running_loop()
-            with contextlib.suppress(Exception):
-                await loop.run_in_executor(None, sp.stop)
+            teardowns.append(loop.run_in_executor(None, sp.stop))
+        if teardowns:
+            await asyncio.gather(*teardowns, return_exceptions=True)
         log.info("Shutdown complete.")
     finally:
         watchdog.cancel()
@@ -1198,18 +1197,33 @@ _batch_enabled = os.environ.get("FLUXRT_BATCH_RENDER") == "1"
 _batch_manager = None
 
 
+def _free_vram_mb() -> Optional[int]:
+    """Free VRAM (MB) of the most-free GPU via nvidia-smi, or None if unavailable.
+    Uses the CLI on purpose — importing torch / calling mem_get_info() here would
+    create a CUDA context in the web process and waste VRAM that the live model needs."""
+    import shutil
+    import subprocess
+
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout
+    except Exception:
+        return None
+    vals = [int(x) for x in out.split() if x.strip().isdigit()]
+    return max(vals) if vals else None
+
+
 def _batch_vram_preflight() -> None:
     """Best-effort gate: refuse a batch job when a second full model is unlikely to
     fit alongside the live one. Skips silently if VRAM can't be measured — the
     FLUXRT_BATCH_RENDER opt-in remains the primary guard. Raises RuntimeError (→ 409)
     when there isn't headroom."""
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return
-        free_mb = torch.cuda.mem_get_info()[0] // (1024 * 1024)
-    except Exception:
+    free_mb = _free_vram_mb()
+    if free_mb is None:
         return  # cannot measure → rely on the operator opt-in
     need_mb = 0
     with contextlib.suppress(Exception):
