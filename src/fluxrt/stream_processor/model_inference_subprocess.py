@@ -735,8 +735,10 @@ class ModelInferenceSubprocess:
             # (height, width) here too; otherwise the spatial-cache mask length won't
             # match the model's token count (e.g. a 1080p frame → oversized mask).
             frame_rgb = crop_maximal_rectangle(frame_rgb, self.height, self.width)
-            # Apply any prompt/seed/steps set on this instance before the job.
+            # Drain prompt/seed/steps set before OR during the job (live steering),
+            # then step any in-progress slerp morph — same order as the live loop.
             self.update_process_state()
+            self._advance_prompt_travel()
             out = self.process_frame_with_pipeline(frame_rgb)
             if self.lip_processor is not None and self.lip_active:
                 out = self.lip_processor.process(out, frame_rgb)

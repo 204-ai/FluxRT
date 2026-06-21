@@ -145,6 +145,7 @@ class BatchJobManager:
         self._lock = threading.Lock()
         self._jobs: dict[str, BatchJob] = {}
         self._active: Optional[str] = None
+        self._active_proc = None  # the running batch StreamProcessor (for live prompt steering)
 
     def submit(self, video_bytes: bytes, prompt: str, seed: int, steps: int, fps: Optional[float], interp: Optional[int] = None) -> BatchJob:
         with self._lock:
@@ -168,6 +169,29 @@ class BatchJobManager:
 
     def active_job_id(self) -> Optional[str]:
         return self._active
+
+    def set_prompt(self, text: str) -> bool:
+        """Live-steer the running render's prompt (hard cut). No-op if no job runs.
+        Applied on the next rendered frame (the worker drains the command queue)."""
+        p = self._active_proc
+        if p is None:
+            return False
+        try:
+            p.set_prompt(text)
+            return True
+        except Exception:
+            return False
+
+    def start_prompt_travel(self, text: str, frames: int = 48, mode: str = "slerp") -> bool:
+        """Live-steer with a slerp/lerp morph over the next `frames` rendered frames."""
+        p = self._active_proc
+        if p is None:
+            return False
+        try:
+            p.start_prompt_travel(text, frames=frames, mode=mode)
+            return True
+        except Exception:
+            return False
 
     def cancel(self, job_id: str) -> bool:
         job = self._jobs.get(job_id)
@@ -237,6 +261,7 @@ class BatchJobManager:
 
             job.state = "loading"
             proc = self._make(self._batch_config(job.interp))
+            self._active_proc = proc  # exposed for live prompt steering
             proc.start()
             # Wait for the model to load, but fail fast if the child dies (CUDA OOM)
             # or never becomes ready — otherwise this loop (and the single job slot)
@@ -300,6 +325,7 @@ class BatchJobManager:
                     os.unlink(in_path)
                 except OSError:
                     pass
+            self._active_proc = None
             with self._lock:
                 self._active = None
 

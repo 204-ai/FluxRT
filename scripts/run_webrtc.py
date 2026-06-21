@@ -191,6 +191,23 @@ def send_to_pc(pc: RTCPeerConnection, msg: str) -> None:
         safe_send(ch, msg)
 
 
+def _drive_prompt(prompt: str) -> None:
+    """Apply a prompt to whichever processor is active: the live pipeline and/or a
+    running batch render (live steering). Both are no-ops when absent."""
+    if sp is not None:
+        sp.set_prompt(prompt)
+    if _batch_manager is not None:
+        _batch_manager.set_prompt(prompt)
+
+
+def _drive_prompt_travel(prompt: str, frames: int, mode: str) -> None:
+    """Like _drive_prompt but a slerp/lerp morph over `frames` generated frames."""
+    if sp is not None:
+        sp.start_prompt_travel(prompt, frames=frames, mode=mode)
+    if _batch_manager is not None:
+        _batch_manager.start_prompt_travel(prompt, frames=frames, mode=mode)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Shared frame push — runs the BGR input through the pipeline and updates
 # `latest_rgb` for any active video track to send out. Used by both the local
@@ -529,7 +546,7 @@ async def offer(request: Request):
                         mode,
                     )
                     current_prompt = new_prompt
-                    sp.start_prompt_travel(new_prompt, frames=frames, mode=mode)
+                    _drive_prompt_travel(new_prompt, frames, mode)
                     safe_send(channel, "ack:prompt")
                     broadcast_ctrl(f"state:prompt:{new_prompt}")
                 else:
@@ -539,7 +556,7 @@ async def offer(request: Request):
                 if new_prompt:
                     log.info("Prompt update: %r", new_prompt)
                     current_prompt = new_prompt
-                    sp.set_prompt(new_prompt)
+                    _drive_prompt(new_prompt)
                     safe_send(channel, "ack:prompt")
                     broadcast_ctrl(f"state:prompt:{new_prompt}")
             elif msg.startswith("seed:"):
@@ -594,9 +611,10 @@ def _lip_enabled() -> bool:
 async def post_prompt(request: Request):
     """Set the generation prompt.
     Body: JSON {"prompt": "..."} OR raw text/plain.
-    Query: ?prompt=... (URL-encoded) as a third option."""
-    if not sp:
-        raise HTTPException(status_code=503, detail="StreamProcessor not ready")
+    Query: ?prompt=... (URL-encoded) as a third option.
+    Works against the live pipeline AND/OR a running batch render (live steering)."""
+    if sp is None and (_batch_manager is None or _batch_manager.active_job_id() is None):
+        raise HTTPException(status_code=503, detail="no live pipeline or batch render to set a prompt on")
 
     prompt: str | None = None
     q = request.query_params.get("prompt")
@@ -619,7 +637,7 @@ async def post_prompt(request: Request):
     prompt = prompt.strip()
     global current_prompt
     current_prompt = prompt
-    sp.set_prompt(prompt)
+    _drive_prompt(prompt)
     log.info("Prompt set via API: %r", prompt)
     broadcast_ctrl(f"state:prompt:{prompt}")
     return JSONResponse({"ok": True, "prompt": prompt})
@@ -630,9 +648,10 @@ async def post_prompt_travel(request: Request):
     """Smoothly morph from the current prompt to a target prompt.
     Body: JSON {"prompt": "...", "frames": 48, "mode": "slerp"} OR raw
     text/plain (the target prompt, with default frames/mode).
-    Query: ?prompt=...&frames=...&mode=... as an alternative."""
-    if not sp:
-        raise HTTPException(status_code=503, detail="StreamProcessor not ready")
+    Query: ?prompt=...&frames=...&mode=... as an alternative.
+    Works against the live pipeline AND/OR a running batch render (live steering)."""
+    if sp is None and (_batch_manager is None or _batch_manager.active_job_id() is None):
+        raise HTTPException(status_code=503, detail="no live pipeline or batch render to morph")
 
     prompt: str | None = None
     frames_raw = 48
@@ -672,7 +691,7 @@ async def post_prompt_travel(request: Request):
     prompt = prompt.strip()
     global current_prompt
     current_prompt = prompt
-    sp.start_prompt_travel(prompt, frames=frames, mode=mode)
+    _drive_prompt_travel(prompt, frames, mode)
     log.info("Prompt travel via API: %r (frames=%d, mode=%s)", prompt, frames, mode)
     broadcast_ctrl(f"state:prompt:{prompt}")
     return JSONResponse(

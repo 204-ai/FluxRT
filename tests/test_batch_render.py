@@ -62,6 +62,7 @@ class StubProcessor:
         self.frames_per_input = frames_per_input  # simulate RIFE (>1 = interpolation)
         self.started = self.stopped = False
         self.prompt = self.seed = self.steps = None
+        self.travel = None
         self.n_frames = 0
 
     def start(self):
@@ -81,6 +82,9 @@ class StubProcessor:
 
     def set_steps(self, s):
         self.steps = s
+
+    def start_prompt_travel(self, text, frames=48, mode="slerp"):
+        self.travel = (text, frames, mode)
 
     def submit_frame(self, rgb):
         if self.per_frame_sleep:
@@ -306,6 +310,20 @@ def test_interp_clamped_to_0_4():
     job = mgr.submit(make_mp4_bytes(n_frames=2), prompt="a", seed=1, steps=2, fps=None, interp=9)
     assert wait_until(lambda: mgr.get(job.id).state == "done")
     assert mgr.get(job.id).interp == 4  # clamped
+
+
+def test_live_prompt_steering_forwards_to_active_proc():
+    stubs = []
+    mgr = _manager(stubs, per_frame_sleep=0.05)
+    job = mgr.submit(make_mp4_bytes(n_frames=40), prompt="start", seed=1, steps=2, fps=None)
+    assert wait_until(lambda: mgr.get(job.id).state == "running")
+    assert mgr.set_prompt("steered") is True
+    assert wait_until(lambda: stubs[0].prompt == "steered")
+    assert mgr.start_prompt_travel("morph", frames=10, mode="slerp") is True
+    assert wait_until(lambda: stubs[0].travel == ("morph", 10, "slerp"))
+    mgr.cancel(job.id)
+    assert wait_until(lambda: mgr.active_job_id() is None)
+    assert mgr.set_prompt("noop") is False  # no active job → not forwarded
 
 
 def test_preflight_rejection_blocks_submit():
