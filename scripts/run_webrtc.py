@@ -418,6 +418,13 @@ async def _graceful_cleanup() -> None:
             await pc.close()
     pcs.clear()
 
+    # Tear down any in-flight batch render: cancel + bounded-join its worker so the
+    # second model's subprocess isn't orphaned at exit. Off the loop (it blocks).
+    if _batch_manager is not None and _batch_manager.active_job_id() is not None:
+        loop = asyncio.get_running_loop()
+        with contextlib.suppress(Exception):
+            await loop.run_in_executor(None, _batch_manager.shutdown)
+
     # sp.stop() does blocking joins; run it off the event loop so a wedged
     # subprocess can't stall the loop while it escalates to terminate/kill.
     if sp is not None:
@@ -1216,6 +1223,65 @@ def _perf_metrics() -> dict:
         "vram_mb": vram_mb,
     }
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Batch frame-for-frame render (offline). A dedicated, parked StreamProcessor
+# renders a whole video 1:1 (scripts/batch_render.py + docs/batch-render-spec.md).
+# Gated behind an explicit opt-in: a second full FLUX.2 model does NOT co-fit with
+# the live stream on a 24 GB GPU, so the operator enables this only on a host with
+# the capacity. The batch StreamProcessor is created on submit and torn down on
+# completion, so an idle server pays nothing.
+# ──────────────────────────────────────────────────────────────────────────────
+_batch_enabled = os.environ.get("FLUXRT_BATCH_RENDER") == "1"
+_batch_manager = None
+
+
+def _batch_vram_preflight() -> None:
+    """Best-effort gate: refuse a batch job when a second full model is unlikely to
+    fit alongside the live one. Skips silently if VRAM can't be measured — the
+    FLUXRT_BATCH_RENDER opt-in remains the primary guard. Raises RuntimeError (→ 409)
+    when there isn't headroom."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        free_mb = torch.cuda.mem_get_info()[0] // (1024 * 1024)
+    except Exception:
+        return  # cannot measure → rely on the operator opt-in
+    need_mb = 0
+    with contextlib.suppress(Exception):
+        if sp is not None:
+            need_mb = int(sp.get_reserved_memory())  # live model footprint ≈ batch model footprint
+    if need_mb and free_mb < need_mb * 1.1:
+        raise RuntimeError("stop the live stream to run a batch render (insufficient free VRAM for a second model)")
+
+
+def _get_batch_manager():
+    global _batch_manager
+    if _batch_manager is None:
+        from batch_render import BatchJobManager  # local import: pulls PyAV only when used
+
+        _batch_manager = BatchJobManager(
+            base_config=sp.config,
+            make_processor=lambda cfg: StreamProcessor(cfg),
+            preflight=_batch_vram_preflight,
+        )
+    return _batch_manager
+
+
+from batch_routes import make_batch_router  # noqa: E402
+
+app.include_router(
+    make_batch_router(
+        get_manager=_get_batch_manager,
+        # Enabled only when opted in AND the live processor exists (its config is
+        # the base the batch instance clones).
+        is_enabled=lambda: _batch_enabled and sp is not None,
+        default_prompt=lambda: current_prompt or (sp.config.get("default_prompt", "") if sp else ""),
+    )
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

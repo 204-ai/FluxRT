@@ -102,6 +102,14 @@ class ModelInferenceSubprocess:
         self.shared_state = self._manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
 
+        # Batch mode: a synchronous one-output-per-input render loop (offline). The
+        # live free-run path leaves batch_mode False and never touches these.
+        self.batch_mode = bool(self.config.get("batch_mode", False))
+        self.proc_ready = Value("b", False)  # set once models are loaded (batch readiness)
+        self._seq = 0
+        self.request_queue = self._manager.Queue()   # parent -> worker: (seq, rgb)
+        self.response_queue = self._manager.Queue()  # worker -> parent: (seq, rgb_out)
+
     def __getstate__(self):
         # The subprocess is spawned via Process(target=self.process_main),
         # which pickles `self`. The SyncManager holds a weakref and is not
@@ -396,11 +404,38 @@ class ModelInferenceSubprocess:
 
     def start(self):
         self.running.value = True
-        self.process = Process(target=self.process_main)
+        target = self.process_main_batch if self.batch_mode else self.process_main
+        self.process = Process(target=target)
         self.process.start()
+
+    def submit_frame(self, frame_rgb, timeout: float = 300.0):
+        """Parent-side (batch): enqueue one frame and block for its rendered
+        output. Single consumer, processed strictly in order, so the response
+        belongs to this request. Polls so a DEAD child (e.g. CUDA OOM) fails fast
+        instead of blocking the job worker forever; raises on death or timeout."""
+        self._seq += 1
+        seq = self._seq
+        self.request_queue.put((seq, frame_rgb))
+        deadline = time.time() + timeout
+        while True:
+            try:
+                _, out = self.response_queue.get(timeout=0.5)
+                return out
+            except Empty:
+                if self.process is not None and not self.process.is_alive():
+                    raise RuntimeError("batch inference subprocess died during render")
+                if time.time() >= deadline:
+                    raise RuntimeError("batch render timed out waiting for the inference subprocess")
 
     def stop(self):
         self.running.value = False
+        if self.batch_mode:
+            # Wake the batch loop if it is blocked in request_queue.get() so it
+            # exits at once instead of waiting out the 0.2s poll timeout.
+            try:
+                self.request_queue.put(None)
+            except Exception:
+                pass
         if self.process:
             # Graceful first: let process_main observe running=False and exit
             # its loop. Escalate to terminate/kill if it is wedged in CUDA,
@@ -653,3 +688,33 @@ class ModelInferenceSubprocess:
             frame = self.convert_np_to_torch(frame)
             frames = self.interpolate_frames(frame)
             prev_time = self.sync_fps_and_send(prev_time, frames)
+
+    def process_main_batch(self):
+        """Synchronous one-output-per-input render loop for OFFLINE batch jobs.
+
+        Unlike process_main (the live free-run path), there is NO drain-to-latest,
+        NO interpolation, NO fixed-fps pacing and NO shared-tensor output: each
+        input frame arrives on request_queue, is rendered once via the SAME
+        pipeline call the live loop uses (process_frame_with_pipeline), and the
+        uint8 RGB result goes back on response_queue — exactly one output per input.
+
+        The temporal caches (update_controller, previous_frame) are NOT reset
+        between frames, so a video keeps its frame-to-frame coherence; they start
+        clean because this is a fresh, dedicated instance (process_init).
+        """
+        self.process_init()
+        self.proc_ready.value = True
+        while self.running.value:
+            try:
+                item = self.request_queue.get(timeout=0.2)
+            except Empty:
+                continue
+            if item is None:  # poison pill -> exit the loop on teardown
+                break
+            seq, frame_rgb = item
+            # Apply any prompt/seed/steps set on this instance before the job.
+            self.update_process_state()
+            out = self.process_frame_with_pipeline(frame_rgb)
+            if self.lip_processor is not None and self.lip_active:
+                out = self.lip_processor.process(out, frame_rgb)
+            self.response_queue.put((seq, out))
