@@ -429,10 +429,11 @@ class ModelInferenceSubprocess:
         self.process.start()
 
     def submit_frame(self, frame_rgb, timeout: float = 300.0):
-        """Parent-side (batch): enqueue one frame and block for its rendered
-        output. Single consumer, processed strictly in order, so the response
-        belongs to this request. Polls so a DEAD child (e.g. CUDA OOM) fails fast
-        instead of blocking the job worker forever; raises on death or timeout."""
+        """Parent-side (batch): enqueue one frame and block for its rendered output
+        — a LIST of uint8 RGB frames (one for 1:1, 2**interpolation_exp when
+        interpolating). Single consumer, processed strictly in order, so the
+        response belongs to this request. Polls so a DEAD child (e.g. CUDA OOM)
+        fails fast instead of blocking the worker forever; raises on death/timeout."""
         self._seq += 1
         seq = self._seq
         self.request_queue.put((seq, frame_rgb))
@@ -739,4 +740,12 @@ class ModelInferenceSubprocess:
             out = self.process_frame_with_pipeline(frame_rgb)
             if self.lip_processor is not None and self.lip_active:
                 out = self.lip_processor.process(out, frame_rgb)
-            self.response_queue.put((seq, out))
+            # interpolation_exp == 0 → exactly one output per input (1:1). >0 → RIFE
+            # interpolation emits 2**exp frames per input (smoother / higher fps);
+            # the caller scales the output fps by the same factor.
+            if self.interpolation_exp <= 0:
+                outs = [out]
+            else:
+                batch = self.interpolate_frames(self.convert_np_to_torch(out))  # (2**exp,H,W,3) BGR
+                outs = [batch[j][:, :, ::-1].copy() for j in range(batch.shape[0])]  # -> RGB
+            self.response_queue.put((seq, outs))

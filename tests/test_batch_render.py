@@ -53,12 +53,13 @@ class StubProcessor:
     verifiable through the lossy codec; `out_scale` emits an upscaled output so the
     encoder's output-derived sizing is exercised."""
 
-    def __init__(self, cfg, per_frame_sleep=0.0, fail=False, marker=False, out_scale=1):
+    def __init__(self, cfg, per_frame_sleep=0.0, fail=False, marker=False, out_scale=1, frames_per_input=1):
         self.cfg = cfg
         self.per_frame_sleep = per_frame_sleep
         self.fail = fail
         self.marker = marker
         self.out_scale = out_scale
+        self.frames_per_input = frames_per_input  # simulate RIFE (>1 = interpolation)
         self.started = self.stopped = False
         self.prompt = self.seed = self.steps = None
         self.n_frames = 0
@@ -90,10 +91,13 @@ class StubProcessor:
         self.n_frames += 1
         h, w = rgb.shape[:2]
         if self.marker:
-            return np.full((h * self.out_scale, w * self.out_scale, 3), (idx * 8) % 256, dtype=np.uint8)
-        if self.out_scale != 1:
-            return np.zeros((h * self.out_scale, w * self.out_scale, 3), dtype=np.uint8)
-        return rgb.copy()  # echo: 1:1, preserves count
+            base = np.full((h * self.out_scale, w * self.out_scale, 3), (idx * 8) % 256, dtype=np.uint8)
+        elif self.out_scale != 1:
+            base = np.zeros((h * self.out_scale, w * self.out_scale, 3), dtype=np.uint8)
+        else:
+            base = rgb.copy()
+        # submit_frame returns a LIST (1 for 1:1, frames_per_input to simulate RIFE).
+        return [base.copy() for _ in range(self.frames_per_input)]
 
     def stop(self):
         self.stopped = True
@@ -268,6 +272,26 @@ def test_canceled_job_leaves_no_output_file():
     assert wait_until(lambda: mgr.get(job.id).state == "canceled")
     j = mgr.get(job.id)
     assert not (j.out_path and os.path.exists(j.out_path))  # partial cleaned up
+
+
+def test_interpolation_multiplies_frames_and_fps():
+    stubs = []
+    mgr = _manager(stubs, frames_per_input=2)  # simulate 2x RIFE (interp=1)
+    job = mgr.submit(make_mp4_bytes(n_frames=5, fps=10), prompt="a", seed=1, steps=2, fps=None, interp=1)
+    assert wait_until(lambda: mgr.get(job.id).state == "done"), mgr.get(job.id).error
+    j = mgr.get(job.id)
+    assert j.frames_total == 5 and j.frames_done == 5     # progress counts INPUTS
+    assert stubs[0].cfg["interpolation_exp"] == 1          # interp threaded to the batch config
+    assert count_frames(j.out_path) == 10                  # 2 output frames per input
+    assert round(float(_video_rate(j.out_path))) == 20     # source 10 fps × 2**1
+
+
+def test_interp_clamped_to_0_4():
+    stubs = []
+    mgr = _manager(stubs)
+    job = mgr.submit(make_mp4_bytes(n_frames=2), prompt="a", seed=1, steps=2, fps=None, interp=9)
+    assert wait_until(lambda: mgr.get(job.id).state == "done")
+    assert mgr.get(job.id).interp == 4  # clamped
 
 
 def test_preflight_rejection_blocks_submit():

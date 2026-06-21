@@ -85,6 +85,7 @@ class BatchJob:
     seed: int
     steps: int
     fps: Optional[float]
+    interp: int = 0  # RIFE interpolation exponent: 0 = 1:1, k>0 = 2**k frames per input
     state: str = "queued"
     frames_total: int = 0
     frames_done: int = 0
@@ -106,6 +107,7 @@ class BatchJob:
             "frames_total": self.frames_total,
             "frames_done": self.frames_done,
             "fps": self.fps,
+            "interp": self.interp,
             "eta_s": round(eta, 1),
             "error": self.error,
         }
@@ -144,14 +146,14 @@ class BatchJobManager:
         self._jobs: dict[str, BatchJob] = {}
         self._active: Optional[str] = None
 
-    def submit(self, video_bytes: bytes, prompt: str, seed: int, steps: int, fps: Optional[float]) -> BatchJob:
+    def submit(self, video_bytes: bytes, prompt: str, seed: int, steps: int, fps: Optional[float], interp: int = 0) -> BatchJob:
         with self._lock:
             if self._active is not None:
                 raise RuntimeError("a batch render is already running")
             if self._preflight is not None:
                 self._preflight()  # raises -> surfaced as 409 by the route
             self._prune_locked()
-            job = BatchJob(id=uuid.uuid4().hex[:12], prompt=prompt, seed=seed, steps=steps, fps=fps)
+            job = BatchJob(id=uuid.uuid4().hex[:12], prompt=prompt, seed=seed, steps=steps, fps=fps, interp=max(0, min(4, int(interp))))
             self._jobs[job.id] = job
             self._active = job.id
         job._thread = threading.Thread(target=self._run, args=(job, video_bytes), daemon=True)
@@ -197,12 +199,14 @@ class BatchJobManager:
                     pass
             self._jobs.pop(j.id, None)
 
-    def _batch_config(self) -> dict:
+    def _batch_config(self, interp: int) -> dict:
         # deepcopy so nested dicts (resolution, lip_transfer, …) are NOT shared with
         # the live sp.config — the batch instance must not mutate the live byte path.
         cfg = copy.deepcopy(self._base_config)
         cfg["batch_mode"] = True
-        cfg["interpolation_exp"] = 0  # exactly 1 output per input (no RIFE tween)
+        # 0 = exactly one output per input (1:1); k>0 = RIFE-interpolate 2**k frames
+        # per input (the encoder fps is scaled by the same factor).
+        cfg["interpolation_exp"] = max(0, min(4, int(interp)))
         cfg["logging"] = False
         # A second model + LivePortrait would OOM; batch never lip-syncs.
         lp = cfg.get("lip_transfer")
@@ -223,10 +227,13 @@ class BatchJobManager:
             if not frames:
                 raise ValueError("no frames decoded from input video")
             job.frames_total = len(frames)
-            out_fps = job.fps or src_fps or 25.0
+            # Interpolation emits 2**interp frames per input, so scale the encoded fps
+            # by the same factor to keep the output the same duration (just smoother).
+            factor = 2 ** job.interp
+            out_fps = (job.fps or src_fps or 25.0) * factor
 
             job.state = "loading"
-            proc = self._make(self._batch_config())
+            proc = self._make(self._batch_config(job.interp))
             proc.start()
             # Wait for the model to load, but fail fast if the child dies (CUDA OOM)
             # or never becomes ready — otherwise this loop (and the single job slot)
@@ -251,10 +258,11 @@ class BatchJobManager:
             for i, fr in enumerate(frames):
                 if job._cancel.is_set():
                     raise _Canceled()
-                out = proc.submit_frame(fr)
-                if encoder is None:  # size the encoder from the first output (may be upscaled)
-                    encoder = Mp4Encoder(out_path, out_fps, out.shape[1], out.shape[0])
-                encoder.write(out)
+                # submit_frame returns a LIST (one frame, or 2**interp interpolated).
+                for out in proc.submit_frame(fr):
+                    if encoder is None:  # size the encoder from the first output (may be upscaled)
+                        encoder = Mp4Encoder(out_path, out_fps, out.shape[1], out.shape[0])
+                    encoder.write(out)
                 job.frames_done = i + 1
 
             job.state = "encoding"

@@ -23,11 +23,9 @@ class StreamProcessor:
         # per submit_frame() — synchronous, no interpolation, no output scheduler.
         # Separate from the live free-run path (which never sets this).
         self.batch_mode = bool(self.config.get("batch_mode", False))
-        # Batch is strictly one output per input — force interpolation off before
-        # the tensor sizes are derived (both subprocesses re-read this key, so they
-        # must agree on the shape).
-        if self.batch_mode:
-            self.config["interpolation_exp"] = 0
+        # interpolation_exp is honored as-is: the batch caller sets it per job
+        # (0 = 1:1, k>0 = 2**k interpolated frames per input). Both subprocesses
+        # re-read this key, so they agree on the output-batch tensor shape.
         self.resolution = self.config["resolution"]
         output_batch_size = 2 ** self.config["interpolation_exp"]
 
@@ -84,9 +82,10 @@ class StreamProcessor:
         if self.output_scheduler_subprocess is not None:
             self.output_scheduler_subprocess.start()
 
-    def submit_frame(self, frame_rgb: np.ndarray, timeout: float = 300.0) -> np.ndarray:
+    def submit_frame(self, frame_rgb: np.ndarray, timeout: float = 300.0) -> list:
         """Batch mode only: render ONE input frame synchronously and return its
-        output (uint8 RGB). Blocks until the inference subprocess produces it."""
+        output frames — a LIST of uint8 RGB (one for 1:1, 2**interpolation_exp when
+        interpolating). Blocks until the inference subprocess produces them."""
         if not self.batch_mode:
             raise RuntimeError("submit_frame() requires batch_mode=true")
         return self.model_inference_subprocess.submit_frame(frame_rgb, timeout=timeout)
