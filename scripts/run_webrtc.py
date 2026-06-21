@@ -56,6 +56,7 @@ QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
+from fluxrt.webrtc.stats import connection_pool_stats
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1105,6 +1106,10 @@ async def _health():
     return {
         "ready": bool(sp and sp.is_ready()),
         "peers": len(pcs),
+        # Active connection-pool breakdown (total / connected / per-state).
+        "connections": connection_pool_stats(
+            [getattr(pc, "connectionState", "unknown") for pc in list(pcs)]
+        ),
         "resolution": resolution,
         "reference_enabled": _reference_enabled(),
         "reference_set": latest_reference_png is not None,

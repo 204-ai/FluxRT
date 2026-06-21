@@ -108,17 +108,43 @@ async function start(){
   $('stat').textContent='connected'; poll();
 }
 
-let prev=null, prevT=0;
+// Client-side live-link stats from getStats() (this connection's RTT + throughput).
+let _statsPrev=null;
+async function connStats(){
+  if(!pc) return 'link      : (no pc)';
+  try{
+    const stats = await pc.getStats();
+    let rtt=null, out=0, inn=0, lost=0, ts=0;
+    stats.forEach(r=>{
+      if(r.type==='candidate-pair' && (r.nominated||r.selected||r.state==='succeeded') && r.currentRoundTripTime!=null) rtt=r.currentRoundTripTime;
+      if(r.type==='outbound-rtp' && r.kind==='video'){ out+=r.bytesSent||0; ts=r.timestamp||ts; }
+      if(r.type==='inbound-rtp'  && r.kind==='video'){ inn+=r.bytesReceived||0; lost+=r.packetsLost||0; ts=r.timestamp||ts; }
+    });
+    let up='-', down='-';
+    if(_statsPrev && ts>_statsPrev.ts){
+      const dt=(ts-_statsPrev.ts)/1000;
+      up=Math.round((out-_statsPrev.out)*8/1000/dt);
+      down=Math.round((inn-_statsPrev.inn)*8/1000/dt);
+    }
+    _statsPrev={ts,out,inn};
+    return `link      : up ${up}kbps  down ${down}kbps  rtt ${rtt!=null?Math.round(rtt*1000)+'ms':'-'}  lost ${lost}`;
+  }catch(e){ return 'link      : (stats err)'; }
+}
 async function poll(){
   try{
     const hz = await (await fetch(S('/healthz'),{cache:'no-store'})).json();
     const live = hz.input_source && hz.input_source!=='none';
+    const c = hz.connections || {};
+    const byState = Object.entries(c.by_state||{}).map(([k,v])=>`${k}:${v}`).join(' ') || '—';
+    const linkLine = await connStats();
     $('readout').innerHTML =
-      `peers     : ${hz.peers}   input_source: ${hz.input_source}\n`+
+      `pool      : ${c.total??hz.peers} conns   active ${c.active??'—'}   waiters ${hz.input_waiters??'—'}   input ${hz.input_source}\n`+
+      `  states  : ${byState}\n`+
+      `${linkLine}\n`+
       `resolution: ${hz.resolution?.width}x${hz.resolution?.height}\n`+
       `<span class="${live?'live':'dead'}">pipeline  : ${hz.fps_pipeline??'-'} fps   interp ${hz.fps_interpolated??'-'}   proc ${hz.proc_time_ms??'-'}ms   vram ${hz.vram_mb??'-'}MB</span>\n`+
       `prompt/seed/steps: ${hz.prompt} / ${hz.seed} / ${hz.steps}`;
-    $('stat').textContent = live ? 'connected · input live' : 'connected · NO INPUT';
+    $('stat').textContent = live ? `connected · input live · ${c.active??'?'}/${c.total??'?'} peers` : 'connected · NO INPUT';
   }catch(e){ $('stat').textContent='poll error'; }
   setTimeout(poll, 1000);
 }
