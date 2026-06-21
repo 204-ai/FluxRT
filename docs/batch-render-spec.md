@@ -125,6 +125,19 @@ Single job at a time (VRAM). Reject/queue concurrent submits.
 6. `stop()` the instance; mark `done`; expose result.
 On error/cancel at any step: `stop()`, mark state, clean temp files.
 
+### Batch-only deployment (single GPU)
+The live model stays resident for the whole server lifetime, so a second full model
+never co-fits on a 24 GB card. To render batch on one GPU, run a server in
+**batch-only** mode — it skips the live pipeline entirely and gives the per-job
+batch model the GPU to itself:
+```
+FLUXRT_BATCH_ONLY=1 python scripts/run_webrtc.py --config <cfg>   # or --batch-only
+```
+Batch-only implies batch enabled; `/offer` returns 503 and `/healthz` returns a
+minimal `{ready:false, batch_only:true}`. Point a clip's serverBase at it for the
+batch panel (its live connection won't come up — expected). For live + batch
+together, use two GPUs / two servers.
+
 ### VRAM policy
 Two full models (live + batch) may not co-fit. On submit, check free VRAM
 (`get_reserved_memory` / torch). If a batch instance won't fit alongside the live

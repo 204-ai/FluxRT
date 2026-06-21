@@ -417,6 +417,8 @@ def _rtc_config() -> RTCConfiguration:
 
 @app.post("/offer")
 async def offer(request: Request):
+    if sp is None:
+        raise HTTPException(status_code=503, detail="live pipeline not running (batch-only server)")
     body = await request.json()
     sdp = body.get("sdp")
     sdp_type = body.get("type")
@@ -1132,6 +1134,10 @@ async def _test_client():
 
 @app.get("/healthz")
 async def _health():
+    # Batch-only server has no live pipeline — return a minimal payload so a client
+    # polling /healthz (e.g. the clip header) doesn't error on the missing sp.
+    if sp is None:
+        return {"ready": False, "peers": 0, "batch_only": True}
     return {
         "ready": bool(sp and sp.is_ready()),
         "peers": len(pcs),
@@ -1194,6 +1200,11 @@ def _perf_metrics() -> dict:
 # completion, so an idle server pays nothing.
 # ──────────────────────────────────────────────────────────────────────────────
 _batch_enabled = os.environ.get("FLUXRT_BATCH_RENDER") == "1"
+# Batch-only: serve the batch API WITHOUT starting the live pipeline, so the batch
+# model is the only one on the GPU (the live model otherwise stays resident and a
+# second won't co-fit on a 24 GB card). Set via FLUXRT_BATCH_ONLY=1 or --batch-only.
+_batch_only = os.environ.get("FLUXRT_BATCH_ONLY") == "1"
+_batch_cfg_path: Optional[str] = None  # config to clone for batch when sp is absent
 _batch_manager = None
 
 
@@ -1233,13 +1244,24 @@ def _batch_vram_preflight() -> None:
         raise RuntimeError("stop the live stream to run a batch render (insufficient free VRAM for a second model)")
 
 
+def _batch_base_config() -> dict:
+    """Config the batch instance clones: the live processor's when it exists,
+    otherwise (batch-only) the config file loaded from disk."""
+    if sp is not None:
+        return sp.config
+    if _batch_cfg_path:
+        with open(_batch_cfg_path) as f:
+            return json.load(f)
+    raise RuntimeError("no config available for batch render")
+
+
 def _get_batch_manager():
     global _batch_manager
     if _batch_manager is None:
         from batch_render import BatchJobManager  # local import: pulls PyAV only when used
 
         _batch_manager = BatchJobManager(
-            base_config=sp.config,
+            base_config=_batch_base_config(),
             make_processor=lambda cfg: StreamProcessor(cfg),
             preflight=_batch_vram_preflight,
         )
@@ -1251,9 +1273,9 @@ from batch_routes import make_batch_router  # noqa: E402
 app.include_router(
     make_batch_router(
         get_manager=_get_batch_manager,
-        # Enabled only when opted in AND the live processor exists (its config is
-        # the base the batch instance clones).
-        is_enabled=lambda: _batch_enabled and sp is not None,
+        # Enabled when opted in with a live processor present, OR in batch-only mode
+        # (no live model — the batch model has the GPU to itself).
+        is_enabled=lambda: (_batch_enabled or _batch_only) and (sp is not None or _batch_only),
         default_prompt=lambda: current_prompt or (sp.config.get("default_prompt", "") if sp else ""),
     )
 )
@@ -1262,6 +1284,25 @@ app.include_router(
 # ──────────────────────────────────────────────────────────────────────────────
 # Entry point.
 # ──────────────────────────────────────────────────────────────────────────────
+def _run_server(args) -> None:
+    use_tls = bool(args.ssl_certfile and args.ssl_keyfile)
+    scheme = "https" if use_tls else "http"
+    log.info("Open %s://<this-host>:%d/ in a LAN browser", scheme, args.port)
+    if not use_tls:
+        log.warning(
+            "Running plain HTTP — browsers will block getUserMedia on non-"
+            "localhost origins. Pass --ssl-certfile + --ssl-keyfile for HTTPS."
+        )
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
+    )
+
+
 def main() -> None:
     global sp, input_tensor, output_tensor, resolution, out_resolution
 
@@ -1280,6 +1321,12 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--initial-prompt", default=None)
+    parser.add_argument(
+        "--batch-only",
+        action="store_true",
+        help="Serve ONLY the /batch/* render API; do not start the live pipeline so "
+        "the batch model has the GPU to itself. Implies batch render enabled.",
+    )
     parser.add_argument(
         "--interp",
         type=int,
@@ -1377,6 +1424,15 @@ def main() -> None:
     _load_saved_prompts()
     log.info("Loaded %d saved prompts from %s", len(saved_prompts), SAVED_PROMPTS_PATH)
 
+    global _batch_only, _batch_cfg_path
+    _batch_only = _batch_only or args.batch_only
+    if _batch_only:
+        # No live model — the batch instance (created per job) owns the GPU.
+        _batch_cfg_path = config_path
+        log.info("Batch-only mode: live pipeline NOT started; serving /batch/* only (config %s)", config_path)
+        _run_server(args)
+        return
+
     log.info("Loading StreamProcessor from %s", config_path)
     sp = StreamProcessor(config_path)
 
@@ -1432,23 +1488,7 @@ def main() -> None:
         )
         producer_thread.start()
 
-    use_tls = bool(args.ssl_certfile and args.ssl_keyfile)
-    scheme = "https" if use_tls else "http"
-    log.info("Open %s://<this-host>:%d/ in a LAN browser", scheme, args.port)
-    if not use_tls:
-        log.warning(
-            "Running plain HTTP — browsers will block getUserMedia on non-"
-            "localhost origins. Pass --ssl-certfile + --ssl-keyfile for HTTPS."
-        )
-
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-        ssl_certfile=args.ssl_certfile,
-        ssl_keyfile=args.ssl_keyfile,
-    )
+    _run_server(args)
 
 
 if __name__ == "__main__":
