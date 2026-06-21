@@ -84,6 +84,13 @@ def test_unknown_job_404():
     assert client.delete("/batch/jobs/nope").status_code == 404
 
 
+def test_preview_503_when_disabled_404_when_no_frame():
+    client, _, _ = _client(enabled=False)
+    assert client.get("/batch/preview.jpg").status_code == 503
+    client2, _, _ = _client()
+    assert client2.get("/batch/preview.jpg").status_code == 404  # nothing rendered yet
+
+
 def test_result_before_done_is_409():
     client, mgr, stubs = _client(per_frame_sleep=0.05)
     r = _post(client, make_mp4_bytes(n_frames=30))

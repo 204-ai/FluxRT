@@ -326,6 +326,15 @@ def test_live_prompt_steering_forwards_to_active_proc():
     assert mgr.set_prompt("noop") is False  # no active job → not forwarded
 
 
+def test_latest_frame_tracked_for_preview():
+    stubs = []
+    mgr = _manager(stubs)
+    assert mgr.latest_jpeg() is None  # nothing rendered yet (no cv2 needed)
+    job = mgr.submit(make_mp4_bytes(n_frames=3), prompt="a", seed=1, steps=2, fps=None)
+    assert wait_until(lambda: mgr.get(job.id).state == "done")
+    assert mgr._latest_frame is not None  # tracks the last rendered frame
+
+
 def test_preflight_rejection_blocks_submit():
     stubs = []
     mgr = _manager(stubs)

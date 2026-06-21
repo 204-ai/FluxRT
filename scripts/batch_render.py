@@ -146,6 +146,7 @@ class BatchJobManager:
         self._jobs: dict[str, BatchJob] = {}
         self._active: Optional[str] = None
         self._active_proc = None  # the running batch StreamProcessor (for live prompt steering)
+        self._latest_frame = None  # most recent rendered frame (RGB), for the live preview
 
     def submit(self, video_bytes: bytes, prompt: str, seed: int, steps: int, fps: Optional[float], interp: Optional[int] = None) -> BatchJob:
         with self._lock:
@@ -169,6 +170,16 @@ class BatchJobManager:
 
     def active_job_id(self) -> Optional[str]:
         return self._active
+
+    def latest_jpeg(self) -> Optional[bytes]:
+        """JPEG of the most recently rendered frame (for the live preview), or None."""
+        frame = self._latest_frame
+        if frame is None:
+            return None
+        import cv2  # lazy: keeps the GPU-free test import torch/cv2-free
+
+        ok, buf = cv2.imencode(".jpg", frame[:, :, ::-1])  # RGB -> BGR for cv2
+        return buf.tobytes() if ok else None
 
     def set_prompt(self, text: str) -> bool:
         """Live-steer the running render's prompt (hard cut). No-op if no job runs.
@@ -260,6 +271,7 @@ class BatchJobManager:
             out_fps = (job.fps or src_fps or 25.0) * factor
 
             job.state = "loading"
+            self._latest_frame = None  # drop the previous render's last frame
             proc = self._make(self._batch_config(job.interp))
             self._active_proc = proc  # exposed for live prompt steering
             proc.start()
@@ -291,6 +303,7 @@ class BatchJobManager:
                     if encoder is None:  # size the encoder from the first output (may be upscaled)
                         encoder = Mp4Encoder(out_path, out_fps, out.shape[1], out.shape[0])
                     encoder.write(out)
+                    self._latest_frame = out  # live preview tracks the latest rendered frame
                 job.frames_done = i + 1
 
             job.state = "encoding"

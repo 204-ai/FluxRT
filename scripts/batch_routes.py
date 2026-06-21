@@ -8,7 +8,7 @@ import os
 from typing import Callable, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 # Cap the uploaded video so a single request can't exhaust host RAM (the whole file
 # is buffered, then decoded). Override with FLUXRT_BATCH_MAX_MB.
@@ -62,6 +62,15 @@ def make_batch_router(
         except RuntimeError as exc:  # another job already running
             raise HTTPException(status_code=409, detail=str(exc))
         return JSONResponse(job.status(), status_code=202)
+
+    @router.get("/batch/preview.jpg")
+    async def preview():
+        """Latest rendered frame as a JPEG, for a live preview while a job runs."""
+        _require()
+        jpg = get_manager().latest_jpeg()
+        if jpg is None:
+            raise HTTPException(status_code=404, detail="no rendered frame yet")
+        return Response(content=jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @router.get("/batch/jobs/{job_id}")
     async def status(job_id: str):
