@@ -41,12 +41,16 @@ fi
 
 conda activate "$CONDA_ENV"
 
-# ── PyTorch ───────────────────────────────────────────────────────────────────
-if python -c "import torch" 2>/dev/null; then
-    log "PyTorch is already installed."
+# ── PyTorch (CUDA 12.8 / Blackwell sm_120 for RTX 50-series) ──────────────────
+# Check the build actually carries sm_120 kernels, not just that torch imports.
+# A cu128 wheel lists sm_120 regardless of the local GPU and also covers the
+# RTX 4090 (sm_89); a CPU or pre-cu128 torch fails on a 5090 ("sm_120 not
+# supported"). --upgrade replaces such a build in place.
+if python -c "import torch, sys; sys.exit(0 if 'sm_120' in torch.cuda.get_arch_list() else 1)" 2>/dev/null; then
+    log "PyTorch with CUDA 12.8 (Blackwell sm_120) already installed."
 else
-    log "Installing PyTorch with CUDA 12.8 support..."
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    log "Installing PyTorch with CUDA 12.8 / Blackwell sm_120 support..."
+    pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
 fi
 
 # ── Python requirements ───────────────────────────────────────────────────────
@@ -116,6 +120,24 @@ clone_or_resume \
     "https://huggingface.co/aydin99/FLUX.2-klein-4B-int8" \
     "FLUX.2-klein-4B-int8/diffusion_pytorch_model.safetensors" \
     "FLUX.2-klein-4B int8 model"
+
+# ── extension models (enabled per-config; small, downloaded by default) ───────
+clone_or_resume \
+    "taef2" \
+    "https://huggingface.co/madebyollin/taef2" \
+    "taef2/taef2.safetensors" \
+    "TAEF2 tiny-VAE model (extension)"
+
+clone_or_resume \
+    "FlowUpscaler" \
+    "https://huggingface.co/TensorForger/FlowUpscaler" \
+    "FlowUpscaler/flow_upscaler.safetensors" \
+    "Flow Upscaler model (extension)"
+
+# ── verify GPU detection ──────────────────────────────────────────────────────
+log "Detected GPU(s):"
+python -c "from fluxrt.utils.scan_hardware import scan_hardware; import json; print(json.dumps(scan_hardware()['gpu'], indent=2))" \
+    || warn "Could not query the GPU — check the PyTorch install above."
 
 # ── done ──────────────────────────────────────────────────────────────────────
 echo ""

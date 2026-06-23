@@ -68,17 +68,21 @@ IF ERRORLEVEL 1 (
     exit /b 1
 )
 
-:: ── PyTorch ───────────────────────────────────────────────────────────────────
-python -c "import torch" >nul 2>&1
+:: ── PyTorch (CUDA 12.8 / Blackwell sm_120 for RTX 50-series) ──────────────────
+:: Check the build actually carries sm_120 kernels, not just that torch imports.
+:: A cu128 wheel lists sm_120 regardless of the local GPU and also covers the
+:: RTX 4090 (sm_89); a CPU or pre-cu128 torch fails on a 5090. --upgrade replaces
+:: such a build in place.
+python -c "import torch, sys; sys.exit(0 if 'sm_120' in torch.cuda.get_arch_list() else 1)" >nul 2>&1
 IF ERRORLEVEL 1 (
-    echo [+] Installing PyTorch with CUDA 12.8 support...
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    echo [+] Installing PyTorch with CUDA 12.8 / Blackwell sm_120 support...
+    pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
     IF ERRORLEVEL 1 (
         echo [ERROR] Failed to install PyTorch.
         exit /b 1
     )
 ) ELSE (
-    echo [+] PyTorch is already installed.
+    echo [+] PyTorch with Blackwell sm_120 support already installed.
 )
 
 :: ── Python requirements ───────────────────────────────────────────────────────
@@ -189,6 +193,53 @@ IF EXIST "%INT8_SENTINEL%" (
         exit /b 1
     )
 )
+
+:: ── TAEF2 tiny-VAE model (extension) ─────────────────────────────────────────
+SET TAEF2_DIR=taef2
+SET TAEF2_SENTINEL=taef2\taef2.safetensors
+IF EXIST "%TAEF2_SENTINEL%" (
+    echo [+] TAEF2 tiny-VAE model: already downloaded.
+) ELSE IF EXIST "%TAEF2_DIR%\.git" (
+    echo [!] TAEF2: directory exists but looks incomplete — resuming LFS download...
+    git -C "%TAEF2_DIR%" pull --ff-only
+    git -C "%TAEF2_DIR%" lfs pull
+) ELSE IF EXIST "%TAEF2_DIR%" (
+    echo [!] TAEF2: '%TAEF2_DIR%' exists but is not a git repository.
+    echo [!]        Remove it and re-run to download the model.
+) ELSE (
+    echo [+] Downloading TAEF2 tiny-VAE model...
+    git clone https://huggingface.co/madebyollin/taef2
+    IF ERRORLEVEL 1 (
+        echo [ERROR] Failed to clone TAEF2 model.
+        exit /b 1
+    )
+)
+
+:: ── Flow Upscaler model (extension) ──────────────────────────────────────────
+SET UPSCALER_DIR=FlowUpscaler
+SET UPSCALER_SENTINEL=FlowUpscaler\flow_upscaler.safetensors
+IF EXIST "%UPSCALER_SENTINEL%" (
+    echo [+] Flow Upscaler model: already downloaded.
+) ELSE IF EXIST "%UPSCALER_DIR%\.git" (
+    echo [!] Flow Upscaler: directory exists but looks incomplete — resuming LFS download...
+    git -C "%UPSCALER_DIR%" pull --ff-only
+    git -C "%UPSCALER_DIR%" lfs pull
+) ELSE IF EXIST "%UPSCALER_DIR%" (
+    echo [!] Flow Upscaler: '%UPSCALER_DIR%' exists but is not a git repository.
+    echo [!]               Remove it and re-run to download the model.
+) ELSE (
+    echo [+] Downloading Flow Upscaler model...
+    git clone https://huggingface.co/TensorForger/FlowUpscaler
+    IF ERRORLEVEL 1 (
+        echo [ERROR] Failed to clone Flow Upscaler model.
+        exit /b 1
+    )
+)
+
+:: ── verify GPU detection ──────────────────────────────────────────────────────
+echo [+] Detected GPU(s):
+python -c "from fluxrt.utils.scan_hardware import scan_hardware; import json; print(json.dumps(scan_hardware()['gpu'], indent=2))"
+IF ERRORLEVEL 1 echo [!] Could not query the GPU — check the PyTorch install above.
 
 :: ── done ──────────────────────────────────────────────────────────────────────
 echo.
