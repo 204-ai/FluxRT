@@ -191,6 +191,23 @@ def send_to_pc(pc: RTCPeerConnection, msg: str) -> None:
         safe_send(ch, msg)
 
 
+def _drive_prompt(prompt: str) -> None:
+    """Apply a prompt to whichever processor is active: the live pipeline and/or a
+    running batch render (live steering). Both are no-ops when absent."""
+    if sp is not None:
+        sp.set_prompt(prompt)
+    if _batch_manager is not None:
+        _batch_manager.set_prompt(prompt)
+
+
+def _drive_prompt_travel(prompt: str, frames: int, mode: str) -> None:
+    """Like _drive_prompt but a slerp/lerp morph over `frames` generated frames."""
+    if sp is not None:
+        sp.start_prompt_travel(prompt, frames=frames, mode=mode)
+    if _batch_manager is not None:
+        _batch_manager.start_prompt_travel(prompt, frames=frames, mode=mode)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Shared frame push — runs the BGR input through the pipeline and updates
 # `latest_rgb` for any active video track to send out. Used by both the local
@@ -360,12 +377,18 @@ async def _graceful_cleanup() -> None:
             await asyncio.gather(*[_close(pc) for pc in list(pcs)])
         pcs.clear()
 
-        # sp.stop() does blocking joins; run it off the event loop so a wedged
-        # subprocess can't stall the loop while it escalates to terminate/kill.
+        # Tear down the live processor AND any in-flight batch render CONCURRENTLY
+        # (independent processes) so neither eats the other's slice of the 15s
+        # watchdog budget. Both do blocking joins → run off the event loop. The
+        # batch join is bounded short so the live reap keeps headroom.
+        loop = asyncio.get_running_loop()
+        teardowns = []
+        if _batch_manager is not None and _batch_manager.active_job_id() is not None:
+            teardowns.append(loop.run_in_executor(None, lambda: _batch_manager.shutdown(4.0)))
         if sp is not None:
-            loop = asyncio.get_running_loop()
-            with contextlib.suppress(Exception):
-                await loop.run_in_executor(None, sp.stop)
+            teardowns.append(loop.run_in_executor(None, sp.stop))
+        if teardowns:
+            await asyncio.gather(*teardowns, return_exceptions=True)
         log.info("Shutdown complete.")
     finally:
         watchdog.cancel()
@@ -411,6 +434,8 @@ def _rtc_config() -> RTCConfiguration:
 
 @app.post("/offer")
 async def offer(request: Request):
+    if sp is None:
+        raise HTTPException(status_code=503, detail="live pipeline not running (batch-only server)")
     body = await request.json()
     sdp = body.get("sdp")
     sdp_type = body.get("type")
@@ -521,7 +546,7 @@ async def offer(request: Request):
                         mode,
                     )
                     current_prompt = new_prompt
-                    sp.start_prompt_travel(new_prompt, frames=frames, mode=mode)
+                    _drive_prompt_travel(new_prompt, frames, mode)
                     safe_send(channel, "ack:prompt")
                     broadcast_ctrl(f"state:prompt:{new_prompt}")
                 else:
@@ -531,7 +556,7 @@ async def offer(request: Request):
                 if new_prompt:
                     log.info("Prompt update: %r", new_prompt)
                     current_prompt = new_prompt
-                    sp.set_prompt(new_prompt)
+                    _drive_prompt(new_prompt)
                     safe_send(channel, "ack:prompt")
                     broadcast_ctrl(f"state:prompt:{new_prompt}")
             elif msg.startswith("seed:"):
@@ -586,9 +611,10 @@ def _lip_enabled() -> bool:
 async def post_prompt(request: Request):
     """Set the generation prompt.
     Body: JSON {"prompt": "..."} OR raw text/plain.
-    Query: ?prompt=... (URL-encoded) as a third option."""
-    if not sp:
-        raise HTTPException(status_code=503, detail="StreamProcessor not ready")
+    Query: ?prompt=... (URL-encoded) as a third option.
+    Works against the live pipeline AND/OR a running batch render (live steering)."""
+    if sp is None and (_batch_manager is None or _batch_manager.active_job_id() is None):
+        raise HTTPException(status_code=503, detail="no live pipeline or batch render to set a prompt on")
 
     prompt: str | None = None
     q = request.query_params.get("prompt")
@@ -611,7 +637,7 @@ async def post_prompt(request: Request):
     prompt = prompt.strip()
     global current_prompt
     current_prompt = prompt
-    sp.set_prompt(prompt)
+    _drive_prompt(prompt)
     log.info("Prompt set via API: %r", prompt)
     broadcast_ctrl(f"state:prompt:{prompt}")
     return JSONResponse({"ok": True, "prompt": prompt})
@@ -622,9 +648,10 @@ async def post_prompt_travel(request: Request):
     """Smoothly morph from the current prompt to a target prompt.
     Body: JSON {"prompt": "...", "frames": 48, "mode": "slerp"} OR raw
     text/plain (the target prompt, with default frames/mode).
-    Query: ?prompt=...&frames=...&mode=... as an alternative."""
-    if not sp:
-        raise HTTPException(status_code=503, detail="StreamProcessor not ready")
+    Query: ?prompt=...&frames=...&mode=... as an alternative.
+    Works against the live pipeline AND/OR a running batch render (live steering)."""
+    if sp is None and (_batch_manager is None or _batch_manager.active_job_id() is None):
+        raise HTTPException(status_code=503, detail="no live pipeline or batch render to morph")
 
     prompt: str | None = None
     frames_raw = 48
@@ -664,7 +691,7 @@ async def post_prompt_travel(request: Request):
     prompt = prompt.strip()
     global current_prompt
     current_prompt = prompt
-    sp.start_prompt_travel(prompt, frames=frames, mode=mode)
+    _drive_prompt_travel(prompt, frames, mode)
     log.info("Prompt travel via API: %r (frames=%d, mode=%s)", prompt, frames, mode)
     broadcast_ctrl(f"state:prompt:{prompt}")
     return JSONResponse(
@@ -1126,6 +1153,10 @@ async def _test_client():
 
 @app.get("/healthz")
 async def _health():
+    # Batch-only server has no live pipeline — return a minimal payload so a client
+    # polling /healthz (e.g. the clip header) doesn't error on the missing sp.
+    if sp is None:
+        return {"ready": False, "peers": 0, "batch_only": True}
     return {
         "ready": bool(sp and sp.is_ready()),
         "peers": len(pcs),
@@ -1180,8 +1211,117 @@ def _perf_metrics() -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Batch frame-for-frame render (offline). A dedicated, parked StreamProcessor
+# renders a whole video 1:1 (scripts/batch_render.py + docs/batch-render-spec.md).
+# Gated behind an explicit opt-in: a second full FLUX.2 model does NOT co-fit with
+# the live stream on a 24 GB GPU, so the operator enables this only on a host with
+# the capacity. The batch StreamProcessor is created on submit and torn down on
+# completion, so an idle server pays nothing.
+# ──────────────────────────────────────────────────────────────────────────────
+_batch_enabled = os.environ.get("FLUXRT_BATCH_RENDER") == "1"
+# Batch-only: serve the batch API WITHOUT starting the live pipeline, so the batch
+# model is the only one on the GPU (the live model otherwise stays resident and a
+# second won't co-fit on a 24 GB card). Set via FLUXRT_BATCH_ONLY=1 or --batch-only.
+_batch_only = os.environ.get("FLUXRT_BATCH_ONLY") == "1"
+_batch_cfg_path: Optional[str] = None  # config to clone for batch when sp is absent
+_batch_manager = None
+
+
+def _free_vram_mb() -> Optional[int]:
+    """Free VRAM (MB) of the most-free GPU via nvidia-smi, or None if unavailable.
+    Uses the CLI on purpose — importing torch / calling mem_get_info() here would
+    create a CUDA context in the web process and waste VRAM that the live model needs."""
+    import shutil
+    import subprocess
+
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout
+    except Exception:
+        return None
+    vals = [int(x) for x in out.split() if x.strip().isdigit()]
+    return max(vals) if vals else None
+
+
+def _batch_vram_preflight() -> None:
+    """Best-effort gate: refuse a batch job when a second full model is unlikely to
+    fit alongside the live one. Skips silently if VRAM can't be measured — the
+    FLUXRT_BATCH_RENDER opt-in remains the primary guard. Raises RuntimeError (→ 409)
+    when there isn't headroom."""
+    free_mb = _free_vram_mb()
+    if free_mb is None:
+        return  # cannot measure → rely on the operator opt-in
+    need_mb = 0
+    with contextlib.suppress(Exception):
+        if sp is not None:
+            need_mb = int(sp.get_reserved_memory())  # live model footprint ≈ batch model footprint
+    if need_mb and free_mb < need_mb * 1.1:
+        raise RuntimeError("stop the live stream to run a batch render (insufficient free VRAM for a second model)")
+
+
+def _batch_base_config() -> dict:
+    """Config the batch instance clones: the live processor's when it exists,
+    otherwise (batch-only) the config file loaded from disk."""
+    if sp is not None:
+        return sp.config
+    if _batch_cfg_path:
+        with open(_batch_cfg_path) as f:
+            return json.load(f)
+    raise RuntimeError("no config available for batch render")
+
+
+def _get_batch_manager():
+    global _batch_manager
+    if _batch_manager is None:
+        from batch_render import BatchJobManager  # local import: pulls PyAV only when used
+
+        _batch_manager = BatchJobManager(
+            base_config=_batch_base_config(),
+            make_processor=lambda cfg: StreamProcessor(cfg),
+            preflight=_batch_vram_preflight,
+        )
+    return _batch_manager
+
+
+from batch_routes import make_batch_router  # noqa: E402
+
+app.include_router(
+    make_batch_router(
+        get_manager=_get_batch_manager,
+        # Enabled when opted in with a live processor present, OR in batch-only mode
+        # (no live model — the batch model has the GPU to itself).
+        is_enabled=lambda: (_batch_enabled or _batch_only) and (sp is not None or _batch_only),
+        default_prompt=lambda: current_prompt or (sp.config.get("default_prompt", "") if sp else ""),
+    )
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Entry point.
 # ──────────────────────────────────────────────────────────────────────────────
+def _run_server(args) -> None:
+    use_tls = bool(args.ssl_certfile and args.ssl_keyfile)
+    scheme = "https" if use_tls else "http"
+    log.info("Open %s://<this-host>:%d/ in a LAN browser", scheme, args.port)
+    if not use_tls:
+        log.warning(
+            "Running plain HTTP — browsers will block getUserMedia on non-"
+            "localhost origins. Pass --ssl-certfile + --ssl-keyfile for HTTPS."
+        )
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
+    )
+
+
 def main() -> None:
     global sp, input_tensor, output_tensor, resolution, out_resolution
 
@@ -1200,6 +1340,12 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--initial-prompt", default=None)
+    parser.add_argument(
+        "--batch-only",
+        action="store_true",
+        help="Serve ONLY the /batch/* render API; do not start the live pipeline so "
+        "the batch model has the GPU to itself. Implies batch render enabled.",
+    )
     parser.add_argument(
         "--interp",
         type=int,
@@ -1297,6 +1443,15 @@ def main() -> None:
     _load_saved_prompts()
     log.info("Loaded %d saved prompts from %s", len(saved_prompts), SAVED_PROMPTS_PATH)
 
+    global _batch_only, _batch_cfg_path
+    _batch_only = _batch_only or args.batch_only
+    if _batch_only:
+        # No live model — the batch instance (created per job) owns the GPU.
+        _batch_cfg_path = config_path
+        log.info("Batch-only mode: live pipeline NOT started; serving /batch/* only (config %s)", config_path)
+        _run_server(args)
+        return
+
     log.info("Loading StreamProcessor from %s", config_path)
     sp = StreamProcessor(config_path)
 
@@ -1352,23 +1507,7 @@ def main() -> None:
         )
         producer_thread.start()
 
-    use_tls = bool(args.ssl_certfile and args.ssl_keyfile)
-    scheme = "https" if use_tls else "http"
-    log.info("Open %s://<this-host>:%d/ in a LAN browser", scheme, args.port)
-    if not use_tls:
-        log.warning(
-            "Running plain HTTP — browsers will block getUserMedia on non-"
-            "localhost origins. Pass --ssl-certfile + --ssl-keyfile for HTTPS."
-        )
-
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="info",
-        ssl_certfile=args.ssl_certfile,
-        ssl_keyfile=args.ssl_keyfile,
-    )
+    _run_server(args)
 
 
 if __name__ == "__main__":

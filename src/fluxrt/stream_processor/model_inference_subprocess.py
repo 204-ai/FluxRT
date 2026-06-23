@@ -33,6 +33,7 @@ from accelerate import init_empty_weights
 from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
+from fluxrt.utils import crop_maximal_rectangle
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
 from fluxrt.stream_processor.postprocessors import (
@@ -103,6 +104,14 @@ class ModelInferenceSubprocess:
         self.command_queue = self._manager.Queue()
         self.shared_state = self._manager.dict()
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
+
+        # Batch mode: a synchronous one-output-per-input render loop (offline). The
+        # live free-run path leaves batch_mode False and never touches these.
+        self.batch_mode = bool(self.config.get("batch_mode", False))
+        self.proc_ready = Value("b", False)  # set once models are loaded (batch readiness)
+        self._seq = 0
+        self.request_queue = self._manager.Queue()   # parent -> worker: (seq, rgb)
+        self.response_queue = self._manager.Queue()  # worker -> parent: (seq, rgb_out)
 
     def __getstate__(self):
         # The subprocess is spawned via Process(target=self.process_main),
@@ -415,8 +424,29 @@ class ModelInferenceSubprocess:
 
     def start(self):
         self.running.value = True
-        self.process = Process(target=self.process_main)
+        target = self.process_main_batch if self.batch_mode else self.process_main
+        self.process = Process(target=target)
         self.process.start()
+
+    def submit_frame(self, frame_rgb, timeout: float = 300.0):
+        """Parent-side (batch): enqueue one frame and block for its rendered output
+        — a LIST of uint8 RGB frames (one for 1:1, 2**interpolation_exp when
+        interpolating). Single consumer, processed strictly in order, so the
+        response belongs to this request. Polls so a DEAD child (e.g. CUDA OOM)
+        fails fast instead of blocking the worker forever; raises on death/timeout."""
+        self._seq += 1
+        seq = self._seq
+        self.request_queue.put((seq, frame_rgb))
+        deadline = time.time() + timeout
+        while True:
+            try:
+                _, out = self.response_queue.get(timeout=0.5)
+                return out
+            except Empty:
+                if self.process is not None and not self.process.is_alive():
+                    raise RuntimeError("batch inference subprocess died during render")
+                if time.time() >= deadline:
+                    raise RuntimeError("batch render timed out waiting for the inference subprocess")
 
     def stop(self):
         # Reap the child with a bounded escalation that also detaches a SIGKILL
@@ -425,6 +455,13 @@ class ModelInferenceSubprocess:
         from fluxrt.webrtc.proc import reap_process
 
         self.running.value = False
+        if self.batch_mode:
+            # Wake the batch loop if it is blocked in request_queue.get() so it
+            # exits at once instead of waiting out the 0.2s poll timeout.
+            try:
+                self.request_queue.put(None)
+            except Exception:
+                pass
         if self.process:
             reap_process(self.process)
             self.process = None
@@ -668,3 +705,49 @@ class ModelInferenceSubprocess:
             frame = self.convert_np_to_torch(frame)
             frames = self.interpolate_frames(frame)
             prev_time = self.sync_fps_and_send(prev_time, frames)
+
+    def process_main_batch(self):
+        """Synchronous one-output-per-input render loop for OFFLINE batch jobs.
+
+        Unlike process_main (the live free-run path), there is NO drain-to-latest,
+        NO interpolation, NO fixed-fps pacing and NO shared-tensor output: each
+        input frame arrives on request_queue, is rendered once via the SAME
+        pipeline call the live loop uses (process_frame_with_pipeline), and the
+        uint8 RGB result goes back on response_queue — exactly one output per input.
+
+        The temporal caches (update_controller, previous_frame) are NOT reset
+        between frames, so a video keeps its frame-to-frame coherence; they start
+        clean because this is a fresh, dedicated instance (process_init).
+        """
+        self.process_init()
+        self.proc_ready.value = True
+        while self.running.value:
+            try:
+                item = self.request_queue.get(timeout=0.2)
+            except Empty:
+                continue
+            if item is None:  # poison pill -> exit the loop on teardown
+                break
+            seq, frame_rgb = item
+            # The model only ever sees frames at its OWN resolution — the live path
+            # crops every frame via push_input_frame before it reaches the pipeline.
+            # Batch inputs are arbitrary-size video frames, so crop+resize to
+            # (height, width) here too; otherwise the spatial-cache mask length won't
+            # match the model's token count (e.g. a 1080p frame → oversized mask).
+            frame_rgb = crop_maximal_rectangle(frame_rgb, self.height, self.width)
+            # Drain prompt/seed/steps set before OR during the job (live steering),
+            # then step any in-progress slerp morph — same order as the live loop.
+            self.update_process_state()
+            self._advance_prompt_travel()
+            out = self.process_frame_with_pipeline(frame_rgb)
+            if self.lip_processor is not None and self.lip_active:
+                out = self.lip_processor.process(out, frame_rgb)
+            # interpolation_exp == 0 → exactly one output per input (1:1). >0 → RIFE
+            # interpolation emits 2**exp frames per input (smoother / higher fps);
+            # the caller scales the output fps by the same factor.
+            if self.interpolation_exp <= 0:
+                outs = [out]
+            else:
+                batch = self.interpolate_frames(self.convert_np_to_torch(out))  # (2**exp,H,W,3) BGR
+                outs = [batch[j][:, :, ::-1].copy() for j in range(batch.shape[0])]  # -> RGB
+            self.response_queue.put((seq, outs))
