@@ -54,9 +54,9 @@ Example 2: interactive paint-style app with iterative image updates.
 
 # Quick Start
 
-Ensure you have **git**, **git lfs** and **conda** installed.
+Ensure you have **git**, **git lfs** and **[uv](https://docs.astral.sh/uv/)** installed.
 
-**Python 3.12** is required — the package pins `requires-python >= 3.12`, so Python 3.11 and earlier are rejected by `pip install -e .`.
+**Python 3.12** is required — the package pins `requires-python >= 3.12`, so Python 3.11 and earlier are rejected by `uv pip install -e .`.
 
 CUDA **12.8** is recommended. The same `cu128` PyTorch wheels cover both the **RTX 4090** (Ada, `sm_89`) and the **RTX 5090** (Blackwell, `sm_120`), so a single install works for either card. 
 
@@ -93,29 +93,17 @@ cd FluxRT
 
 ## 2. Install Dependencies
 
-### Option A: conda
+FluxRT uses [uv](https://docs.astral.sh/uv/) for environment and dependency management.
 
 ```bash
-# Create environment
-conda create -n fluxrt python=3.12 pip -y
-conda activate fluxrt
-
-# Install PyTorch with CUDA support (adjust if needed)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-
-# Install project dependencies
-pip install -r requirements.txt
-pip install -e .
-```
-
-### Option B: uv
-
-```bash
-# Install uv if you don't have it
-pip install uv
-
-# Create environment and install PyTorch with CUDA support
+# Create the virtual environment (uv fetches Python 3.12 if needed)
 uv venv --python 3.12
+
+# Activate it
+source .venv/bin/activate        # Linux / macOS
+.venv\Scripts\activate           # Windows
+
+# Install PyTorch with CUDA 12.8 (covers RTX 4090 sm_89 and RTX 5090 sm_120)
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 # Install project dependencies
@@ -136,7 +124,7 @@ python -c "import torch; print(torch.cuda.get_arch_list(), torch.cuda.is_availab
 The arch list should contain `sm_89` (RTX 4090) or `sm_120` (RTX 5090), and CUDA should report `True`. If your card is missing, you likely have a CPU-only or pre-`cu128` build — reinstall with the `--upgrade` flag and the `cu128` index URL above:
 
 ```bash
-pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
+uv pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
 ### Optional: WebRTC browser streaming
@@ -144,8 +132,7 @@ pip install --upgrade torch torchvision --index-url https://download.pytorch.org
 To stream the output to any browser on the LAN (`scripts/run_webrtc.py`), install the extra dependencies into the **same** environment:
 
 ```bash
-pip install -r requirements_webrtc.txt          # conda
-uv pip install -r requirements_webrtc.txt       # uv
+uv pip install -r requirements_webrtc.txt
 ```
 
 (On Windows, `uvloop` from the `uvicorn[standard]` extra is skipped automatically — that is expected, not an error.)
@@ -259,16 +246,6 @@ or pass `--int8` to `scripts/run_webrtc.py`.
 - **RTX 5090 (32 GB)** — run the full unquantized model (`enable_int8_quantization: false`); you have the VRAM headroom for it and can also enable TAEF2 + Flow Upscaler.
 - **RTX 4090 (24 GB)** — enable int8 (minimum 20 GB). The full bf16 model may run out of memory; TAEF2 further reduces decoder VRAM.
 
-
-#### Usage
-
-Set in config:
-```json
-"enable_int8_quantization": true
-```
-
-Or use `--int8` flag when running scripts.
-
 ### Style customization: LoRA
 
 #### Installation
@@ -293,7 +270,7 @@ Real-time face reenactment that transfers facial expressions from the webcam fee
 
 ```bash
 git clone https://github.com/KlingAIResearch/LivePortrait LivePortrait-code
-pip install -r requirements_lipsync.txt
+uv pip install -r requirements_lipsync.txt
 git clone https://huggingface.co/KwaiVGI/LivePortrait
 ```
 
@@ -347,10 +324,11 @@ The GUI toggle button will be enabled automatically when this is present in the 
 
 # Running scripts
 
-Run any script with conda environment activated:
+Run any script with the virtual environment activated:
 
 ```bash
-conda activate fluxrt
+source .venv/bin/activate        # Linux / macOS
+.venv\Scripts\activate           # Windows
 ```
 
 ### GUI and Virtual Web Camera
@@ -427,7 +405,7 @@ Includes a minimal HTML/JS client served at `/`, with a prompt control channel.
 Install the WebRTC extras once:
 
 ```bash
-pip install -r requirements_webrtc.txt
+uv pip install -r requirements_webrtc.txt
 ```
 
 Then start the server:
