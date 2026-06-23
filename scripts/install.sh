@@ -1,5 +1,5 @@
 #!/bin/bash
-# FluxRT installation script.
+# FluxRT installation script (uv-based).
 # Run from the repository root: bash scripts/install.sh
 set -euo pipefail
 
@@ -20,33 +20,36 @@ die()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 # ── prerequisites ─────────────────────────────────────────────────────────────
 log "Checking prerequisites..."
 
-command -v git   &>/dev/null || die "'git' is not installed. Install it with your system package manager."
-command -v conda &>/dev/null || die "'conda' is not installed. Install Miniconda or Anaconda first."
-git lfs version  &>/dev/null || die "'git-lfs' is not installed. Install with: sudo apt install git-lfs  (or brew install git-lfs)"
+command -v git &>/dev/null || die "'git' is not installed. Install it with your system package manager."
+command -v uv  &>/dev/null || die "'uv' is not installed. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+git lfs version &>/dev/null || die "'git-lfs' is not installed. Install with: sudo apt install git-lfs  (or brew install git-lfs)"
 
 log "All prerequisites found."
 
-# ── conda environment ─────────────────────────────────────────────────────────
-CONDA_ENV="fluxrt"
-
-# shellcheck source=/dev/null
-source "$(conda info --base)/etc/profile.d/conda.sh"
-
-if conda env list | grep -qE "^${CONDA_ENV}[[:space:]]"; then
-    log "Conda environment '${CONDA_ENV}' already exists."
+# ── virtual environment (uv, Python 3.12) ─────────────────────────────────────
+VENV=".venv"
+if [ -x "$VENV/bin/python" ]; then
+    log "Virtual environment '${VENV}' already exists."
 else
-    log "Creating conda environment '${CONDA_ENV}' (python=3.12)..."
-    conda create -n "$CONDA_ENV" python=3.12 pip -y
+    log "Creating virtual environment '${VENV}' (Python 3.12)..."
+    uv venv --python 3.12 "$VENV"
 fi
 
-conda activate "$CONDA_ENV"
+# Target this venv for all subsequent python / uv pip calls without sourcing the
+# activate script (which can trip 'set -u').
+export VIRTUAL_ENV="$PWD/$VENV"
+export PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# ── PyTorch ───────────────────────────────────────────────────────────────────
-if python -c "import torch" 2>/dev/null; then
-    log "PyTorch is already installed."
+# ── PyTorch (CUDA 12.8 / Blackwell sm_120 for RTX 50-series) ──────────────────
+# Check the build actually carries sm_120 kernels, not just that torch imports.
+# A cu128 wheel lists sm_120 regardless of the local GPU and also covers the
+# RTX 4090 (sm_89); a CPU or pre-cu128 torch fails on a 5090 ("sm_120 not
+# supported"). --upgrade replaces such a build in place.
+if python -c "import torch, sys; sys.exit(0 if 'sm_120' in torch.cuda.get_arch_list() else 1)" 2>/dev/null; then
+    log "PyTorch with CUDA 12.8 (Blackwell sm_120) already installed."
 else
-    log "Installing PyTorch with CUDA 12.8 support..."
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    log "Installing PyTorch with CUDA 12.8 / Blackwell sm_120 support..."
+    uv pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu128
 fi
 
 # ── Python requirements ───────────────────────────────────────────────────────
@@ -55,7 +58,7 @@ if python -c "import diffusers" 2>/dev/null; then
     log "Python requirements already installed."
 else
     log "Installing Python requirements from requirements.txt..."
-    pip install -r requirements.txt
+    uv pip install -r requirements.txt
 fi
 
 # ── fluxrt package ────────────────────────────────────────────────────────────
@@ -63,7 +66,7 @@ if python -c "import fluxrt" 2>/dev/null; then
     log "fluxrt package already installed."
 else
     log "Installing fluxrt package in editable mode..."
-    pip install -e .
+    uv pip install -e .
 fi
 
 # ── model downloads ───────────────────────────────────────────────────────────
@@ -117,8 +120,28 @@ clone_or_resume \
     "FLUX.2-klein-4B-int8/diffusion_pytorch_model.safetensors" \
     "FLUX.2-klein-4B int8 model"
 
+# ── extension models (enabled per-config; small, downloaded by default) ───────
+clone_or_resume \
+    "taef2" \
+    "https://huggingface.co/madebyollin/taef2" \
+    "taef2/taef2.safetensors" \
+    "TAEF2 tiny-VAE model (extension)"
+
+clone_or_resume \
+    "FlowUpscaler" \
+    "https://huggingface.co/TensorForger/FlowUpscaler" \
+    "FlowUpscaler/flow_upscaler.safetensors" \
+    "Flow Upscaler model (extension)"
+
+# ── verify GPU detection ──────────────────────────────────────────────────────
+log "Detected GPU(s):"
+python -c "from fluxrt.utils.scan_hardware import scan_hardware; import json; print(json.dumps(scan_hardware()['gpu'], indent=2))" \
+    || warn "Could not query the GPU — check the PyTorch install above."
+
 # ── done ──────────────────────────────────────────────────────────────────────
 echo ""
 log "${BOLD}Installation complete.${NC}"
-log "Activate the environment and start:  ${BOLD}conda activate ${CONDA_ENV}${NC}"
+warn "The GUI requires v4l2loopback (kernel module) for virtual-webcam output."
+warn "      Install it with your package manager, then: sudo modprobe v4l2loopback"
+log "Activate the environment and start:  ${BOLD}source ${VENV}/bin/activate${NC}"
 log "Then run, for example:               ${BOLD}python scripts/run_gradio_demo.py${NC}"
