@@ -74,6 +74,7 @@ resolution = None
 out_resolution = None
 
 latest_rgb: Optional[np.ndarray] = None
+output_version = 0   # bumped per processed frame (under latest_lock) — output tracks gate on it
 # Latest pipeline INPUT frame (cropped BGR), so a recvonly/listening client can
 # preview what's being sent in. Guarded by latest_lock alongside latest_rgb.
 latest_input_bgr: Optional[np.ndarray] = None
@@ -215,7 +216,7 @@ def _drive_prompt_travel(prompt: str, frames: int, mode: str) -> None:
 # camera producer thread and per-peer track consumers.
 # ──────────────────────────────────────────────────────────────────────────────
 def push_input_frame(frame_bgr: np.ndarray) -> None:
-    global latest_rgb, latest_input_bgr
+    global latest_rgb, latest_input_bgr, output_version
     h, w = resolution["height"], resolution["width"]
     cropped = crop_maximal_rectangle(frame_bgr, h, w)
     # Hold pipeline_lock across write+read so the producer thread and a peer's
@@ -227,6 +228,7 @@ def push_input_frame(frame_bgr: np.ndarray) -> None:
     with latest_lock:
         latest_rgb = rgb
         latest_input_bgr = cropped  # served to listeners via GET /input.jpg
+        output_version += 1         # gates output tracks: 1 send per processed frame
 
 
 def _decode_and_push(frame) -> None:
@@ -314,9 +316,10 @@ class FluxRTTrack(VideoStreamTrack):
 
     def __init__(self, fps: int = 30, width: Optional[int] = None):
         super().__init__()
-        self.fps = fps
+        self.fps = fps                # CAP: never send faster than this
         self._t0 = time.time()
-        self._n = 0
+        self._last_v = -1
+        self._last_send = 0.0
         # Output frames are at the (possibly upscaled) output resolution.
         h, w = out_resolution["height"], out_resolution["width"]
         self._size = None
@@ -328,25 +331,31 @@ class FluxRTTrack(VideoStreamTrack):
         self._blank = np.zeros((h, w, 3), dtype=np.uint8)
 
     async def recv(self) -> av.VideoFrame:
-        # Pace ourselves; aiortc will pull frames as fast as recv() returns.
-        self._n += 1
-        target_t = self._t0 + self._n / self.fps
-        delay = target_t - time.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        else:
-            # Behind schedule — skip ahead so we don't accumulate debt.
-            self._t0 = time.time() - self._n / self.fps
-
-        with latest_lock:
-            rgb = latest_rgb if latest_rgb is not None else self._blank
+        # Output rate == pipeline rate: send only when push_input_frame publishes
+        # a NEW frame (output_version gate), so a slow pipeline never gets padded
+        # with re-encoded duplicates. `fps` only caps the rate; when no new frame
+        # arrives, a 1 Hz keepalive repeats the last one so the stream and the
+        # receiver's decoder stay alive.
+        wait = self._last_send + 1.0 / self.fps - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        deadline = time.time() + 1.0
+        while True:
+            with latest_lock:
+                v = output_version
+                rgb = latest_rgb if latest_rgb is not None else self._blank
+            if v != self._last_v or time.time() >= deadline:
+                break
+            await asyncio.sleep(0.005)
+        self._last_v = v
+        self._last_send = time.time()
 
         if self._size is not None and (rgb.shape[1], rgb.shape[0]) != self._size:
             rgb = cv2.resize(rgb, self._size, interpolation=cv2.INTER_AREA)
 
         frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
-        frame.pts = self._n
-        frame.time_base = fractions.Fraction(1, self.fps)
+        frame.pts = int((self._last_send - self._t0) * 90000)   # variable rate → wall-clock pts
+        frame.time_base = fractions.Fraction(1, 90000)
         return frame
 
 

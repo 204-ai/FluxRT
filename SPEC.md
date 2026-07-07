@@ -58,6 +58,7 @@ V12: ∀ WHEP session own `FluxRTTrack`; `latest_rgb` read only under `latest_lo
 V13: DELETE → close + deregister (404 unknown/repeat); PC state failed|closed → auto-clean (single-shot guard); WHEP PCs ∈ `pcs` → `_graceful_cleanup` covers shutdown
 V14: `/offer` request/response + ownership semantics unchanged — WHEP code ⊥ writes state `/offer` reads except `pcs` membership
 V15: `?w=` → resize INTER_AREA, aspect kept, even-rounded, clamp [64, native]; absent → native path identical (zero resize calls); `?fps=` clamp [1,60] default 30
+V19: output rate == pipeline rate — tracks gate on `output_version` (bumped in `push_input_frame`, 1 send per processed frame, ⊥ re-encoded duplicates); `fps` = cap only; no new frame ≥1s → 1Hz keepalive repeat; wall-clock pts @ 90kHz (applies to `/offer` + `/whep` output alike)
 V16: `POST /whip` valid SDP → 201 + Location + `application/sdp`; 415 wrong ct; 400 empty/bad; 503 no pipeline
 V17: WHIP publisher = ordinary ownership claimant — same `consume_peer_input(track, pc, ownership, _frame_sink, notify=_input_notify)` path as `/offer` ∴ V1-V5,V9 apply unchanged; WHIP PC gets empty `_fluxrt_channels` → `send_to_pc` no-op; ⊥ datachannel wiring
 V18: realtime-client surfaces byte-identical — `/offer` route, ctrl vocabulary, `/healthz` fields untouched; WHIP claim visible to client only as existing `input:peer` broadcast (same as 2nd browser sender)
@@ -80,6 +81,7 @@ T13|x|WHIP section in `run_webrtc.py`: `whip_sessions` registry, `POST /whip` (o
 T14|x|`scripts/whip_test_client.html` + `GET /whip-client` route (mirror `/test`)|I.page
 T15|x|smoke test `scripts/test_whip.py`: shim + fake sp + `_frame_sink` collector — publish → ownership active & frames collected; 2nd publisher joins/leaves → 1st still owner; DELETE → ownership released, repeat 404|V16,V17
 T16|x|unify test pages → `GET /webrtc-test` (whip+whep | sendrecv toggle); drop `/whip-client` + `/whep-client` routes & files|I.page
+T17|x|version-gated output pacing: `output_version` bump in `push_input_frame`, gated `FluxRTTrack.recv` w/ fps cap + 1Hz keepalive|V19
 
 ## §B BUGS
 id|date|cause|fix
