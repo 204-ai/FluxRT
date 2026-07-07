@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WHEP test client (FluxRT)</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  #bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  input { flex: 1; min-width: 260px; padding: 6px 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; }
+  button { padding: 6px 14px; background: #2a6; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+  button:disabled { background: #444; cursor: default; }
+  #stop { background: #a33; }
+  video { width: 100%; max-width: 640px; background: #000; border: 1px solid #333; border-radius: 4px; display: block; }
+  #stats { margin: 8px 0; color: #8cf; }
+  #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 240px;
+         overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+  .err { color: #f66; } .ok { color: #6f6; } .info { color: #aaa; }
+</style>
+</head>
+<body>
+<h1>WHEP test client (FluxRT)</h1>
+<div id="bar">
+  <input id="url" placeholder="WHEP URL">
+  <button id="go">Connect</button>
+  <button id="stop" disabled>Disconnect</button>
+</div>
+<video id="v" autoplay muted playsinline></video>
+<div id="stats">idle</div>
+<div id="log"></div>
+<script>
+const $ = id => document.getElementById(id);
+$("url").value = new URL("/whep", location.href).href;
+
+let pc = null, session = null, frames = 0, statsTimer = null;
+
+function log(msg, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = `${new Date().toISOString().slice(11, 23)}  ${msg}`;
+  $("log").appendChild(line);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function countFrame() {
+  frames++;
+  if ($("v").requestVideoFrameCallback) $("v").requestVideoFrameCallback(countFrame);
+}
+
+async function connect() {
+  $("go").disabled = true; $("stop").disabled = false; frames = 0;
+  const url = $("url").value.trim();
+  log(`connecting ${url}`);
+  try {
+    pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.ontrack = e => { log(`track: ${e.track.kind}`, "ok"); $("v").srcObject = e.streams[0]; };
+    pc.onicegatheringstatechange = () => log(`iceGathering: ${pc.iceGatheringState}`, "info");
+    pc.oniceconnectionstatechange = () => log(`iceConnection: ${pc.iceConnectionState}`,
+      pc.iceConnectionState === "failed" ? "err" : "info");
+    pc.onconnectionstatechange = () => log(`connection: ${pc.connectionState}`,
+      pc.connectionState === "connected" ? "ok" : pc.connectionState === "failed" ? "err" : "info");
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await new Promise(res => {                    // non-trickle: wait for full ICE
+      if (pc.iceGatheringState === "complete") return res();
+      pc.addEventListener("icegatheringstatechange",
+        () => pc.iceGatheringState === "complete" && res());
+      setTimeout(res, 2000);
+    });
+
+    const t0 = performance.now();
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: pc.localDescription.sdp,
+    });
+    log(`POST ${r.status} (${Math.round(performance.now() - t0)}ms)`, r.status === 201 ? "ok" : "err");
+    if (r.status !== 201) { log(await r.text(), "err"); return disconnect(); }
+    session = r.headers.get("Location");
+    log(`session: ${session || "(Location header not readable — cross-origin without expose_headers)"}`,
+        session ? "ok" : "info");
+
+    const answer = await r.text();
+    log(`answer SDP: ${answer.length} bytes, candidates: ${(answer.match(/a=candidate/g) || []).length}`);
+    await pc.setRemoteDescription({ type: "answer", sdp: answer });
+
+    if ($("v").requestVideoFrameCallback) $("v").requestVideoFrameCallback(countFrame);
+    statsTimer = setInterval(async () => {
+      let pair = "";
+      for (const s of (await pc.getStats()).values()) {
+        if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated)
+          pair = ` · pair: ${s.currentRoundTripTime * 1000 | 0}ms rtt`;
+      }
+      $("stats").textContent =
+        `${pc.connectionState} · ${$("v").videoWidth}x${$("v").videoHeight} · ${frames} frames${pair}`;
+    }, 1000);
+  } catch (e) {
+    log(`ERROR: ${e.message}`, "err");
+    disconnect();
+  }
+}
+
+async function disconnect() {
+  clearInterval(statsTimer);
+  if (session) {
+    try {
+      const r = await fetch(new URL(session, $("url").value), { method: "DELETE" });
+      log(`DELETE ${r.status}`, r.status === 200 ? "ok" : "err");
+    } catch (e) { log(`DELETE failed: ${e.message}`, "err"); }
+    session = null;
+  }
+  if (pc) { pc.close(); pc = null; }
+  $("v").srcObject = null;
+  $("stats").textContent = "idle";
+  $("go").disabled = false; $("stop").disabled = true;
+}
+
+$("go").onclick = connect;
+$("stop").onclick = disconnect;
+</script>
+</body>
+</html>

@@ -29,7 +29,7 @@ ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, br
 - env: reuse `FLUXRT_STUN` / `FLUXRT_TURN_URL(+_USER/_PASS)` via `_rtc_config()`
 - api: `POST /whip` (Content-Type `application/sdp`, offer w/ video) → 201 + `Location: /whip/<uuid>` + answer SDP; 415/400 same as WHEP; 503 when `sp is None` (like `/offer`)
 - api: `DELETE /whip/<uuid>` → 200 (cancels consume task → ownership released via existing finally) | 404; `PATCH` → 405
-- page: `GET /whip-client` → `scripts/whip_test_client.html` (publish test page, mirror of `/test` serving)
+- page: `GET /whip-client` → `scripts/whip_test_client.html` (publish test page); `GET /whep-client` → `scripts/whep_test_client.html` (playback test page); both mirror `/test` serving
 
 ## §R RESEARCH
 id|topic|finding|src
