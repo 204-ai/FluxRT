@@ -52,7 +52,7 @@ function log(msg, cls) {
 
 function canvasSource() {
   const cv = document.createElement("canvas");
-  cv.width = 512; cv.height = 512;
+  cv.width = inputRes.width; cv.height = inputRes.height;
   const ctx = cv.getContext("2d");
   let t = 0;
   canvasTimer = setInterval(() => {
@@ -67,6 +67,18 @@ function canvasSource() {
     ctx.fillText("WHIP " + t.toFixed(1) + "s", 20, cv.height - 24);
   }, 1000 / 15);
   return cv.captureStream(15);
+}
+
+// Capture at the pipeline's native input resolution — the server center-crops
+// everything to it anyway (push_input_frame), so publishing larger just burns
+// uplink bandwidth. Read live from /healthz; fall back to the config default.
+let inputRes = { width: 640, height: 368 };
+async function fetchInputRes() {
+  try {
+    const j = await (await fetch("/healthz")).json();
+    if (j.resolution && j.resolution.width && j.resolution.height) inputRes = j.resolution;
+  } catch { /* healthz unreachable — keep fallback */ }
+  log(`capture resolution: ${inputRes.width}x${inputRes.height} (server input res)`, "info");
 }
 
 async function nonTrickle(pc) {
@@ -101,8 +113,11 @@ function watchStates(pc, label) {
 async function publish() {
   $("go").disabled = true; $("stop").disabled = false;
   try {
+    await fetchInputRes();
     srcStream = $("source").value === "camera"
-      ? await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+      ? await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: inputRes.width }, height: { ideal: inputRes.height } },
+        })
       : canvasSource();
     $("in").srcObject = srcStream;
     pubPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
