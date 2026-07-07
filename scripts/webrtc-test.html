@@ -196,43 +196,57 @@ function countFrame() {
 }
 
 function startStats() {
-  // Rates computed as deltas over the stats records' own timestamps (not
-  // Date.now); fps triple = sent (uplink) / decoded (received) / displayed
-  // (rVFC, UX truth); tail = avg jitter-buffer wait + decode per frame.
+  // in  = what we actually capture and send (track settings + framesSent rate)
+  // out = what comes back (video dims + framesDecoded rate)
+  // delay = one full frame trip, decomposed:
+  //   net    = network both ways (candidate-pair STUN RTT; whip+whep mode
+  //            averages the two PCs' RTTs since each leg rides one PC)
+  //   proc   = server per-frame processing from /healthz (worker_ms on
+  //            sd-webrtc, proc_time_ms on FluxRT)
+  //   client = receive tail: avg jitter-buffer wait + decode per frame
+  // '~' because sender/receiver encode and pacing aren't observable.
   frames = 0;
-  let prev = null, lastFrames = 0;
+  let prev = null, procMs = null;
   if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
   statsTimer = setInterval(async () => {
-    const cur = { t: 0, fs: 0, bs: 0, fd: 0, br: 0, jbD: 0, jbN: 0, decT: 0, decN: 0, rtt: null };
+    try {
+      const j = await (await fetch("/healthz", { cache: "no-store" })).json();
+      procMs = j.worker_ms ?? j.proc_time_ms ?? null;
+    } catch { procMs = null; }
+    const cur = { t: 0, fs: 0, fd: 0, jbD: 0, jbN: 0, decT: 0, decN: 0, rtts: [] };
     for (const pc of pcs) {
       (await pc.getStats()).forEach(s => {
         if (s.type === "outbound-rtp" && s.kind === "video") {
           cur.fs += s.framesSent || 0;
-          cur.bs += (s.bytesSent || 0) + (s.headerBytesSent || 0);
           cur.t = Math.max(cur.t, s.timestamp);
         } else if (s.type === "inbound-rtp" && s.kind === "video") {
           cur.fd += s.framesDecoded || 0;
-          cur.br += (s.bytesReceived || 0) + (s.headerBytesReceived || 0);
           cur.jbD += s.jitterBufferDelay || 0; cur.jbN += s.jitterBufferEmittedCount || 0;
           cur.decT += s.totalDecodeTime || 0; cur.decN += s.framesDecoded || 0;
           cur.t = Math.max(cur.t, s.timestamp);
-        } else if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated) {
-          cur.rtt = s.currentRoundTripTime;
+        } else if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated
+                   && typeof s.currentRoundTripTime === "number") {
+          cur.rtts.push(s.currentRoundTripTime);
         }
       });
     }
-    let line = (pcs.map(pc => pc.connectionState).join("/") || "idle")
-             + ` · ${$("out").videoWidth}x${$("out").videoHeight}`;
+    const set = srcStream && srcStream.getVideoTracks()[0]?.getSettings();
+    let inFps = "-", outFps = "-";
     if (prev && cur.t > prev.t) {
       const dt = (cur.t - prev.t) / 1000;
-      const kbps = b => Math.round((b * 8) / 1000 / dt);
-      line += ` · fps ${Math.round((cur.fs - prev.fs) / dt)}/${Math.round((cur.fd - prev.fd) / dt)}`
-            + `/${Math.round((frames - lastFrames) / dt)} snt/dec/disp`
-            + ` · ↑${kbps(cur.bs - prev.bs)} ↓${kbps(cur.br - prev.br)} kbps`;
+      inFps = Math.round((cur.fs - prev.fs) / dt);
+      outFps = Math.round((cur.fd - prev.fd) / dt);
     }
-    if (cur.rtt != null) line += ` · rtt ${(cur.rtt * 1000) | 0}ms`;
-    if (cur.jbN) line += ` · tail ${(((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000) | 0}ms`;
-    lastFrames = frames;
+    let line = `in ${set ? set.width + "x" + set.height : "-"} @${inFps}fps`
+             + ` · out ${$("out").videoWidth}x${$("out").videoHeight} @${outFps}fps`;
+    const net = cur.rtts.length ? (cur.rtts.reduce((a, b) => a + b) / cur.rtts.length) * 1000 : null;
+    const client = cur.jbN ? ((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000 : null;
+    if (net != null || procMs != null || client != null) {
+      const total = Math.round((net || 0) + (procMs || 0) + (client || 0));
+      line += ` · delay ~${total}ms (net ${net != null ? net | 0 : "?"}`
+            + ` + proc ${procMs != null ? Math.round(procMs) : "?"}`
+            + ` + client ${client != null ? client | 0 : "?"})`;
+    }
     prev = cur;
     $("stats").textContent = line;
   }, 1000);
