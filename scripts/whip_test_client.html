@@ -7,7 +7,8 @@
 <style>
   body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd; }
   h1 { font-size: 16px; margin: 0 0 12px; }
-  #bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  #bar, #bar2 { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  #prompt { flex: 1; min-width: 260px; }
   select, input { padding: 6px 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; }
   button { padding: 6px 14px; background: #2a6; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
   button:disabled { background: #444; cursor: default; }
@@ -49,6 +50,10 @@
   </select>
   <input type="range" id="mix" min="0" max="100" value="50" style="display:none"
          title="split position / blend amount">
+</div>
+<div id="bar2">
+  <input id="prompt" placeholder="prompt — applies live via POST /prompt">
+  <button id="send">Send prompt</button>
 </div>
 <div id="stage" class="side">
   <div class="cell in"><h2>input (published via /whip)</h2><video id="in" autoplay muted playsinline></video></div>
@@ -199,8 +204,23 @@ function setView() {
 $("go").onclick = publish;
 $("stop").onclick = stopPublish;
 $("watch").onclick = watch;
+async function sendPrompt() {
+  const p = $("prompt").value.trim();
+  if (!p) return;
+  try {
+    const r = await fetch("/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: p }),
+    });
+    log(`POST /prompt ${r.status}${r.ok ? "" : " " + (await r.text()).slice(0, 120)}`, r.ok ? "ok" : "err");
+  } catch (e) { log(`prompt failed: ${e.message}`, "err"); }
+}
+
 $("view").onchange = setView;
 $("mix").oninput = applyMix;
+$("send").onclick = sendPrompt;
+$("prompt").addEventListener("keydown", e => { if (e.key === "Enter") sendPrompt(); });
 setView();
 </script>
 </body>
