@@ -29,7 +29,7 @@ ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, br
 - env: reuse `FLUXRT_STUN` / `FLUXRT_TURN_URL(+_USER/_PASS)` via `_rtc_config()`
 - api: `POST /whip` (Content-Type `application/sdp`, offer w/ video) → 201 + `Location: /whip/<uuid>` + answer SDP; 415/400 same as WHEP; 503 when `sp is None` (like `/offer`)
 - api: `DELETE /whip/<uuid>` → 200 (cancels consume task → ownership released via existing finally) | 404; `PATCH` → 405
-- page: `GET /whip-client` → `scripts/whip_test_client.html` (publish test page); `GET /whep-client` → `scripts/whep_test_client.html` (playback test page); both mirror `/test` serving
+- page: `GET /webrtc-test` → `scripts/webrtc-test.html` — unified test page, URL standard w/ sd-webrtc: mode whip+whep (2 PCs) | sendrecv `/offer` (1 PC, realtime-client style); view side|split|blend + mix; prompt bar → `POST /prompt`; capture @ healthz `resolution`; legacy `/test` stays (C7)
 
 ## §R RESEARCH
 id|topic|finding|src
@@ -79,6 +79,7 @@ T12|.|(proposed) test: `?w=256` viewer receives 256px frames & concurrent native
 T13|x|WHIP section in `run_webrtc.py`: `whip_sessions` registry, `POST /whip` (ownership-claimant track wiring, consume-task cancel on close), `DELETE`+404, `PATCH` 405|V16,V17,V18
 T14|x|`scripts/whip_test_client.html` + `GET /whip-client` route (mirror `/test`)|I.page
 T15|x|smoke test `scripts/test_whip.py`: shim + fake sp + `_frame_sink` collector — publish → ownership active & frames collected; 2nd publisher joins/leaves → 1st still owner; DELETE → ownership released, repeat 404|V16,V17
+T16|x|unify test pages → `GET /webrtc-test` (whip+whep | sendrecv toggle); drop `/whip-client` + `/whep-client` routes & files|I.page
 
 ## §B BUGS
 id|date|cause|fix

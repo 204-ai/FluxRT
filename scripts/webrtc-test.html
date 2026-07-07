@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WHIP test publisher (FluxRT)</title>
+<title>WebRTC test client</title>
 <style>
   body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd; }
   h1 { font-size: 16px; margin: 0 0 12px; }
@@ -27,22 +27,26 @@
                         width: 2px; background: #8cf; z-index: 3; pointer-events: none; }
   #stage.blend .cell.out video { opacity: var(--mixa, 0.5); }
   #mix { width: 140px; accent-color: #8cf; }
-  video, canvas#src { width: 100%; background: #000; border: 1px solid #333; border-radius: 4px; display: block; }
-  #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 200px; margin-top: 12px;
+  video { width: 100%; background: #000; border: 1px solid #333; border-radius: 4px; display: block; }
+  #stats { margin: 8px 0; color: #8cf; }
+  #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 220px;
          overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
   .err { color: #f66; } .ok { color: #6f6; } .info { color: #aaa; }
 </style>
 </head>
 <body>
-<h1>WHIP test publisher (FluxRT)</h1>
+<h1>WebRTC test client</h1>
 <div id="bar">
+  <select id="mode">
+    <option value="whipwhep">whip + whep (2 PCs, standard)</option>
+    <option value="sendrecv">sendrecv /offer (1 PC, realtime-client style)</option>
+  </select>
   <select id="source">
     <option value="canvas">test canvas (no permissions)</option>
     <option value="camera">camera</option>
   </select>
-  <button id="go">Publish</button>
-  <button id="stop" disabled>Stop</button>
-  <button id="watch">Watch output (WHEP)</button>
+  <button id="go">Connect</button>
+  <button id="stop" disabled>Disconnect</button>
   <select id="view">
     <option value="side">side by side</option>
     <option value="split">split view</option>
@@ -56,14 +60,19 @@
   <button id="send">Send prompt</button>
 </div>
 <div id="stage" class="side">
-  <div class="cell in"><h2>input (published via /whip)</h2><video id="in" autoplay muted playsinline></video></div>
-  <div class="cell out"><h2>output (via /whep)</h2><video id="out" autoplay muted playsinline></video></div>
+  <div class="cell in"><h2>input (published)</h2><video id="in" autoplay muted playsinline></video></div>
+  <div class="cell out"><h2>output (received)</h2><video id="out" autoplay muted playsinline></video></div>
 </div>
+<div id="stats">idle</div>
 <div id="log"></div>
 <script>
 const $ = id => document.getElementById(id);
-let pubPc = null, pubSession = null, srcStream = null, canvasTimer = null;
-let whepPc = null, whepSession = null;
+const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+let pcs = [];              // live peer connections (1 for sendrecv, 2 for whip/whep)
+let sessions = [];         // WHIP/WHEP resource URLs to DELETE on disconnect
+let srcStream = null, srcCanvas = null, canvasTimer = null;
+let frames = 0, statsTimer = null;
 
 function log(msg, cls) {
   const line = document.createElement("div");
@@ -73,8 +82,20 @@ function log(msg, cls) {
   $("log").scrollTop = $("log").scrollHeight;
 }
 
+// Capture at the pipeline's input resolution — the server center-crops every
+// inbound frame to it, so publishing larger only burns uplink.
+let inputRes = { width: 512, height: 512 };
+async function fetchInputRes() {
+  try {
+    const j = await (await fetch("/healthz")).json();
+    if (j.resolution && j.resolution.width && j.resolution.height) inputRes = j.resolution;
+  } catch { /* healthz unreachable — keep fallback */ }
+  log(`capture resolution: ${inputRes.width}x${inputRes.height} (server input res)`, "info");
+}
+
 function canvasSource() {
   const cv = document.createElement("canvas");
+  srcCanvas = cv;
   cv.width = inputRes.width; cv.height = inputRes.height;
   const ctx = cv.getContext("2d");
   let t = 0;
@@ -87,21 +108,17 @@ function canvasSource() {
     const x = (Math.sin(t) * 0.4 + 0.5) * cv.width, y = (Math.cos(t * 1.3) * 0.4 + 0.5) * cv.height;
     ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x, y, 40, 0, 7); ctx.fill();
     ctx.fillStyle = "#000"; ctx.font = "bold 28px monospace";
-    ctx.fillText("WHIP " + t.toFixed(1) + "s", 20, cv.height - 24);
+    ctx.fillText("TEST " + t.toFixed(1) + "s", 20, cv.height - 24);
   }, 1000 / 15);
   return cv.captureStream(15);
 }
 
-// Capture at the pipeline's native input resolution — the server center-crops
-// everything to it anyway (push_input_frame), so publishing larger just burns
-// uplink bandwidth. Read live from /healthz; fall back to the config default.
-let inputRes = { width: 640, height: 368 };
-async function fetchInputRes() {
-  try {
-    const j = await (await fetch("/healthz")).json();
-    if (j.resolution && j.resolution.width && j.resolution.height) inputRes = j.resolution;
-  } catch { /* healthz unreachable — keep fallback */ }
-  log(`capture resolution: ${inputRes.width}x${inputRes.height} (server input res)`, "info");
+async function getSource() {
+  return $("source").value === "camera"
+    ? navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: inputRes.width }, height: { ideal: inputRes.height } },
+      })
+    : canvasSource();
 }
 
 async function nonTrickle(pc) {
@@ -114,7 +131,13 @@ async function nonTrickle(pc) {
   });
 }
 
-async function sdpExchange(path, pc) {
+function candStats(sdp) {
+  const kinds = { host: 0, srflx: 0, relay: 0 };
+  for (const m of sdp.matchAll(/typ (host|srflx|relay)/g)) kinds[m[1]]++;
+  return `host:${kinds.host} srflx:${kinds.srflx} relay:${kinds.relay}`;
+}
+
+async function whipWhepExchange(path, pc) {
   const r = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/sdp" },
@@ -122,71 +145,109 @@ async function sdpExchange(path, pc) {
   });
   log(`POST ${path} ${r.status}`, r.status === 201 ? "ok" : "err");
   if (r.status !== 201) { log(await r.text(), "err"); throw new Error("signaling failed"); }
-  const session = r.headers.get("Location");
-  log(`session: ${session}`, "ok");
-  await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
-  return session;
+  sessions.push(r.headers.get("Location"));
+  log(`session: ${r.headers.get("Location")}`, "ok");
+  const answer = await r.text();
+  log(`answer candidates — ${candStats(answer)}`, "info");
+  await pc.setRemoteDescription({ type: "answer", sdp: answer });
+}
+
+async function offerExchange(pc) {
+  const r = await fetch("/offer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+  });
+  log(`POST /offer ${r.status}`, r.ok ? "ok" : "err");
+  if (!r.ok) { log(await r.text(), "err"); throw new Error("signaling failed"); }
+  const ans = await r.json();
+  log(`answer candidates — ${candStats(ans.sdp)}`, "info");
+  await pc.setRemoteDescription(ans);
 }
 
 function watchStates(pc, label) {
-  pc.onconnectionstatechange = () => log(`${label} connection: ${pc.connectionState}`,
+  pc.onconnectionstatechange = () => log(`${label}: ${pc.connectionState}`,
     pc.connectionState === "connected" ? "ok" : pc.connectionState === "failed" ? "err" : "info");
 }
 
-async function publish() {
+function countFrame() {
+  frames++;
+  if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
+}
+
+function startStats() {
+  frames = 0;
+  if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
+  statsTimer = setInterval(async () => {
+    let pair = "";
+    for (const pc of pcs) {
+      for (const s of (await pc.getStats()).values()) {
+        if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated)
+          pair = ` · ${(s.currentRoundTripTime * 1000) | 0}ms rtt`;
+      }
+    }
+    const states = pcs.map(pc => pc.connectionState).join("/");
+    $("stats").textContent =
+      `${states || "idle"} · ${$("out").videoWidth}x${$("out").videoHeight} · ${frames} frames${pair}`;
+  }, 1000);
+}
+
+async function connect() {
   $("go").disabled = true; $("stop").disabled = false;
+  const mode = $("mode").value;
   try {
     await fetchInputRes();
-    srcStream = $("source").value === "camera"
-      ? await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: inputRes.width }, height: { ideal: inputRes.height } },
-        })
-      : canvasSource();
+    srcStream = await getSource();
     $("in").srcObject = srcStream;
-    pubPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-    watchStates(pubPc, "whip");
-    for (const track of srcStream.getVideoTracks()) pubPc.addTrack(track, srcStream);
-    await nonTrickle(pubPc);
-    pubSession = await sdpExchange("/whip", pubPc);
+    const track = srcStream.getVideoTracks()[0];
+
+    if (mode === "sendrecv") {
+      // realtime-client style: one PC, one sendrecv m-line, JSON /offer signaling
+      const pc = new RTCPeerConnection(ICE);
+      pcs = [pc];
+      watchStates(pc, "sendrecv");
+      pc.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
+      pc.addTransceiver(track, { direction: "sendrecv", streams: [srcStream] });
+      await nonTrickle(pc);
+      await offerExchange(pc);
+    } else {
+      // standards pair: sendonly PC -> /whip, recvonly PC -> /whep
+      const pub = new RTCPeerConnection(ICE);
+      const view = new RTCPeerConnection(ICE);
+      pcs = [pub, view];
+      watchStates(pub, "whip");
+      watchStates(view, "whep");
+      pub.addTrack(track, srcStream);
+      view.addTransceiver("video", { direction: "recvonly" });
+      view.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
+      await nonTrickle(pub);
+      await whipWhepExchange("/whip", pub);
+      await nonTrickle(view);
+      await whipWhepExchange("/whep", view);
+    }
+    startStats();
   } catch (e) {
     log(`ERROR: ${e.message}`, "err");
-    stopPublish();
+    disconnect();
   }
 }
 
-async function stopPublish() {
-  if (pubSession) {
+async function disconnect() {
+  clearInterval(statsTimer);
+  for (const s of sessions.splice(0)) {
     try {
-      const r = await fetch(pubSession, { method: "DELETE" });
-      log(`DELETE ${pubSession} ${r.status}`, r.status === 200 ? "ok" : "err");
+      const r = await fetch(s, { method: "DELETE" });
+      log(`DELETE ${s} ${r.status}`, r.status === 200 ? "ok" : "err");
     } catch (e) { log(`DELETE failed: ${e.message}`, "err"); }
-    pubSession = null;
   }
-  if (pubPc) { pubPc.close(); pubPc = null; }
+  for (const pc of pcs.splice(0)) { try { pc.close(); } catch {} }
   if (srcStream) { srcStream.getTracks().forEach(t => t.stop()); srcStream = null; }
   clearInterval(canvasTimer);
+  srcCanvas = null;
   $("in").srcObject = null;
+  $("out").srcObject = null;
+  $("stats").textContent = "idle";
   $("go").disabled = false; $("stop").disabled = true;
-}
-
-async function watch() {
-  if (whepPc) {  // toggle off
-    if (whepSession) fetch(whepSession, { method: "DELETE" }).catch(() => {});
-    whepPc.close(); whepPc = null; whepSession = null;
-    $("out").srcObject = null;
-    return;
-  }
-  try {
-    whepPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-    watchStates(whepPc, "whep");
-    whepPc.addTransceiver("video", { direction: "recvonly" });
-    whepPc.ontrack = e => $("out").srcObject = e.streams[0];
-    await nonTrickle(whepPc);
-    whepSession = await sdpExchange("/whep", whepPc);
-  } catch (e) {
-    log(`ERROR: ${e.message}`, "err");
-    if (whepPc) { whepPc.close(); whepPc = null; }
-  }
 }
 
 function applyMix() {
@@ -201,9 +262,6 @@ function setView() {
   applyMix();
 }
 
-$("go").onclick = publish;
-$("stop").onclick = stopPublish;
-$("watch").onclick = watch;
 async function sendPrompt() {
   const p = $("prompt").value.trim();
   if (!p) return;
@@ -217,6 +275,8 @@ async function sendPrompt() {
   } catch (e) { log(`prompt failed: ${e.message}`, "err"); }
 }
 
+$("go").onclick = connect;
+$("stop").onclick = disconnect;
 $("view").onchange = setView;
 $("mix").oninput = applyMix;
 $("send").onclick = sendPrompt;

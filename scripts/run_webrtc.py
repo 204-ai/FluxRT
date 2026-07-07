@@ -1334,28 +1334,16 @@ async def _test_client():
         raise HTTPException(status_code=404, detail="webrtc_test_client.html not found")
 
 
-@app.get("/whep-client")
-async def _whep_client():
-    """WHEP playback test page (same-origin): connect/disconnect against /whep
-    with signaling + ICE diagnostics, frame counter, and DELETE teardown."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whep_test_client.html")
+@app.get("/webrtc-test")
+async def _webrtc_test_page():
+    """Unified same-origin test page (same URL as sd-webrtc): WHIP+WHEP pair or
+    sendrecv /offer mode, split/blend compare views, live prompt bar."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc-test.html")
     try:
         with open(path, encoding="utf-8") as f:
             return Response(f.read(), media_type="text/html")
     except OSError:
-        raise HTTPException(status_code=404, detail="whep_test_client.html not found")
-
-
-@app.get("/whip-client")
-async def _whip_client():
-    """WHIP publish test page (same-origin): camera or animated canvas source
-    published to /whip, with an inline /whep output preview and a state log."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whip_test_client.html")
-    try:
-        with open(path, encoding="utf-8") as f:
-            return Response(f.read(), media_type="text/html")
-    except OSError:
-        raise HTTPException(status_code=404, detail="whip_test_client.html not found")
+        raise HTTPException(status_code=404, detail="webrtc-test.html not found")
 
 
 @app.get("/healthz")
