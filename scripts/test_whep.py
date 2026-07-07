@@ -61,14 +61,14 @@ def track_future(pc: RTCPeerConnection) -> asyncio.Future:
     return got
 
 
-async def whep_connect():
+async def whep_connect(query: str = ""):
     pc = RTCPeerConnection()
     got = track_future(pc)
     pc.addTransceiver("video", direction="recvonly")
     offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
     r = requests.post(
-        f"{BASE}/whep",
+        f"{BASE}/whep{query}",
         data=pc.localDescription.sdp.encode(),
         headers={"Content-Type": "application/sdp"},
         timeout=10,
@@ -123,6 +123,18 @@ async def main():
     await pc_b.close()
     await wait_for(lambda: len(run_webrtc.whep_sessions) == 0, 20, "auto-clean after client close")
     check("auto-clean on client close", True)
+
+    # V15: per-session resolution knob — ?w= downscales (aspect kept), clamped [64, native]
+    for query, want, name in (
+        ("?w=256", 256, "V15 ?w=256 downscaled"),
+        ("?w=9999", NATIVE, "V15 ?w=9999 clamped to native"),
+        ("?w=10", 64, "V15 ?w=10 clamped to 64"),
+    ):
+        pc_q, got_q, loc_q = await whep_connect(query=query)
+        fr = await recv_frames(got_q, 3)
+        check(name, fr.width == want, f"{fr.width}x{fr.height}")
+        requests.delete(f"{BASE}{loc_q}", timeout=5)
+        await pc_q.close()
 
     print(f"\nPASS {len(passed)} checks")
 

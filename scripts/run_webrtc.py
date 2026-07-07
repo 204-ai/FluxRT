@@ -303,17 +303,28 @@ def _input_notify(event: str, pc, outcome=None) -> None:
 # WebRTC video track — emits latest_rgb at a fixed frame rate.
 # ──────────────────────────────────────────────────────────────────────────────
 class FluxRTTrack(VideoStreamTrack):
-    """Yields the latest FluxRT output frame as `av.VideoFrame`s at `fps` Hz."""
+    """Yields the latest FluxRT output frame as `av.VideoFrame`s at `fps` Hz.
+
+    `width` (WHEP `?w=`, SPEC V15) downscales this session's frames before
+    encode — aiortc encodes per-sender (§R5) and reconfigures from frame dims
+    (§R6), so this is a genuine per-viewer bandwidth/CPU knob. None → native
+    path, zero resize calls."""
 
     kind = "video"
 
-    def __init__(self, fps: int = 30):
+    def __init__(self, fps: int = 30, width: Optional[int] = None):
         super().__init__()
         self.fps = fps
         self._t0 = time.time()
         self._n = 0
         # Output frames are at the (possibly upscaled) output resolution.
         h, w = out_resolution["height"], out_resolution["width"]
+        self._size = None
+        if width is not None and width < w:
+            tw = max(64, int(width)) & ~1               # clamp floor 64, even (h264 mod-2)
+            th = max(2, round(h * tw / w / 2) * 2)      # aspect kept, even
+            self._size = (tw, th)
+            h, w = th, tw
         self._blank = np.zeros((h, w, 3), dtype=np.uint8)
 
     async def recv(self) -> av.VideoFrame:
@@ -329,6 +340,9 @@ class FluxRTTrack(VideoStreamTrack):
 
         with latest_lock:
             rgb = latest_rgb if latest_rgb is not None else self._blank
+
+        if self._size is not None and (rgb.shape[1], rgb.shape[0]) != self._size:
+            rgb = cv2.resize(rgb, self._size, interpolation=cv2.INTER_AREA)
 
         frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
         frame.pts = self._n
@@ -619,6 +633,17 @@ async def whep_post(request: Request) -> Response:
     if not sdp.strip():
         raise HTTPException(status_code=400, detail="empty SDP offer")
 
+    # Per-session bandwidth knobs (SPEC V15): ?w= target width (aspect kept,
+    # clamped [64, native]), ?fps= frame pacing (clamped [1, 60], default 30).
+    try:
+        req_w: Optional[int] = int(request.query_params["w"])
+    except (KeyError, ValueError):
+        req_w = None
+    try:
+        req_fps = min(60, max(1, int(request.query_params["fps"])))
+    except (KeyError, ValueError):
+        req_fps = 30
+
     pc = RTCPeerConnection(_rtc_config())
     session_id = uuid.uuid4().hex
     whep_sessions[session_id] = pc
@@ -640,7 +665,7 @@ async def whep_post(request: Request) -> Response:
         if pc.connectionState in ("failed", "closed"):
             await _close_whep()
 
-    pc.addTrack(FluxRTTrack(fps=30))
+    pc.addTrack(FluxRTTrack(fps=req_fps, width=req_w))
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         answer = await pc.createAnswer()
