@@ -196,19 +196,45 @@ function countFrame() {
 }
 
 function startStats() {
+  // Rates computed as deltas over the stats records' own timestamps (not
+  // Date.now); fps triple = sent (uplink) / decoded (received) / displayed
+  // (rVFC, UX truth); tail = avg jitter-buffer wait + decode per frame.
   frames = 0;
+  let prev = null, lastFrames = 0;
   if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
   statsTimer = setInterval(async () => {
-    let pair = "";
+    const cur = { t: 0, fs: 0, bs: 0, fd: 0, br: 0, jbD: 0, jbN: 0, decT: 0, decN: 0, rtt: null };
     for (const pc of pcs) {
-      for (const s of (await pc.getStats()).values()) {
-        if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated)
-          pair = ` · ${(s.currentRoundTripTime * 1000) | 0}ms rtt`;
-      }
+      (await pc.getStats()).forEach(s => {
+        if (s.type === "outbound-rtp" && s.kind === "video") {
+          cur.fs += s.framesSent || 0;
+          cur.bs += (s.bytesSent || 0) + (s.headerBytesSent || 0);
+          cur.t = Math.max(cur.t, s.timestamp);
+        } else if (s.type === "inbound-rtp" && s.kind === "video") {
+          cur.fd += s.framesDecoded || 0;
+          cur.br += (s.bytesReceived || 0) + (s.headerBytesReceived || 0);
+          cur.jbD += s.jitterBufferDelay || 0; cur.jbN += s.jitterBufferEmittedCount || 0;
+          cur.decT += s.totalDecodeTime || 0; cur.decN += s.framesDecoded || 0;
+          cur.t = Math.max(cur.t, s.timestamp);
+        } else if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated) {
+          cur.rtt = s.currentRoundTripTime;
+        }
+      });
     }
-    const states = pcs.map(pc => pc.connectionState).join("/");
-    $("stats").textContent =
-      `${states || "idle"} · ${$("out").videoWidth}x${$("out").videoHeight} · ${frames} frames${pair}`;
+    let line = (pcs.map(pc => pc.connectionState).join("/") || "idle")
+             + ` · ${$("out").videoWidth}x${$("out").videoHeight}`;
+    if (prev && cur.t > prev.t) {
+      const dt = (cur.t - prev.t) / 1000;
+      const kbps = b => Math.round((b * 8) / 1000 / dt);
+      line += ` · fps ${Math.round((cur.fs - prev.fs) / dt)}/${Math.round((cur.fd - prev.fd) / dt)}`
+            + `/${Math.round((frames - lastFrames) / dt)} snt/dec/disp`
+            + ` · ↑${kbps(cur.bs - prev.bs)} ↓${kbps(cur.br - prev.br)} kbps`;
+    }
+    if (cur.rtt != null) line += ` · rtt ${(cur.rtt * 1000) | 0}ms`;
+    if (cur.jbN) line += ` · tail ${(((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000) | 0}ms`;
+    lastFrames = frames;
+    prev = cur;
+    $("stats").textContent = line;
   }, 1000);
 }
 
