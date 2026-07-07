@@ -29,6 +29,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Optional
 
 import av
@@ -595,6 +596,83 @@ async def offer(request: Request):
     return JSONResponse(
         {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WHEP egress (draft-ietf-wish-whep) — playback of the FluxRT output with
+# standard clients (GStreamer whepsrc, browser WHEP libs, studio-world).
+# Decoupled from /offer by construction: each viewer gets its own recvonly PC
+# and its own FluxRTTrack (multi-consumer safe — the track only reads
+# `latest_rgb` under `latest_lock`), and no on("track")/on("datachannel")
+# handlers are registered, so a viewer can never touch input ownership or the
+# control channel. Sessions join `pcs` so _graceful_cleanup and the /healthz
+# peer count cover them.
+# ──────────────────────────────────────────────────────────────────────────────
+whep_sessions: dict[str, RTCPeerConnection] = {}
+
+
+@app.post("/whep")
+async def whep_post(request: Request) -> Response:
+    if "application/sdp" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(status_code=415, detail="WHEP requires Content-Type: application/sdp")
+    sdp = (await request.body()).decode("utf-8", "replace")
+    if not sdp.strip():
+        raise HTTPException(status_code=400, detail="empty SDP offer")
+
+    pc = RTCPeerConnection(_rtc_config())
+    session_id = uuid.uuid4().hex
+    whep_sessions[session_id] = pc
+    pcs.add(pc)
+    closing = {"v": False}
+
+    async def _close_whep() -> None:
+        if closing["v"]:        # single-shot: failed -> close() also emits closed
+            return
+        closing["v"] = True
+        with contextlib.suppress(Exception):
+            await pc.close()
+        whep_sessions.pop(session_id, None)
+        pcs.discard(pc)
+
+    @pc.on("connectionstatechange")
+    async def _on_state() -> None:
+        log.info("WHEP %s state: %s", session_id[:8], pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
+            await _close_whep()
+
+    pc.addTrack(FluxRTTrack(fps=30))
+    try:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+    except Exception as exc:
+        await _close_whep()
+        raise HTTPException(status_code=400, detail=f"invalid SDP offer: {exc}")
+
+    # aiortc gathers ICE before setLocalDescription resolves, so the answer is
+    # complete — no trickle needed (PATCH below stays unimplemented).
+    return Response(
+        content=pc.localDescription.sdp,
+        media_type="application/sdp",
+        status_code=201,
+        headers={"Location": f"/whep/{session_id}"},
+    )
+
+
+@app.delete("/whep/{session_id}")
+async def whep_delete(session_id: str) -> Response:
+    pc = whep_sessions.pop(session_id, None)
+    if pc is None:
+        raise HTTPException(status_code=404, detail="unknown WHEP session")
+    pcs.discard(pc)
+    with contextlib.suppress(Exception):
+        await pc.close()
+    return Response(status_code=200)
+
+
+@app.patch("/whep/{session_id}")
+async def whep_patch(session_id: str) -> Response:
+    raise HTTPException(status_code=405, detail="trickle ICE not supported (answer carries full candidates)")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
