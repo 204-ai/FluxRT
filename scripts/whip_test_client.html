@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WHIP test publisher (FluxRT)</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  #bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  select, input { padding: 6px 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; }
+  button { padding: 6px 14px; background: #2a6; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+  button:disabled { background: #444; cursor: default; }
+  #stop { background: #a33; }
+  #panes { display: flex; gap: 12px; flex-wrap: wrap; }
+  .pane { flex: 1; min-width: 300px; }
+  .pane h2 { font-size: 13px; color: #8cf; margin: 0 0 6px; }
+  video, canvas#src { width: 100%; background: #000; border: 1px solid #333; border-radius: 4px; display: block; }
+  #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 200px; margin-top: 12px;
+         overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+  .err { color: #f66; } .ok { color: #6f6; } .info { color: #aaa; }
+</style>
+</head>
+<body>
+<h1>WHIP test publisher (FluxRT)</h1>
+<div id="bar">
+  <select id="source">
+    <option value="canvas">test canvas (no permissions)</option>
+    <option value="camera">camera</option>
+  </select>
+  <button id="go">Publish</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="watch">Watch output (WHEP)</button>
+</div>
+<div id="panes">
+  <div class="pane"><h2>input (published via /whip)</h2><video id="in" autoplay muted playsinline></video></div>
+  <div class="pane"><h2>output (via /whep)</h2><video id="out" autoplay muted playsinline></video></div>
+</div>
+<div id="log"></div>
+<script>
+const $ = id => document.getElementById(id);
+let pubPc = null, pubSession = null, srcStream = null, canvasTimer = null;
+let whepPc = null, whepSession = null;
+
+function log(msg, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = `${new Date().toISOString().slice(11, 23)}  ${msg}`;
+  $("log").appendChild(line);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function canvasSource() {
+  const cv = document.createElement("canvas");
+  cv.width = 512; cv.height = 512;
+  const ctx = cv.getContext("2d");
+  let t = 0;
+  canvasTimer = setInterval(() => {
+    t += 1 / 15;
+    const g = ctx.createLinearGradient(0, 0, cv.width, cv.height);
+    g.addColorStop(0, `hsl(${(t * 40) % 360},70%,45%)`);
+    g.addColorStop(1, `hsl(${(t * 40 + 120) % 360},70%,25%)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, cv.width, cv.height);
+    const x = (Math.sin(t) * 0.4 + 0.5) * cv.width, y = (Math.cos(t * 1.3) * 0.4 + 0.5) * cv.height;
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x, y, 40, 0, 7); ctx.fill();
+    ctx.fillStyle = "#000"; ctx.font = "bold 28px monospace";
+    ctx.fillText("WHIP " + t.toFixed(1) + "s", 20, cv.height - 24);
+  }, 1000 / 15);
+  return cv.captureStream(15);
+}
+
+async function nonTrickle(pc) {
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(res => {
+    if (pc.iceGatheringState === "complete") return res();
+    pc.addEventListener("icegatheringstatechange",
+      () => pc.iceGatheringState === "complete" && res());
+    setTimeout(res, 2000);
+  });
+}
+
+async function sdpExchange(path, pc) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: pc.localDescription.sdp,
+  });
+  log(`POST ${path} ${r.status}`, r.status === 201 ? "ok" : "err");
+  if (r.status !== 201) { log(await r.text(), "err"); throw new Error("signaling failed"); }
+  const session = r.headers.get("Location");
+  log(`session: ${session}`, "ok");
+  await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+  return session;
+}
+
+function watchStates(pc, label) {
+  pc.onconnectionstatechange = () => log(`${label} connection: ${pc.connectionState}`,
+    pc.connectionState === "connected" ? "ok" : pc.connectionState === "failed" ? "err" : "info");
+}
+
+async function publish() {
+  $("go").disabled = true; $("stop").disabled = false;
+  try {
+    srcStream = $("source").value === "camera"
+      ? await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+      : canvasSource();
+    $("in").srcObject = srcStream;
+    pubPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    watchStates(pubPc, "whip");
+    for (const track of srcStream.getVideoTracks()) pubPc.addTrack(track, srcStream);
+    await nonTrickle(pubPc);
+    pubSession = await sdpExchange("/whip", pubPc);
+  } catch (e) {
+    log(`ERROR: ${e.message}`, "err");
+    stopPublish();
+  }
+}
+
+async function stopPublish() {
+  if (pubSession) {
+    try {
+      const r = await fetch(pubSession, { method: "DELETE" });
+      log(`DELETE ${pubSession} ${r.status}`, r.status === 200 ? "ok" : "err");
+    } catch (e) { log(`DELETE failed: ${e.message}`, "err"); }
+    pubSession = null;
+  }
+  if (pubPc) { pubPc.close(); pubPc = null; }
+  if (srcStream) { srcStream.getTracks().forEach(t => t.stop()); srcStream = null; }
+  clearInterval(canvasTimer);
+  $("in").srcObject = null;
+  $("go").disabled = false; $("stop").disabled = true;
+}
+
+async function watch() {
+  if (whepPc) {  // toggle off
+    if (whepSession) fetch(whepSession, { method: "DELETE" }).catch(() => {});
+    whepPc.close(); whepPc = null; whepSession = null;
+    $("out").srcObject = null;
+    return;
+  }
+  try {
+    whepPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    watchStates(whepPc, "whep");
+    whepPc.addTransceiver("video", { direction: "recvonly" });
+    whepPc.ontrack = e => $("out").srcObject = e.streams[0];
+    await nonTrickle(whepPc);
+    whepSession = await sdpExchange("/whep", whepPc);
+  } catch (e) {
+    log(`ERROR: ${e.message}`, "err");
+    if (whepPc) { whepPc.close(); whepPc = null; }
+  }
+}
+
+$("go").onclick = publish;
+$("stop").onclick = stopPublish;
+$("watch").onclick = watch;
+</script>
+</body>
+</html>

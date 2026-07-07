@@ -676,6 +676,105 @@ async def whep_patch(session_id: str) -> Response:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# WHIP ingress (draft-ietf-wish-whip) — standard publishers (OBS WHIP output,
+# GStreamer whipsink, browser) feed the pipeline input. The publisher's track
+# goes through the SAME consume_peer_input ownership path as /offer, so every
+# owner/waiter/gap-handoff rule applies unchanged and a WHIP publisher is
+# indistinguishable from another browser sender to realtime-client (which sees
+# only the existing input:peer broadcast). Publish-only: no output track, no
+# datachannel — `_fluxrt_channels` stays empty so send_to_pc("input:you")
+# no-ops for this pc.
+# ──────────────────────────────────────────────────────────────────────────────
+whip_sessions: dict[str, RTCPeerConnection] = {}
+
+
+@app.post("/whip")
+async def whip_post(request: Request) -> Response:
+    if sp is None:
+        raise HTTPException(status_code=503, detail="live pipeline not running (batch-only server)")
+    if "application/sdp" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(status_code=415, detail="WHIP requires Content-Type: application/sdp")
+    sdp = (await request.body()).decode("utf-8", "replace")
+    if not sdp.strip():
+        raise HTTPException(status_code=400, detail="empty SDP offer")
+
+    pc = RTCPeerConnection(_rtc_config())
+    session_id = uuid.uuid4().hex
+    whip_sessions[session_id] = pc
+    pcs.add(pc)
+    pc._fluxrt_channels = set()
+    closing = {"v": False}
+
+    async def _close_whip() -> None:
+        if closing["v"]:        # single-shot: failed -> close() also emits closed
+            return
+        closing["v"] = True
+        # Cancel the consumer directly (same rationale as /offer's _on_state):
+        # its finally releases ownership deterministically.
+        t = getattr(pc, "_fluxrt_consume_task", None)
+        if t is not None:
+            t.cancel()
+        with contextlib.suppress(Exception):
+            await pc.close()
+        whip_sessions.pop(session_id, None)
+        pcs.discard(pc)
+
+    @pc.on("connectionstatechange")
+    async def _on_state() -> None:
+        log.info("WHIP %s state: %s", session_id[:8], pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
+            await _close_whip()
+
+    @pc.on("track")
+    def _on_track(track) -> None:
+        log.info("WHIP inbound track: kind=%s id=%s", track.kind, track.id)
+        if track.kind != "video":
+            return
+        task = asyncio.ensure_future(
+            consume_peer_input(
+                track, pc, ownership, _frame_sink, notify=_input_notify, log=log
+            )
+        )
+        peer_input_tasks.add(task)
+        task.add_done_callback(peer_input_tasks.discard)
+        pc._fluxrt_consume_task = task
+
+    try:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+    except Exception as exc:
+        await _close_whip()
+        raise HTTPException(status_code=400, detail=f"invalid SDP offer: {exc}")
+
+    return Response(
+        content=pc.localDescription.sdp,
+        media_type="application/sdp",
+        status_code=201,
+        headers={"Location": f"/whip/{session_id}"},
+    )
+
+
+@app.delete("/whip/{session_id}")
+async def whip_delete(session_id: str) -> Response:
+    pc = whip_sessions.pop(session_id, None)
+    if pc is None:
+        raise HTTPException(status_code=404, detail="unknown WHIP session")
+    pcs.discard(pc)
+    t = getattr(pc, "_fluxrt_consume_task", None)
+    if t is not None:
+        t.cancel()      # consume_peer_input's finally releases ownership
+    with contextlib.suppress(Exception):
+        await pc.close()
+    return Response(status_code=200)
+
+
+@app.patch("/whip/{session_id}")
+async def whip_patch(session_id: str) -> Response:
+    raise HTTPException(status_code=405, detail="trickle ICE not supported (answer carries full candidates)")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Reference image upload — requires `use_reference_image: true` in config.
 # Accepts raw image bytes (PNG / JPEG / WebP) as the request body.
 # Browser posts with `Content-Type: application/octet-stream` (or any).
@@ -1233,6 +1332,18 @@ async def _test_client():
             return Response(f.read(), media_type="text/html")
     except OSError:
         raise HTTPException(status_code=404, detail="webrtc_test_client.html not found")
+
+
+@app.get("/whip-client")
+async def _whip_client():
+    """WHIP publish test page (same-origin): camera or animated canvas source
+    published to /whip, with an inline /whep output preview and a state log."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whip_test_client.html")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return Response(f.read(), media_type="text/html")
+    except OSError:
+        raise HTTPException(status_code=404, detail="whip_test_client.html not found")
 
 
 @app.get("/healthz")

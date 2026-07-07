@@ -3,6 +3,7 @@
 ## §G GOAL
 input: ∀ time ≤1 peer drives pipeline input; owner death/leave → oldest waiter takes over seamless (≤~9s worst case, next-frame when graceful); transient blip ⊥ force full renegotiation (client grace); no-waiter owner ⊥ evicted on gap. [done T1-T8]
 egress: WHEP endpoint — standard players (GStreamer whepsrc, browser WHEP libs, studio-world) watch FluxRT output; per-session resolution/fps knobs for bandwidth (proposed). `/offer` + ownership behavior identical.
+ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, browser) feed pipeline input as ordinary ownership claimants; realtime-client protocol & contention semantics untouched.
 
 ## §C CONSTRAINTS
 - C1: InputOwnership sole mutator of owner/waiter/active state; policy fns pure, unit-testable w/o aiortc/GPU (existing module ethos).
@@ -26,6 +27,9 @@ egress: WHEP endpoint — standard players (GStreamer whepsrc, browser WHEP libs
 - api: `DELETE /whep/<uuid>` → 200 | 404; `PATCH /whep/<uuid>` → 405 (full ICE in answer, no trickle)
 - api (proposed): `POST /whep?w=<px>&fps=<n>` — per-session output width (aspect kept, even-rounded, clamp [64, native]) & frame rate (clamp [1, 60], default 30)
 - env: reuse `FLUXRT_STUN` / `FLUXRT_TURN_URL(+_USER/_PASS)` via `_rtc_config()`
+- api: `POST /whip` (Content-Type `application/sdp`, offer w/ video) → 201 + `Location: /whip/<uuid>` + answer SDP; 415/400 same as WHEP; 503 when `sp is None` (like `/offer`)
+- api: `DELETE /whip/<uuid>` → 200 (cancels consume task → ownership released via existing finally) | 404; `PATCH` → 405
+- page: `GET /whip-client` → `scripts/whip_test_client.html` (publish test page, mirror of `/test` serving)
 
 ## §R RESEARCH
 id|topic|finding|src
@@ -54,6 +58,9 @@ V12: ∀ WHEP session own `FluxRTTrack`; `latest_rgb` read only under `latest_lo
 V13: DELETE → close + deregister (404 unknown/repeat); PC state failed|closed → auto-clean (single-shot guard); WHEP PCs ∈ `pcs` → `_graceful_cleanup` covers shutdown
 V14: `/offer` request/response + ownership semantics unchanged — WHEP code ⊥ writes state `/offer` reads except `pcs` membership
 V15 (proposed): `?w=` → resize INTER_AREA, aspect kept, even-rounded, clamp [64, native]; absent → native path identical (zero resize calls); `?fps=` clamp [1,60] default 30
+V16: `POST /whip` valid SDP → 201 + Location + `application/sdp`; 415 wrong ct; 400 empty/bad; 503 no pipeline
+V17: WHIP publisher = ordinary ownership claimant — same `consume_peer_input(track, pc, ownership, _frame_sink, notify=_input_notify)` path as `/offer` ∴ V1-V5,V9 apply unchanged; WHIP PC gets empty `_fluxrt_channels` → `send_to_pc` no-op; ⊥ datachannel wiring
+V18: realtime-client surfaces byte-identical — `/offer` route, ctrl vocabulary, `/healthz` fields untouched; WHIP claim visible to client only as existing `input:peer` broadcast (same as 2nd browser sender)
 
 ## §T TASKS
 id|status|task|cites
@@ -69,6 +76,9 @@ T9|x|WHEP section in `run_webrtc.py`: `whep_sessions` registry, `POST /whep` (ow
 T10|x|smoke test `scripts/test_whep.py`: torch-free fluxrt shim (conftest pattern) + in-process uvicorn + aiortc client — 201/Location/answer, 2 concurrent viewers frames, 415/400, DELETE 200→404, auto-clean|V10,V12,V13
 T11|.|(proposed) `FluxRTTrack(fps, width=None)` — optional resize in recv; `/whep` parses `?w=`+`?fps=`|V15,R5,R6
 T12|.|(proposed) test: `?w=256` viewer receives 256px frames & concurrent native viewer unchanged; absurd `?w=`/`?fps=` clamped|V15
+T13|x|WHIP section in `run_webrtc.py`: `whip_sessions` registry, `POST /whip` (ownership-claimant track wiring, consume-task cancel on close), `DELETE`+404, `PATCH` 405|V16,V17,V18
+T14|x|`scripts/whip_test_client.html` + `GET /whip-client` route (mirror `/test`)|I.page
+T15|x|smoke test `scripts/test_whip.py`: shim + fake sp + `_frame_sink` collector — publish → ownership active & frames collected; 2nd publisher joins/leaves → 1st still owner; DELETE → ownership released, repeat 404|V16,V17
 
 ## §B BUGS
 id|date|cause|fix
