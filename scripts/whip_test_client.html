@@ -12,9 +12,20 @@
   button { padding: 6px 14px; background: #2a6; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
   button:disabled { background: #444; cursor: default; }
   #stop { background: #a33; }
-  #panes { display: flex; gap: 12px; flex-wrap: wrap; }
-  .pane { flex: 1; min-width: 300px; }
-  .pane h2 { font-size: 13px; color: #8cf; margin: 0 0 6px; }
+  #stage { display: flex; gap: 12px; flex-wrap: wrap; }
+  #stage .cell { flex: 1; min-width: 300px; }
+  #stage .cell h2 { font-size: 13px; color: #8cf; margin: 0 0 6px; }
+  /* split & blend: output video overlays the input box exactly */
+  #stage.split, #stage.blend { display: block; position: relative; max-width: 720px; }
+  #stage.split .cell, #stage.blend .cell { min-width: 0; }
+  #stage.split .cell h2, #stage.blend .cell h2 { display: none; }
+  #stage.split .cell.out, #stage.blend .cell.out { position: absolute; inset: 0; }
+  #stage.split .cell.out video, #stage.blend .cell.out video { height: 100%; object-fit: cover; }
+  #stage.split .cell.out video { clip-path: inset(0 0 0 var(--mix, 50%)); }
+  #stage.split::after { content: ""; position: absolute; top: 0; bottom: 0; left: var(--mix, 50%);
+                        width: 2px; background: #8cf; z-index: 3; pointer-events: none; }
+  #stage.blend .cell.out video { opacity: var(--mixa, 0.5); }
+  #mix { width: 140px; accent-color: #8cf; }
   video, canvas#src { width: 100%; background: #000; border: 1px solid #333; border-radius: 4px; display: block; }
   #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 200px; margin-top: 12px;
          overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
@@ -31,10 +42,17 @@
   <button id="go">Publish</button>
   <button id="stop" disabled>Stop</button>
   <button id="watch">Watch output (WHEP)</button>
+  <select id="view">
+    <option value="side">side by side</option>
+    <option value="split">split view</option>
+    <option value="blend">alpha blend</option>
+  </select>
+  <input type="range" id="mix" min="0" max="100" value="50" style="display:none"
+         title="split position / blend amount">
 </div>
-<div id="panes">
-  <div class="pane"><h2>input (published via /whip)</h2><video id="in" autoplay muted playsinline></video></div>
-  <div class="pane"><h2>output (via /whep)</h2><video id="out" autoplay muted playsinline></video></div>
+<div id="stage" class="side">
+  <div class="cell in"><h2>input (published via /whip)</h2><video id="in" autoplay muted playsinline></video></div>
+  <div class="cell out"><h2>output (via /whep)</h2><video id="out" autoplay muted playsinline></video></div>
 </div>
 <div id="log"></div>
 <script>
@@ -166,9 +184,24 @@ async function watch() {
   }
 }
 
+function applyMix() {
+  const p = $("mix").value;
+  $("stage").style.setProperty("--mix", p + "%");
+  $("stage").style.setProperty("--mixa", p / 100);
+}
+function setView() {
+  const v = $("view").value;
+  $("stage").className = v;
+  $("mix").style.display = v === "side" ? "none" : "";
+  applyMix();
+}
+
 $("go").onclick = publish;
 $("stop").onclick = stopPublish;
 $("watch").onclick = watch;
+$("view").onchange = setView;
+$("mix").oninput = applyMix;
+setView();
 </script>
 </body>
 </html>
