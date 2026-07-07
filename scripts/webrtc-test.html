@@ -93,6 +93,26 @@ async function fetchInputRes() {
   log(`capture resolution: ${inputRes.width}x${inputRes.height} (server input res)`, "info");
 }
 
+// Once the real output dimensions are known, sanity-check the capture size:
+// FluxRT's flow-upscaler streams 2x the pipeline input, so output = 2x healthz
+// res means capture should stay at half the output (i.e. the healthz res).
+// Any other mismatch adapts capture to the output (sd-webrtc: output == input).
+function adaptToOutput(w, h) {
+  if (!w || !h) return;
+  const isDouble = Math.abs(w / 2 - inputRes.width) <= 16 && Math.abs(h / 2 - inputRes.height) <= 16;
+  if (isDouble) {
+    log(`output ${w}x${h} = 2x input ${inputRes.width}x${inputRes.height} (upscaler on) — capture stays at half output`, "info");
+    return;
+  }
+  if (w === inputRes.width && h === inputRes.height) return;
+  inputRes = { width: w, height: h };
+  if (srcCanvas) { srcCanvas.width = w; srcCanvas.height = h; }
+  const t = srcStream && srcStream.getVideoTracks()[0];
+  if (t && t.applyConstraints)
+    t.applyConstraints({ width: { ideal: w }, height: { ideal: h } }).catch(() => {});
+  log(`input adapted to output ${w}x${h}`, "info");
+}
+
 function canvasSource() {
   const cv = document.createElement("canvas");
   srcCanvas = cv;
@@ -281,6 +301,8 @@ $("view").onchange = setView;
 $("mix").oninput = applyMix;
 $("send").onclick = sendPrompt;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") sendPrompt(); });
+$("out").addEventListener("loadedmetadata", () => adaptToOutput($("out").videoWidth, $("out").videoHeight));
+$("out").addEventListener("resize", () => adaptToOutput($("out").videoWidth, $("out").videoHeight));
 setView();
 </script>
 </body>
