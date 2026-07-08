@@ -92,8 +92,6 @@
   </select>
 </div>
 
-<div class="card" id="params"><span class="info">detecting engine…</span></div>
-
 <div id="stage" class="side">
   <div class="cell in">
     <h2>input — published</h2>
@@ -112,6 +110,7 @@
 </div>
 
 <div id="stats"><span class="l" id="stIn">idle</span><span class="c" id="stMid"></span><span class="r" id="stOut"></span></div>
+<div class="card" id="params"><span class="info">detecting engine…</span></div>
 <div id="log"></div>
 
 <script>
@@ -452,40 +451,53 @@ async function postPrompt(v) {
 }
 
 const cfg = {};   // live values, for bundled messages
+// `hz` maps a /healthz payload to this control's server-side value — polled to
+// keep the inputs in sync with the server (other clients may change params).
 const ENGINE_CONTROLS = {
   fluxrt: [
     { key: "prompt", label: "prompt", kind: "text",
       def: "make everything in frame stitched as dense embroidery, raised satin-stitch threads in saturated wool colors following every contour, visible linen weave texture",
-      post: postPrompt },
-    { key: "seed", label: "seed", kind: "number", def: 0, post: v => postParam(`/seed?value=${v}`) },
-    { key: "steps", label: "steps", kind: "number", min: 1, max: 8, def: 2, post: v => postParam(`/steps?value=${v}`) },
+      hz: j => j.prompt, post: postPrompt },
+    { key: "seed", label: "seed", kind: "number", def: 0, hz: j => j.seed,
+      post: v => postParam(`/seed?value=${v}`) },
+    { key: "steps", label: "steps", kind: "number", min: 1, max: 8, def: 2, hz: j => j.steps,
+      post: v => postParam(`/steps?value=${v}`) },
   ],
   streamdiffusion: [
-    { key: "prompt", label: "prompt", kind: "text", def: "", post: postPrompt },
-    { key: "seed", label: "seed", kind: "number", def: 789, post: v => postParam(`/seed?value=${v}`) },
+    { key: "prompt", label: "prompt", kind: "text", def: "", hz: j => j.prompt, post: postPrompt },
+    { key: "seed", label: "seed", kind: "number", def: 789, hz: j => j.seed,
+      post: v => postParam(`/seed?value=${v}`) },
     { key: "tindex", label: "steps", kind: "text", def: "5,10", small: true,
       title: "t_index schedule: 1-8 comma-separated slots, each 1-49",
+      hz: j => Array.isArray(j.t_index) ? j.t_index.join(",") : undefined,
       post: v => postParam(`/t_index?value=${encodeURIComponent(v)}`) },
     { key: "guidance", label: "guidance", kind: "range", min: 1, max: 3, step: 0.1, def: 1,
-      post: v => postParam(`/guidance?value=${v}`) },
+      hz: j => j.guidance, post: v => postParam(`/guidance?value=${v}`) },
     { key: "delta", label: "delta", kind: "range", min: 0, max: 1.5, step: 0.05, def: 0.7,
-      post: v => postParam(`/delta?value=${v}`) },
-    { key: "v2v", label: "v2v", kind: "toggle", def: true,
+      hz: j => j.delta, post: v => postParam(`/delta?value=${v}`) },
+    { key: "v2v", label: "v2v", kind: "toggle", def: true, hz: j => j.v2v_enabled,
       post: v => postParam(`/v2v?on=${v ? 1 : 0}&strength=${cfg.v2vStrength ?? 0.2}`) },
     { key: "v2vStrength", label: "v2v str", kind: "range", min: 0, max: 1, step: 0.05, def: 0.2,
+      hz: j => j.v2v_strength,
       post: v => postParam(`/v2v?on=${cfg.v2v ? 1 : 0}&strength=${v}`) },
     { key: "cnMode", label: "controlnet", kind: "select", def: "off",
       options: ["off", "canny", "openpose", "depth"],
+      hz: j => j.cn_mode,
       post: v => postParam(`/controlnet?mode=${v}&scale=${cfg.cnScale ?? 1.2}`) },
     { key: "cnScale", label: "cn weight", kind: "range", min: 0, max: 2, step: 0.05, def: 1.2,
+      hz: j => j.cn_scale,
       post: v => postParam(`/controlnet?mode=${cfg.cnMode ?? "off"}&scale=${v}`) },
   ],
 };
 
+let activeControls = [];
+const els = {};   // control key -> input element (el._val = range readout span)
+
 function buildParams(engine) {
   const card = $("params");
   card.innerHTML = "";
-  for (const c of ENGINE_CONTROLS[engine]) {
+  activeControls = ENGINE_CONTROLS[engine];
+  for (const c of activeControls) {
     cfg[c.key] = c.def;
     const wrap = document.createElement("span");
     wrap.className = "ctl" + (c.kind === "text" && !c.small ? " wide" : "");
@@ -529,10 +541,35 @@ function buildParams(engine) {
       el.onchange = () => apply(el.value);
     }
     wrap.appendChild(el);
-    if (val) wrap.appendChild(val);
+    if (val) { wrap.appendChild(val); el._val = val; }
+    els[c.key] = el;
     card.appendChild(wrap);
   }
 }
+
+// Keep inputs in sync with the server (another client may steer the same
+// pipeline) — but NEVER clobber the control being edited (focused).
+function syncParams(j) {
+  for (const c of activeControls) {
+    const el = els[c.key];
+    if (!el || !c.hz || document.activeElement === el) continue;
+    const v = c.hz(j);
+    if (v === undefined || v === null) continue;
+    cfg[c.key] = c.kind === "toggle" ? !!v : v;
+    if (c.kind === "toggle") {
+      el.checked = !!v;
+    } else if (c.kind === "select") {
+      if ([...el.options].some(o => o.value === String(v))) el.value = v;
+    } else if (String(el.value) !== String(v)) {
+      el.value = v;
+      if (el._val) el._val.textContent = v;
+    }
+  }
+}
+setInterval(async () => {
+  try { syncParams(await (await fetch("/healthz", { cache: "no-store" })).json()); }
+  catch { /* server away — leave inputs as-is */ }
+}, 2000);
 
 // Title = engine · version · model · flags · resolution, from /healthz identity
 // fields (sd-webrtc snapshot: engine/model/cfg_type/v2v/cn; FluxRT: ref +
