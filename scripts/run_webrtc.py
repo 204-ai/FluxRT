@@ -215,20 +215,51 @@ def _drive_prompt_travel(prompt: str, frames: int, mode: str) -> None:
 # `latest_rgb` for any active video track to send out. Used by both the local
 # camera producer thread and per-peer track consumers.
 # ──────────────────────────────────────────────────────────────────────────────
+output_pump_stop = threading.Event()
+_output_pump_on = False   # True once the scheduler-counter pump owns publishing
+
+
+def output_pump() -> None:
+    """Publishes EVERY scheduler-written output frame (including interpolated
+    in-betweens) to latest_rgb/output_version, at the scheduler's own pace.
+    The old path sampled the output tensor once per INPUT frame, which pinned
+    the webrtc output at the input fps and silently dropped the interpolated
+    frames (SPEC B2)."""
+    global latest_rgb, output_version
+    log.info("Output pump started (scheduler frame counter).")
+    last = sp.frame_counter.value
+    while not output_pump_stop.is_set():
+        c = sp.frame_counter.value
+        if c == last:
+            time.sleep(0.002)
+            continue
+        last = c
+        with pipeline_lock:
+            out_bgr = output_tensor.to_numpy()
+        rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        with latest_lock:
+            latest_rgb = rgb
+            output_version += 1   # gates output tracks: 1 send per scheduled frame
+    log.info("Output pump stopped.")
+
+
 def push_input_frame(frame_bgr: np.ndarray) -> None:
     global latest_rgb, latest_input_bgr, output_version
     h, w = resolution["height"], resolution["width"]
     cropped = crop_maximal_rectangle(frame_bgr, h, w)
-    # Hold pipeline_lock across write+read so the producer thread and a peer's
-    # executor call can't interleave shared-tensor access during handoff.
+    # Hold pipeline_lock across the shared-tensor access so the producer thread
+    # and a peer's executor call can't interleave during handoff.
     with pipeline_lock:
         input_tensor.copy_from(cropped)
-        out_bgr = output_tensor.to_numpy()
-    rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        # Legacy publish path (StreamProcessor without frame_counter): sample
+        # the output at the input rate. With the pump active, publishing is
+        # ENTIRELY the pump's job so interpolated frames aren't skipped.
+        out_bgr = None if _output_pump_on else output_tensor.to_numpy()
     with latest_lock:
-        latest_rgb = rgb
         latest_input_bgr = cropped  # served to listeners via GET /input.jpg
-        output_version += 1         # gates output tracks: 1 send per processed frame
+        if out_bgr is not None:
+            latest_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+            output_version += 1
 
 
 def _decode_and_push(frame) -> None:
@@ -375,6 +406,11 @@ async def _graceful_cleanup() -> None:
 
     log.info("Shutting down — stopping producer, peers, pipeline...")
     producer_stop.set()
+    output_pump_stop.set()
+    # Cancel input consumers up front: a consumer whose receiver never started
+    # (failed DTLS) blocks on recv() forever and pc.close() won't wake it.
+    for t in list(peer_input_tasks):
+        t.cancel()
 
     # Hard-deadline backstop. On Ctrl+C the spawned children also receive SIGINT
     # (shared process group) and die immediately, and reap_process detaches any
@@ -1548,6 +1584,12 @@ def _run_server(args) -> None:
         log_level="info",
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
+        # Without a bound, uvicorn's graceful shutdown waits indefinitely for
+        # open connections (e.g. a test page's keep-alive /healthz polling or a
+        # wedged signaling request) BEFORE running lifespan shutdown — Ctrl+C
+        # then appears to hang with WHEP/WHIP sessions alive. 3s is plenty for
+        # any in-flight signaling request.
+        timeout_graceful_shutdown=3,
     )
 
 
@@ -1724,6 +1766,14 @@ def main() -> None:
         out_resolution["width"],
         out_resolution["height"],
     )
+
+    # Publish output frames at the scheduler's pace (incl. interpolation) when
+    # the counter exists; older StreamProcessor builds fall back to the
+    # input-rate sampling inside push_input_frame.
+    if getattr(sp, "frame_counter", None) is not None:
+        global _output_pump_on
+        _output_pump_on = True
+        threading.Thread(target=output_pump, daemon=True).start()
 
     if args.no_server_camera:
         log.info("--no-server-camera: skipping local camera; waiting for peer input.")

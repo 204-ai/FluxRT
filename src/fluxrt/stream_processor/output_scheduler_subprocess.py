@@ -14,6 +14,7 @@ class OutputSchedulerSubprocess:
         pack_is_ready,
         last_processing_time,
         frame_written=None,
+        frame_counter=None,
     ):
         self.config = config
         self.output_batch_shared_tensor_name = output_batch_shared_tensor_name
@@ -21,6 +22,10 @@ class OutputSchedulerSubprocess:
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
         self.frame_written = frame_written
+        # Monotonic per-written-frame counter (shared Value). Lets a consumer
+        # (run_webrtc's output pump) publish EVERY scheduled frame — including
+        # the interpolated in-betweens — instead of sampling at the input rate.
+        self.frame_counter = frame_counter
 
         self.running = Value("b", False)
         self.process = None
@@ -76,6 +81,8 @@ class OutputSchedulerSubprocess:
                 )
                 if self.frame_written is not None and not self.frame_written.value:
                     self.frame_written.value = True
+                if self.frame_counter is not None:
+                    self.frame_counter.value += 1
                 if i < self.batch_size - 1:
                     time.sleep(sleep_interval)
 

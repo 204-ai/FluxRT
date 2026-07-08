@@ -58,7 +58,9 @@ V12: ∀ WHEP session own `FluxRTTrack`; `latest_rgb` read only under `latest_lo
 V13: DELETE → close + deregister (404 unknown/repeat); PC state failed|closed → auto-clean (single-shot guard); WHEP PCs ∈ `pcs` → `_graceful_cleanup` covers shutdown
 V14: `/offer` request/response + ownership semantics unchanged — WHEP code ⊥ writes state `/offer` reads except `pcs` membership
 V15: `?w=` → resize INTER_AREA, aspect kept, even-rounded, clamp [64, native]; absent → native path identical (zero resize calls); `?fps=` clamp [1,60] default 30
-V19: output rate == pipeline rate — tracks gate on `output_version` (bumped in `push_input_frame`, 1 send per processed frame, ⊥ re-encoded duplicates); `fps` = cap only; no new frame ≥1s → 1Hz keepalive repeat; wall-clock pts @ 90kHz (applies to `/offer` + `/whep` output alike)
+V19: output rate == pipeline rate — tracks gate on `output_version`; `fps` = cap only; no new frame ≥1s → 1Hz keepalive repeat; wall-clock pts @ 90kHz (applies to `/offer` + `/whep` output alike)
+V20: `output_version` bumped by `output_pump` per scheduler `frame_counter` tick (∴ interpolated frames published, out fps == fps_interpolated); pump active → `push_input_frame` ⊥ publishes latest_rgb (legacy sp w/o counter → input-rate fallback)
+V21: shutdown bounded w/ live WHEP/WHIP: uvicorn `timeout_graceful_shutdown=3` (⊥ unbounded connection wait before lifespan) & consume tasks cancelled up front & per-pc close ≤3s & 15s watchdog
 V16: `POST /whip` valid SDP → 201 + Location + `application/sdp`; 415 wrong ct; 400 empty/bad; 503 no pipeline
 V17: WHIP publisher = ordinary ownership claimant — same `consume_peer_input(track, pc, ownership, _frame_sink, notify=_input_notify)` path as `/offer` ∴ V1-V5,V9 apply unchanged; WHIP PC gets empty `_fluxrt_channels` → `send_to_pc` no-op; ⊥ datachannel wiring
 V18: realtime-client surfaces byte-identical — `/offer` route, ctrl vocabulary, `/healthz` fields untouched; WHIP claim visible to client only as existing `input:peer` broadcast (same as 2nd browser sender)
@@ -86,3 +88,5 @@ T17|x|version-gated output pacing: `output_version` bump in `push_input_frame`, 
 ## §B BUGS
 id|date|cause|fix
 B1|2026-07-06|gap-yield `return`ed w/ pc alive → nobody drains track; aiortc decodes regardless → queue grows ~12MB/s if paused cam resumes (caught in review, pre-merge)|V9
+B2|2026-07-08|webrtc sampled output tensor once per INPUT frame → interpolated frames dropped, out fps pinned ≈ input fps (~30) ≠ fps_interpolated ∴ scheduler `frame_counter` + `output_pump` publishes per scheduled frame|V20
+B3|2026-07-08|Ctrl+C hang w/ live WHEP/WHIP ? uvicorn default graceful shutdown waits unbounded on open connections (keep-alive /healthz polls) before lifespan runs; in-process repro exits 0.1s ∴ bounded `timeout_graceful_shutdown=3` + upfront consume-task cancel — verify on GPU box|V21
