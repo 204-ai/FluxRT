@@ -454,7 +454,9 @@ async function postPrompt(v) {
 const cfg = {};   // live values, for bundled messages
 const ENGINE_CONTROLS = {
   fluxrt: [
-    { key: "prompt", label: "prompt", kind: "text", def: "", post: postPrompt },
+    { key: "prompt", label: "prompt", kind: "text",
+      def: "make everything in frame stitched as dense embroidery, raised satin-stitch threads in saturated wool colors following every contour, visible linen weave texture",
+      post: postPrompt },
     { key: "seed", label: "seed", kind: "number", def: 0, post: v => postParam(`/seed?value=${v}`) },
     { key: "steps", label: "steps", kind: "number", min: 1, max: 8, def: 2, post: v => postParam(`/steps?value=${v}`) },
   ],
