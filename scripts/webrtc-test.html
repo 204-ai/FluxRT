@@ -5,74 +5,119 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WebRTC test client</title>
 <style>
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd; }
-  h1 { font-size: 16px; margin: 0 0 12px; }
-  #bar, #bar2 { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
-  #prompt { flex: 1; min-width: 260px; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd;
+         display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
+  h1 { font-size: 16px; margin: 0; }
+  .card { background: #191b20; border: 1px solid #2a2d35; border-radius: 8px; padding: 10px 12px;
+          display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .card label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8cf; }
   select, input { padding: 6px 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; }
+  input[type=number] { width: 72px; }
+  #prompt { flex: 1; min-width: 220px; }
   button { padding: 6px 14px; background: #2a6; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
-  button:disabled { background: #444; cursor: default; }
-  #stop { background: #a33; }
+  #mix { width: 130px; accent-color: #8cf; }
+
   #stage { display: flex; gap: 12px; flex-wrap: wrap; }
   #stage .cell { flex: 1; min-width: 300px; }
-  #stage .cell h2 { font-size: 13px; color: #8cf; margin: 0 0 6px; }
-  /* split & blend: output video overlays the input box exactly */
+  #stage .cell h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8cf; margin: 0 0 6px; }
+  .vwrap { position: relative; }
+  video { width: 100%; background: #000; border: 1px solid #333; border-radius: 6px; display: block; }
+  /* subtle centered play/pause, revealed on hover (faint hint while stopped) */
+  .pp { position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; border-radius: 50%;
+        background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25); color: #fff;
+        font-size: 18px; line-height: 1; display: flex; align-items: center; justify-content: center;
+        opacity: 0; transition: opacity .15s; padding: 0; z-index: 4; }
+  .vwrap:hover .pp { opacity: .95; }
+  .pp.stopped { opacity: .3; }
+  .vwrap:hover .pp.stopped { opacity: .95; }
+
+  /* split & blend: output overlays the input box exactly */
   #stage.split, #stage.blend { display: block; position: relative; max-width: 720px; }
   #stage.split .cell, #stage.blend .cell { min-width: 0; }
   #stage.split .cell h2, #stage.blend .cell h2 { display: none; }
   #stage.split .cell.out, #stage.blend .cell.out { position: absolute; inset: 0; }
+  #stage.split .cell.out .vwrap, #stage.blend .cell.out .vwrap { height: 100%; }
   #stage.split .cell.out video, #stage.blend .cell.out video { height: 100%; object-fit: cover; }
   #stage.split .cell.out video { clip-path: inset(0 0 0 var(--mix, 50%)); }
   #stage.split::after { content: ""; position: absolute; top: 0; bottom: 0; left: var(--mix, 50%);
                         width: 2px; background: #8cf; z-index: 3; pointer-events: none; }
   #stage.blend .cell.out video { opacity: var(--mixa, 0.5); }
-  #mix { width: 140px; accent-color: #8cf; }
-  video { width: 100%; background: #000; border: 1px solid #333; border-radius: 4px; display: block; }
-  #stats { margin: 8px 0; color: #8cf; }
-  #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 8px; height: 220px;
+
+  #stats { color: #8cf; font: 12px/1.5 ui-monospace, monospace; }
+  #log { background: #000; border: 1px solid #333; border-radius: 6px; padding: 8px; height: 200px;
          overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
   .err { color: #f66; } .ok { color: #6f6; } .info { color: #aaa; }
 </style>
 </head>
 <body>
 <h1>WebRTC test client</h1>
-<div id="bar">
+
+<div class="card">
+  <label>mode</label>
   <select id="mode">
-    <option value="whipwhep">whip + whep (2 PCs, standard)</option>
-    <option value="sendrecv">sendrecv /offer (1 PC, realtime-client style)</option>
+    <option value="whipwhep">whip + whep (2 PCs)</option>
+    <option value="sendrecv">sendrecv /offer (1 PC)</option>
   </select>
+  <label>source</label>
   <select id="source">
-    <option value="canvas">test canvas (no permissions)</option>
+    <option value="canvas">test canvas</option>
     <option value="camera">camera</option>
   </select>
-  <button id="go">Connect</button>
-  <button id="stop" disabled>Disconnect</button>
+  <label>view</label>
   <select id="view">
     <option value="side">side by side</option>
-    <option value="split">split view</option>
-    <option value="blend">alpha blend</option>
+    <option value="split">split</option>
+    <option value="blend">blend</option>
   </select>
   <input type="range" id="mix" min="0" max="100" value="50" style="display:none"
          title="split position / blend amount">
 </div>
-<div id="bar2">
-  <input id="prompt" placeholder="prompt — applies live via POST /prompt">
-  <button id="send">Send prompt</button>
+
+<div class="card">
+  <label>prompt</label>
+  <input id="prompt" placeholder="applies live via POST /prompt — Enter to send">
+  <label>steps</label>
+  <input id="steps" type="number" min="1" max="8" placeholder="—" title="applies on change">
+  <label>seed</label>
+  <input id="seed" type="number" placeholder="—" title="applies on change">
+  <button id="send">Send</button>
 </div>
+
 <div id="stage" class="side">
-  <div class="cell in"><h2>input (published)</h2><video id="in" autoplay muted playsinline></video></div>
-  <div class="cell out"><h2>output (received)</h2><video id="out" autoplay muted playsinline></video></div>
+  <div class="cell in">
+    <h2>input — published</h2>
+    <div class="vwrap">
+      <video id="in" autoplay muted playsinline></video>
+      <button class="pp stopped" id="ppIn" title="send input">▶</button>
+    </div>
+  </div>
+  <div class="cell out">
+    <h2>output — received</h2>
+    <div class="vwrap">
+      <video id="out" autoplay muted playsinline></video>
+      <button class="pp stopped" id="ppOut" title="listen">▶</button>
+    </div>
+  </div>
 </div>
+
 <div id="stats">idle</div>
 <div id="log"></div>
+
 <script>
 const $ = id => document.getElementById(id);
 const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
-let pcs = [];              // live peer connections (1 for sendrecv, 2 for whip/whep)
-let sessions = [];         // WHIP/WHEP resource URLs to DELETE on disconnect
+// Session state. whipwhep: pub/view PCs are independent, each pane's play/pause
+// creates/DELETEs its own session. sendrecv: one PC carries both directions —
+// input pause detaches the sender track (replaceTrack(null)), output pause
+// halts rendering; both paused -> full teardown. No global connect button.
+const S = {
+  pubPc: null, viewPc: null, srPc: null, srSender: null,
+  inSession: null, outSession: null,
+  inputOn: false, outputOn: false,
+};
 let srcStream = null, srcCanvas = null, canvasTimer = null;
-let frames = 0, statsTimer = null;
+let frames = 0, statsTimer = null, procMs = null;
 
 function log(msg, cls) {
   const line = document.createElement("div");
@@ -82,28 +127,27 @@ function log(msg, cls) {
   $("log").scrollTop = $("log").scrollHeight;
 }
 
-// Capture at the pipeline's input resolution — the server center-crops every
-// inbound frame to it, so publishing larger only burns uplink.
+function icons() {
+  $("ppIn").textContent = S.inputOn ? "⏸" : "▶";
+  $("ppIn").classList.toggle("stopped", !S.inputOn);
+  $("ppOut").textContent = S.outputOn ? "⏸" : "▶";
+  $("ppOut").classList.toggle("stopped", !S.outputOn);
+}
+
+// ── capture ──────────────────────────────────────────────────────────────────
 let inputRes = { width: 512, height: 512 };
 async function fetchInputRes() {
   try {
     const j = await (await fetch("/healthz")).json();
     if (j.resolution && j.resolution.width && j.resolution.height) inputRes = j.resolution;
-  } catch { /* healthz unreachable — keep fallback */ }
+  } catch { /* keep fallback */ }
   log(`capture resolution: ${inputRes.width}x${inputRes.height} (server input res)`, "info");
 }
 
-// Once the real output dimensions are known, sanity-check the capture size:
-// FluxRT's flow-upscaler streams 2x the pipeline input, so output = 2x healthz
-// res means capture should stay at half the output (i.e. the healthz res).
-// Any other mismatch adapts capture to the output (sd-webrtc: output == input).
 function adaptToOutput(w, h) {
   if (!w || !h) return;
   const isDouble = Math.abs(w / 2 - inputRes.width) <= 16 && Math.abs(h / 2 - inputRes.height) <= 16;
-  if (isDouble) {
-    log(`output ${w}x${h} = 2x input ${inputRes.width}x${inputRes.height} (upscaler on) — capture stays at half output`, "info");
-    return;
-  }
+  if (isDouble) { log(`output ${w}x${h} = 2x input (upscaler on) — capture stays at half output`, "info"); return; }
   if (w === inputRes.width && h === inputRes.height) return;
   inputRes = { width: w, height: h };
   if (srcCanvas) { srcCanvas.width = w; srcCanvas.height = h; }
@@ -133,14 +177,26 @@ function canvasSource() {
   return cv.captureStream(15);
 }
 
-async function getSource() {
-  return $("source").value === "camera"
-    ? navigator.mediaDevices.getUserMedia({
+async function ensureSource() {
+  if (srcStream) return srcStream;
+  await fetchInputRes();
+  srcStream = $("source").value === "camera"
+    ? await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: inputRes.width }, height: { ideal: inputRes.height } },
       })
     : canvasSource();
+  $("in").srcObject = srcStream;
+  return srcStream;
 }
 
+function dropSource() {
+  if (srcStream) { srcStream.getTracks().forEach(t => t.stop()); srcStream = null; }
+  clearInterval(canvasTimer);
+  srcCanvas = null;
+  $("in").srcObject = null;
+}
+
+// ── signaling ────────────────────────────────────────────────────────────────
 async function nonTrickle(pc) {
   await pc.setLocalDescription(await pc.createOffer());
   await new Promise(res => {
@@ -165,11 +221,12 @@ async function whipWhepExchange(path, pc) {
   });
   log(`POST ${path} ${r.status}`, r.status === 201 ? "ok" : "err");
   if (r.status !== 201) { log(await r.text(), "err"); throw new Error("signaling failed"); }
-  sessions.push(r.headers.get("Location"));
-  log(`session: ${r.headers.get("Location")}`, "ok");
+  const session = r.headers.get("Location");
+  log(`session: ${session}`, "ok");
   const answer = await r.text();
   log(`answer candidates — ${candStats(answer)}`, "info");
   await pc.setRemoteDescription({ type: "answer", sdp: answer });
+  return session;
 }
 
 async function offerExchange(pc) {
@@ -190,126 +247,151 @@ function watchStates(pc, label) {
     pc.connectionState === "connected" ? "ok" : pc.connectionState === "failed" ? "err" : "info");
 }
 
-function countFrame() {
-  frames++;
-  if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
-}
-
-function startStats() {
-  // in  = what we actually capture and send (track settings + framesSent rate)
-  // out = what comes back (video dims + framesDecoded rate)
-  // delay = one full frame trip, decomposed:
-  //   net    = network both ways (candidate-pair STUN RTT; whip+whep mode
-  //            averages the two PCs' RTTs since each leg rides one PC)
-  //   proc   = server per-frame processing from /healthz (worker_ms on
-  //            sd-webrtc, proc_time_ms on FluxRT)
-  //   client = receive tail: avg jitter-buffer wait + decode per frame
-  // '~' because sender/receiver encode and pacing aren't observable.
-  frames = 0;
-  let prev = null, procMs = null;
-  if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
-  statsTimer = setInterval(async () => {
-    try {
-      const j = await (await fetch("/healthz", { cache: "no-store" })).json();
-      procMs = j.worker_ms ?? j.proc_time_ms ?? null;
-    } catch { procMs = null; }
-    const cur = { t: 0, fs: 0, fd: 0, jbD: 0, jbN: 0, decT: 0, decN: 0, rtts: [] };
-    for (const pc of pcs) {
-      (await pc.getStats()).forEach(s => {
-        if (s.type === "outbound-rtp" && s.kind === "video") {
-          cur.fs += s.framesSent || 0;
-          cur.t = Math.max(cur.t, s.timestamp);
-        } else if (s.type === "inbound-rtp" && s.kind === "video") {
-          cur.fd += s.framesDecoded || 0;
-          cur.jbD += s.jitterBufferDelay || 0; cur.jbN += s.jitterBufferEmittedCount || 0;
-          cur.decT += s.totalDecodeTime || 0; cur.decN += s.framesDecoded || 0;
-          cur.t = Math.max(cur.t, s.timestamp);
-        } else if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated
-                   && typeof s.currentRoundTripTime === "number") {
-          cur.rtts.push(s.currentRoundTripTime);
-        }
-      });
-    }
-    const set = srcStream && srcStream.getVideoTracks()[0]?.getSettings();
-    let inFps = "-", outFps = "-";
-    if (prev && cur.t > prev.t) {
-      const dt = (cur.t - prev.t) / 1000;
-      inFps = Math.round((cur.fs - prev.fs) / dt);
-      outFps = Math.round((cur.fd - prev.fd) / dt);
-    }
-    let line = `in ${set ? set.width + "x" + set.height : "-"} @${inFps}fps`
-             + ` · out ${$("out").videoWidth}x${$("out").videoHeight} @${outFps}fps`;
-    const net = cur.rtts.length ? (cur.rtts.reduce((a, b) => a + b) / cur.rtts.length) * 1000 : null;
-    const client = cur.jbN ? ((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000 : null;
-    if (net != null || procMs != null || client != null) {
-      const total = Math.round((net || 0) + (procMs || 0) + (client || 0));
-      line += ` · delay ~${total}ms (net ${net != null ? net | 0 : "?"}`
-            + ` + proc ${procMs != null ? Math.round(procMs) : "?"}`
-            + ` + client ${client != null ? client | 0 : "?"})`;
-    }
-    prev = cur;
-    $("stats").textContent = line;
-  }, 1000);
-}
-
-async function connect() {
-  $("go").disabled = true; $("stop").disabled = false;
-  const mode = $("mode").value;
+async function delSession(url) {
+  if (!url) return;
   try {
-    await fetchInputRes();
-    srcStream = await getSource();
-    $("in").srcObject = srcStream;
-    const track = srcStream.getVideoTracks()[0];
+    const r = await fetch(url, { method: "DELETE" });
+    log(`DELETE ${url} ${r.status}`, r.status === 200 ? "ok" : "err");
+  } catch (e) { log(`DELETE failed: ${e.message}`, "err"); }
+}
 
-    if (mode === "sendrecv") {
-      // realtime-client style: one PC, one sendrecv m-line, JSON /offer signaling
-      const pc = new RTCPeerConnection(ICE);
-      pcs = [pc];
-      watchStates(pc, "sendrecv");
-      pc.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
-      pc.addTransceiver(track, { direction: "sendrecv", streams: [srcStream] });
-      await nonTrickle(pc);
-      await offerExchange(pc);
+// ── pane toggles ─────────────────────────────────────────────────────────────
+async function ensureSendrecv() {
+  if (S.srPc) return;
+  const stream = await ensureSource();
+  const pc = new RTCPeerConnection(ICE);
+  S.srPc = pc;
+  watchStates(pc, "sendrecv");
+  pc.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
+  const tr = pc.addTransceiver(stream.getVideoTracks()[0], { direction: "sendrecv", streams: [stream] });
+  S.srSender = tr.sender;
+  await nonTrickle(pc);
+  await offerExchange(pc);
+  S.inputOn = true;
+  S.outputOn = true;
+}
+
+async function toggleInput() {
+  try {
+    if ($("mode").value === "sendrecv") {
+      if (!S.srPc) { await ensureSendrecv(); }
+      else if (S.inputOn) { await S.srSender.replaceTrack(null); S.inputOn = false; log("input paused (track detached)", "info"); }
+      else { const s = await ensureSource(); await S.srSender.replaceTrack(s.getVideoTracks()[0]); S.inputOn = true; log("input resumed", "info"); }
+      if (!S.inputOn && !S.outputOn) await teardown();
     } else {
-      // standards pair: sendonly PC -> /whip, recvonly PC -> /whep
-      const pub = new RTCPeerConnection(ICE);
-      const view = new RTCPeerConnection(ICE);
-      pcs = [pub, view];
-      watchStates(pub, "whip");
-      watchStates(view, "whep");
-      pub.addTrack(track, srcStream);
-      view.addTransceiver("video", { direction: "recvonly" });
-      view.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
-      await nonTrickle(pub);
-      await whipWhepExchange("/whip", pub);
-      await nonTrickle(view);
-      await whipWhepExchange("/whep", view);
+      if (!S.inputOn) {
+        const stream = await ensureSource();
+        const pc = new RTCPeerConnection(ICE);
+        S.pubPc = pc;
+        watchStates(pc, "whip");
+        pc.addTrack(stream.getVideoTracks()[0], stream);
+        await nonTrickle(pc);
+        S.inSession = await whipWhepExchange("/whip", pc);
+        S.inputOn = true;
+      } else {
+        await delSession(S.inSession); S.inSession = null;
+        if (S.pubPc) { S.pubPc.close(); S.pubPc = null; }
+        if (!S.outputOn) dropSource();
+        S.inputOn = false;
+      }
     }
-    startStats();
-  } catch (e) {
-    log(`ERROR: ${e.message}`, "err");
-    disconnect();
-  }
+  } catch (e) { log(`ERROR: ${e.message}`, "err"); }
+  icons();
 }
 
-async function disconnect() {
-  clearInterval(statsTimer);
-  for (const s of sessions.splice(0)) {
-    try {
-      const r = await fetch(s, { method: "DELETE" });
-      log(`DELETE ${s} ${r.status}`, r.status === 200 ? "ok" : "err");
-    } catch (e) { log(`DELETE failed: ${e.message}`, "err"); }
-  }
-  for (const pc of pcs.splice(0)) { try { pc.close(); } catch {} }
-  if (srcStream) { srcStream.getTracks().forEach(t => t.stop()); srcStream = null; }
-  clearInterval(canvasTimer);
-  srcCanvas = null;
-  $("in").srcObject = null;
+async function toggleOutput() {
+  try {
+    if ($("mode").value === "sendrecv") {
+      if (!S.srPc) { await ensureSendrecv(); }
+      else if (S.outputOn) { $("out").pause(); S.outputOn = false; }
+      else { $("out").play().catch(() => {}); S.outputOn = true; }
+      if (!S.inputOn && !S.outputOn) await teardown();
+    } else {
+      if (!S.outputOn) {
+        const pc = new RTCPeerConnection(ICE);
+        S.viewPc = pc;
+        watchStates(pc, "whep");
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
+        await nonTrickle(pc);
+        S.outSession = await whipWhepExchange("/whep", pc);
+        S.outputOn = true;
+      } else {
+        await delSession(S.outSession); S.outSession = null;
+        if (S.viewPc) { S.viewPc.close(); S.viewPc = null; }
+        $("out").srcObject = null;
+        S.outputOn = false;
+      }
+    }
+  } catch (e) { log(`ERROR: ${e.message}`, "err"); }
+  icons();
+}
+
+async function teardown() {
+  await delSession(S.inSession); S.inSession = null;
+  await delSession(S.outSession); S.outSession = null;
+  for (const k of ["pubPc", "viewPc", "srPc"]) { if (S[k]) { try { S[k].close(); } catch {} S[k] = null; } }
+  S.srSender = null;
+  S.inputOn = S.outputOn = false;
+  dropSource();
   $("out").srcObject = null;
-  $("stats").textContent = "idle";
-  $("go").disabled = false; $("stop").disabled = true;
+  icons();
+  log("disconnected", "info");
 }
 
+// ── stats (always ticking; idle line when nothing live) ──────────────────────
+function livePcs() { return [S.pubPc, S.viewPc, S.srPc].filter(Boolean); }
+
+function countFrame() { frames++; $("out").requestVideoFrameCallback(countFrame); }
+if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
+
+let prev = null;
+statsTimer = setInterval(async () => {
+  const pcs = livePcs();
+  if (!pcs.length) { $("stats").textContent = "idle"; prev = null; return; }
+  try {
+    const j = await (await fetch("/healthz", { cache: "no-store" })).json();
+    procMs = j.worker_ms ?? j.proc_time_ms ?? null;
+  } catch { procMs = null; }
+  const cur = { t: 0, fs: 0, fd: 0, jbD: 0, jbN: 0, decT: 0, decN: 0, rtts: [], f: frames };
+  for (const pc of pcs) {
+    (await pc.getStats()).forEach(s => {
+      if (s.type === "outbound-rtp" && s.kind === "video") {
+        cur.fs += s.framesSent || 0;
+        cur.t = Math.max(cur.t, s.timestamp);
+      } else if (s.type === "inbound-rtp" && s.kind === "video") {
+        cur.fd += s.framesDecoded || 0;
+        cur.jbD += s.jitterBufferDelay || 0; cur.jbN += s.jitterBufferEmittedCount || 0;
+        cur.decT += s.totalDecodeTime || 0; cur.decN += s.framesDecoded || 0;
+        cur.t = Math.max(cur.t, s.timestamp);
+      } else if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated
+                 && typeof s.currentRoundTripTime === "number") {
+        cur.rtts.push(s.currentRoundTripTime);
+      }
+    });
+  }
+  const set = srcStream && srcStream.getVideoTracks()[0]?.getSettings();
+  let inFps = "-", outFps = "-";
+  if (prev && cur.t > prev.t) {
+    const dt = (cur.t - prev.t) / 1000;
+    inFps = Math.round((cur.fs - prev.fs) / dt);
+    outFps = Math.round((cur.fd - prev.fd) / dt);
+  }
+  let line = `in ${set ? set.width + "x" + set.height : "-"} @${inFps}fps`
+           + ` · out ${$("out").videoWidth}x${$("out").videoHeight} @${outFps}fps`;
+  const net = cur.rtts.length ? (cur.rtts.reduce((a, b) => a + b) / cur.rtts.length) * 1000 : null;
+  const client = cur.jbN ? ((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000 : null;
+  if (net != null || procMs != null || client != null) {
+    const total = Math.round((net || 0) + (procMs || 0) + (client || 0));
+    line += ` · delay ~${total}ms (net ${net != null ? net | 0 : "?"}`
+          + ` + proc ${procMs != null ? Math.round(procMs) : "?"}`
+          + ` + client ${client != null ? client | 0 : "?"})`;
+  }
+  prev = cur;
+  $("stats").textContent = line;
+}, 1000);
+
+// ── view + params ────────────────────────────────────────────────────────────
 function applyMix() {
   const p = $("mix").value;
   $("stage").style.setProperty("--mix", p + "%");
@@ -320,6 +402,13 @@ function setView() {
   $("stage").className = v;
   $("mix").style.display = v === "side" ? "none" : "";
   applyMix();
+}
+
+async function postParam(path, ok) {
+  try {
+    const r = await fetch(path, { method: "POST" });
+    log(`POST ${path} ${r.status}`, r.ok ? "ok" : "err");
+  } catch (e) { log(`${path} failed: ${e.message}`, "err"); }
 }
 
 async function sendPrompt() {
@@ -335,15 +424,19 @@ async function sendPrompt() {
   } catch (e) { log(`prompt failed: ${e.message}`, "err"); }
 }
 
-$("go").onclick = connect;
-$("stop").onclick = disconnect;
+$("ppIn").onclick = toggleInput;
+$("ppOut").onclick = toggleOutput;
+$("mode").onchange = () => teardown();
 $("view").onchange = setView;
 $("mix").oninput = applyMix;
 $("send").onclick = sendPrompt;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") sendPrompt(); });
+$("steps").onchange = () => { const v = parseInt($("steps").value); if (v >= 1 && v <= 8) postParam(`/steps?value=${v}`); };
+$("seed").onchange = () => { const v = parseInt($("seed").value); if (!isNaN(v)) postParam(`/seed?value=${v}`); };
 $("out").addEventListener("loadedmetadata", () => adaptToOutput($("out").videoWidth, $("out").videoHeight));
 $("out").addEventListener("resize", () => adaptToOutput($("out").videoWidth, $("out").videoHeight));
 setView();
+icons();
 </script>
 </body>
 </html>
