@@ -60,7 +60,7 @@
 </style>
 </head>
 <body>
-<h1>WebRTC test client</h1>
+<h1 id="title">WebRTC test client</h1>
 
 <div class="card">
   <label>mode</label>
@@ -534,13 +534,42 @@ function buildParams(engine) {
   }
 }
 
+// Title = engine · version · model · flags · resolution, from /healthz identity
+// fields (sd-webrtc snapshot: engine/model/cfg_type/v2v/cn; FluxRT: ref +
+// interp ratio). Shown in the tab title and the page heading.
+function describeServer(engine, j) {
+  const bits = [];
+  if (engine === "streamdiffusion") {
+    bits.push("StreamDiffusion");
+    if (j.engine) bits.push(j.engine);
+    if (j.model) bits.push(String(j.model).split(/[\\/]/).pop());
+    const flags = [];
+    if (j.cfg_type) flags.push("cfg:" + j.cfg_type);
+    if (j.v2v_enabled) flags.push("v2v");
+    if (j.cn_mode && j.cn_mode !== "off") flags.push("cn:" + j.cn_mode);
+    if (flags.length) bits.push(flags.join(" "));
+  } else {
+    bits.push("FluxRT");
+    const flags = [];
+    if (j.reference_enabled) flags.push("ref");
+    if (j.fps_pipeline > 0 && j.fps_interpolated > j.fps_pipeline * 1.5)
+      flags.push(`interp x${Math.round(j.fps_interpolated / j.fps_pipeline)}`);
+    if (flags.length) bits.push(flags.join(" "));
+  }
+  if (j.resolution && j.resolution.width) bits.push(`${j.resolution.width}x${j.resolution.height}`);
+  return bits.join(" · ");
+}
+
 (async () => {
-  let engine = "fluxrt";
+  let engine = "fluxrt", j = {};
   try {
-    const j = await (await fetch("/healthz")).json();
+    j = await (await fetch("/healthz")).json();
     if (String(j.backend || "").includes("streamdiffusion")) engine = "streamdiffusion";
   } catch { /* default */ }
-  log(`engine: ${engine}`, "info");
+  const desc = describeServer(engine, j);
+  document.title = `${desc} — WebRTC test`;
+  $("title").textContent = desc;
+  log(`server: ${desc}`, "info");
   buildParams(engine);
 })();
 
