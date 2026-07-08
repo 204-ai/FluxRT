@@ -50,7 +50,10 @@
                         width: 2px; background: #8cf; z-index: 3; pointer-events: none; }
   #stage.blend .cell.out video { opacity: var(--mixa, 0.5); }
 
-  #stats { color: #8cf; font: 12px/1.5 ui-monospace, monospace; }
+  #stats { color: #8cf; font: 12px/1.5 ui-monospace, monospace; display: flex; gap: 8px; }
+  #stats .l { flex: 1; text-align: left; }
+  #stats .c { flex: 1; text-align: center; }
+  #stats .r { flex: 1; text-align: right; }
   #log { background: #000; border: 1px solid #333; border-radius: 6px; padding: 8px; height: 200px;
          overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
   .err { color: #f66; } .ok { color: #6f6; } .info { color: #aaa; }
@@ -108,7 +111,7 @@
   </div>
 </div>
 
-<div id="stats">idle</div>
+<div id="stats"><span class="l" id="stIn">idle</span><span class="c" id="stMid"></span><span class="r" id="stOut"></span></div>
 <div id="log"></div>
 
 <script>
@@ -358,7 +361,11 @@ if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(count
 let prev = null;
 statsTimer = setInterval(async () => {
   const pcs = livePcs();
-  if (!pcs.length) { $("stats").textContent = "idle"; prev = null; return; }
+  if (!pcs.length) {
+    $("stIn").textContent = "idle"; $("stMid").textContent = ""; $("stOut").textContent = "";
+    prev = null;
+    return;
+  }
   try {
     const j = await (await fetch("/healthz", { cache: "no-store" })).json();
     procMs = j.worker_ms ?? j.proc_time_ms ?? null;
@@ -383,27 +390,30 @@ statsTimer = setInterval(async () => {
     });
   }
   const set = srcStream && srcStream.getVideoTracks()[0]?.getSettings();
-  let inFps = "-", outFps = "-", bw = "";
+  let inFps = "-", outFps = "-", up = "", down = "";
   if (prev && cur.t > prev.t) {
     const dt = (cur.t - prev.t) / 1000;
     inFps = Math.round((cur.fs - prev.fs) / dt);
     outFps = Math.round((cur.fd - prev.fd) / dt);
     const kbps = b => Math.round((b * 8) / 1000 / dt);
-    bw = ` · ↑${kbps(cur.bs - prev.bs)} ↓${kbps(cur.br - prev.br)} kbps`;
+    up = ` ↑${kbps(cur.bs - prev.bs)}kbps`;
+    down = ` ↓${kbps(cur.br - prev.br)}kbps`;
   }
-  let line = `in ${set ? set.width + "x" + set.height : "-"} @${inFps}fps`
-           + ` · out ${$("out").videoWidth}x${$("out").videoHeight} @${outFps}fps`
-           + bw;
+  $("stIn").textContent =
+    `in ${set ? set.width + "x" + set.height : "-"} @${inFps}fps${up}`;
+  $("stOut").textContent =
+    `out ${$("out").videoWidth}x${$("out").videoHeight} @${outFps}fps${down}`;
   const net = cur.rtts.length ? (cur.rtts.reduce((a, b) => a + b) / cur.rtts.length) * 1000 : null;
   const client = cur.jbN ? ((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000 : null;
   if (net != null || procMs != null || client != null) {
     const total = Math.round((net || 0) + (procMs || 0) + (client || 0));
-    line += ` · delay ~${total}ms (net ${net != null ? net | 0 : "?"}`
-          + ` + proc ${procMs != null ? Math.round(procMs) : "?"}`
-          + ` + client ${client != null ? client | 0 : "?"})`;
+    $("stMid").textContent = `delay ~${total}ms (net ${net != null ? net | 0 : "?"}`
+      + ` + proc ${procMs != null ? Math.round(procMs) : "?"}`
+      + ` + client ${client != null ? client | 0 : "?"})`;
+  } else {
+    $("stMid").textContent = "";
   }
   prev = cur;
-  $("stats").textContent = line;
 }, 1000);
 
 // ── view + params ────────────────────────────────────────────────────────────
