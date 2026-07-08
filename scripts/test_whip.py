@@ -53,8 +53,16 @@ def check(name: str, cond: bool, detail: str = ""):
     print(f"ok   {name}")
 
 
+_RGB = np.zeros((512, 512, 3), dtype=np.uint8)
+
+
 async def _counting_sink(frame) -> None:
+    """Counts sunk frames AND publishes like push_input_frame does (latest_rgb +
+    output_version bump) so the version-gated output tracks pace realistically."""
     sunk["n"] += 1
+    with run_webrtc.latest_lock:
+        run_webrtc.latest_rgb = _RGB
+        run_webrtc.output_version += 1
 
 
 class BlackTrack(VideoStreamTrack):
@@ -121,6 +129,35 @@ async def main():
     await wait_sunk_above(0, 15, "publisher A ingress")
     check("V17 ownership active", run_webrtc.ownership.is_active())
     check("V17 frames reach sink", True)
+
+    # V19: output fps == pipe fps — WHEP viewer capped high (?fps=60) so the
+    # output_version gate dominates; received frames over 4s should match the
+    # sink's processed-frame count over the same window.
+    pcv = RTCPeerConnection()
+    gotv = asyncio.get_event_loop().create_future()
+
+    @pcv.on("track")
+    def _on_vtrack(track):
+        if track.kind == "video" and not gotv.done():
+            gotv.set_result(track)
+
+    pcv.addTransceiver("video", direction="recvonly")
+    await pcv.setLocalDescription(await pcv.createOffer())
+    r = requests.post(f"{BASE}/whep?fps=60", data=pcv.localDescription.sdp.encode(),
+                      headers={"Content-Type": "application/sdp"}, timeout=10)
+    check("whep viewer during whip publish", r.status_code == 201, f"got {r.status_code}")
+    await pcv.setRemoteDescription(RTCSessionDescription(sdp=r.text, type="answer"))
+    vtrack = await asyncio.wait_for(gotv, 15)
+    await asyncio.wait_for(vtrack.recv(), 15)
+    s0, n = sunk["n"], 0
+    t_end = time.time() + 4
+    while time.time() < t_end:
+        await asyncio.wait_for(vtrack.recv(), 15)
+        n += 1
+    dsunk = sunk["n"] - s0
+    check("V19 output fps == pipe fps", dsunk > 0 and 0.6 <= n / dsunk <= 1.4,
+          f"recv {n} vs sunk {dsunk}")
+    await pcv.close()
 
     # V17: publisher B joins (waiter) and leaves — A keeps owning, sink keeps growing
     pc_b, loc_b = await whip_publish()
