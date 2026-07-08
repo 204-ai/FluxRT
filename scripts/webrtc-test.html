@@ -555,6 +555,7 @@ function syncParams(j) {
     if (!el || !c.hz || document.activeElement === el) continue;
     const v = c.hz(j);
     if (v === undefined || v === null) continue;
+    if (v === "" && c.def) continue;   // blank server prompt keeps the local default
     cfg[c.key] = c.kind === "toggle" ? !!v : v;
     if (c.kind === "toggle") {
       el.checked = !!v;
