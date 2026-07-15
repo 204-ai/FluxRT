@@ -49,6 +49,7 @@ class StreamProcessor:
         self.pack_is_ready = Value("b", False)
         self.last_processing_time = Value("f", 0.0)
         self.frame_written = Value("b", False)
+        self.frame_counter = Value("L", 0)   # increments per scheduler-written output frame
 
         self.model_inference_subprocess = ModelInferenceSubprocess(
             self.config,
@@ -71,6 +72,7 @@ class StreamProcessor:
                 self.pack_is_ready,
                 self.last_processing_time,
                 self.frame_written,
+                self.frame_counter,
             )
 
     def parse_config(self, config_path: str) -> dict:

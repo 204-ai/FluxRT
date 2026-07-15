@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebRTC test client</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; background: #111; color: #ddd;
+         display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
+  h1 { font-size: 16px; margin: 0; }
+  .card { background: #191b20; border: 1px solid #2a2d35; border-radius: 8px; padding: 10px 12px;
+          display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .card label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8cf; }
+  select, input { padding: 6px 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; }
+  input[type=number] { width: 72px; }
+  #prompt { flex: 1; min-width: 220px; }
+  /* engine param controls — one inline compartment per control, aligned */
+  .ctl { display: inline-flex; align-items: center; gap: 6px; }
+  .ctl input[type=range] { width: 110px; accent-color: #8cf; padding: 0; }
+  .ctl input[type=checkbox] { accent-color: #8cf; width: 15px; height: 15px; }
+  .ctl .val { font: 11px/1 ui-monospace, monospace; color: #aaa; min-width: 30px; }
+  .ctl.wide { flex: 1 1 100%; }
+  .ctl.wide input { flex: 1; }
+  button { padding: 6px 14px; background: #2a6; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+  #mix { width: 130px; accent-color: #8cf; }
+
+  #stage { display: flex; gap: 12px; flex-wrap: wrap; }
+  #stage .cell { flex: 1; min-width: 300px; }
+  #stage .cell h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8cf; margin: 0 0 6px; }
+  .vwrap { position: relative; }
+  video { width: 100%; background: #000; border: 1px solid #333; border-radius: 6px; display: block; }
+  /* subtle centered play/pause, revealed on hover (faint hint while stopped) */
+  /* subtle top-right per-pane status badge */
+  .badge { position: absolute; top: 6px; right: 6px; z-index: 5; font: 10px/1.6 ui-monospace, monospace;
+           color: #aaa; background: rgba(0,0,0,.55); padding: 1px 7px; border-radius: 8px;
+           border: 1px solid rgba(255,255,255,.12); pointer-events: none; }
+  .badge:empty { display: none; }
+  .badge.live { color: #6f6; }
+  .badge.busy { color: #fc6; }
+  .pp { position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; border-radius: 50%;
+        background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25); color: #fff;
+        font-size: 18px; line-height: 1; display: flex; align-items: center; justify-content: center;
+        opacity: 0; transition: opacity .15s; padding: 0; z-index: 4; }
+  .vwrap:hover .pp { opacity: .95; }
+  .pp.stopped { opacity: .3; }
+  .vwrap:hover .pp.stopped { opacity: .95; }
+
+  /* split & blend: output overlays the input box exactly */
+  #stage.split, #stage.blend { display: block; position: relative; max-width: 720px; }
+  #stage.split .cell, #stage.blend .cell { min-width: 0; }
+  #stage.split .cell h2, #stage.blend .cell h2 { display: none; }
+  #stage.split .cell.out, #stage.blend .cell.out { position: absolute; inset: 0; }
+  #stage.split .cell.out .vwrap, #stage.blend .cell.out .vwrap { height: 100%; }
+  #stage.split .cell.out video, #stage.blend .cell.out video { height: 100%; object-fit: cover; }
+  #stage.split .cell.out video { clip-path: inset(0 0 0 var(--mix, 50%)); }
+  #stage.split::after { content: ""; position: absolute; top: 0; bottom: 0; left: var(--mix, 50%);
+                        width: 2px; background: #8cf; z-index: 3; pointer-events: none; }
+  #stage.blend .cell.out video { opacity: var(--mixa, 0.5); }
+
+  #stats { color: #8cf; font: 12px/1.5 ui-monospace, monospace; display: flex; gap: 8px; }
+  #stats .l { flex: 1; text-align: left; }
+  #stats .c { flex: 1; text-align: center; }
+  #stats .r { flex: 1; text-align: right; }
+  #log { background: #000; border: 1px solid #333; border-radius: 6px; padding: 8px; height: 200px;
+         overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+  .err { color: #f66; } .ok { color: #6f6; } .info { color: #aaa; }
+</style>
+</head>
+<body>
+<h1 id="title">WebRTC test client</h1>
+
+<div class="card">
+  <label>mode</label>
+  <select id="mode">
+    <option value="whipwhep">whip + whep (2 PCs)</option>
+    <option value="sendrecv">sendrecv /offer (1 PC)</option>
+  </select>
+  <label>source</label>
+  <select id="source">
+    <option value="ball">test: gradient ball</option>
+    <option value="checker">test: checker drift</option>
+    <option value="stripes">test: rotating stripes</option>
+    <option value="shapes">test: bouncing shapes</option>
+    <option value="text">test: scrolling text</option>
+    <option value="camera">camera</option>
+  </select>
+  <label>view</label>
+  <select id="view">
+    <option value="side">side by side</option>
+    <option value="split">split</option>
+    <option value="blend">blend</option>
+  </select>
+  <input type="range" id="mix" min="0" max="100" value="50" style="display:none"
+         title="split position / blend amount">
+  <label>out w</label>
+  <select id="outw" title="per-session WHEP downscale (?w=) — whip+whep mode only">
+    <option value="">native</option>
+    <option>768</option>
+    <option>640</option>
+    <option>512</option>
+    <option>384</option>
+    <option>256</option>
+  </select>
+</div>
+
+<div id="stage" class="side">
+  <div class="cell in">
+    <h2>input — published</h2>
+    <div class="vwrap">
+      <video id="in" autoplay muted playsinline></video>
+      <span class="badge" id="badgeIn"></span>
+      <button class="pp stopped" id="ppIn" title="send input">▶</button>
+    </div>
+  </div>
+  <div class="cell out">
+    <h2>output — received</h2>
+    <div class="vwrap">
+      <video id="out" autoplay muted playsinline></video>
+      <span class="badge" id="badgeOut"></span>
+      <button class="pp stopped" id="ppOut" title="listen">▶</button>
+    </div>
+  </div>
+</div>
+
+<div id="stats"><span class="l" id="stIn">idle</span><span class="c" id="stMid"></span><span class="r" id="stOut"></span></div>
+<div class="card" id="params"><span class="info">detecting engine…</span></div>
+<div id="log"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+// Session state. whipwhep: pub/view PCs are independent, each pane's play/pause
+// creates/DELETEs its own session. sendrecv: one PC carries both directions —
+// input pause detaches the sender track (replaceTrack(null)), output pause
+// halts rendering; both paused -> full teardown. No global connect button.
+const S = {
+  pubPc: null, viewPc: null, srPc: null, srSender: null,
+  inSession: null, outSession: null,
+  inputOn: false, outputOn: false,
+};
+let srcStream = null, srcCanvas = null, canvasTimer = null;
+let frames = 0, statsTimer = null, procMs = null;
+
+function log(msg, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = `${new Date().toISOString().slice(11, 23)}  ${msg}`;
+  $("log").appendChild(line);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function icons() {
+  $("ppIn").textContent = S.inputOn ? "⏸" : "▶";
+  $("ppIn").classList.toggle("stopped", !S.inputOn);
+  $("ppOut").textContent = S.outputOn ? "⏸" : "▶";
+  $("ppOut").classList.toggle("stopped", !S.outputOn);
+}
+
+// ── capture ──────────────────────────────────────────────────────────────────
+let inputRes = { width: 512, height: 512 };
+async function fetchInputRes() {
+  try {
+    const j = await (await fetch("/healthz")).json();
+    if (j.resolution && j.resolution.width && j.resolution.height) inputRes = j.resolution;
+  } catch { /* keep fallback */ }
+  log(`capture resolution: ${inputRes.width}x${inputRes.height} (server input res)`, "info");
+}
+
+function adaptToOutput(w, h) {
+  if (!w || !h) return;
+  if ($("outw").value) return;   // viewer-side ?w= downscale — not the pipeline's real output size
+  const isDouble = Math.abs(w / 2 - inputRes.width) <= 16 && Math.abs(h / 2 - inputRes.height) <= 16;
+  if (isDouble) { log(`output ${w}x${h} = 2x input (upscaler on) — capture stays at half output`, "info"); return; }
+  if (w === inputRes.width && h === inputRes.height) return;
+  inputRes = { width: w, height: h };
+  if (srcCanvas) { srcCanvas.width = w; srcCanvas.height = h; }
+  const t = srcStream && srcStream.getVideoTracks()[0];
+  if (t && t.applyConstraints)
+    t.applyConstraints({ width: { ideal: w }, height: { ideal: h } }).catch(() => {});
+  log(`input adapted to output ${w}x${h}`, "info");
+}
+
+// Test patterns — deliberately high-contrast so structure survives diffusion.
+const PATTERNS = {
+  ball(ctx, cv, t) {
+    const g = ctx.createLinearGradient(0, 0, cv.width, cv.height);
+    g.addColorStop(0, `hsl(${(t * 40) % 360},95%,55%)`);
+    g.addColorStop(1, `hsl(${(t * 40 + 180) % 360},95%,12%)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, cv.width, cv.height);
+    const x = (Math.sin(t) * 0.4 + 0.5) * cv.width, y = (Math.cos(t * 1.3) * 0.4 + 0.5) * cv.height;
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x, y, 44, 0, 7); ctx.fill();
+    ctx.lineWidth = 6; ctx.strokeStyle = "#000"; ctx.stroke();
+    ctx.fillStyle = "#000"; ctx.fillRect(12, cv.height - 54, 200, 42);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 28px monospace";
+    ctx.fillText("TEST " + t.toFixed(1) + "s", 20, cv.height - 24);
+  },
+  checker(ctx, cv, t) {
+    const s = (cv.width / 8) * (0.8 + 0.4 * Math.sin(t * 0.7));
+    const off = (t * 60) % (s * 2);
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = "#fff";
+    for (let y = -2; y * s < cv.height + s * 2; y++)
+      for (let x = -2; x * s < cv.width + s * 2; x++)
+        if ((x + y) & 1) ctx.fillRect(x * s - off, y * s - off, s, s);
+  },
+  stripes(ctx, cv, t) {
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.save();
+    ctx.translate(cv.width / 2, cv.height / 2);
+    ctx.rotate(t * 0.4);
+    const w = 36, L = Math.hypot(cv.width, cv.height);
+    ctx.fillStyle = "#fff";
+    for (let x = -L; x < L; x += w * 2) ctx.fillRect(x, -L, w, 2 * L);
+    ctx.restore();
+  },
+  shapes(ctx, cv, t) {
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
+    const P = [["#f22", 1.0, 0], ["#2f6", 1.4, 2], ["#28f", 0.8, 4]];
+    P.forEach(([c, sp, ph], i) => {
+      const x = (Math.sin(t * sp + ph) * 0.4 + 0.5) * cv.width;
+      const y = (Math.cos(t * sp * 1.2 + ph) * 0.4 + 0.5) * cv.height;
+      ctx.fillStyle = c;
+      if (i === 0) { ctx.beginPath(); ctx.arc(x, y, 42, 0, 7); ctx.fill(); }
+      else if (i === 1) ctx.fillRect(x - 38, y - 38, 76, 76);
+      else {
+        ctx.beginPath(); ctx.moveTo(x, y - 46); ctx.lineTo(x + 42, y + 34);
+        ctx.lineTo(x - 42, y + 34); ctx.closePath(); ctx.fill();
+      }
+    });
+  },
+  text(ctx, cv, t) {
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, cv.height * 0.40, cv.width, cv.height * 0.20);
+    ctx.font = "bold 64px monospace";
+    const msg = "WEBRTC TEST ● ";
+    const w = ctx.measureText(msg).width;
+    const off = (t * 120) % w;
+    ctx.fillStyle = "#fff"; ctx.fillText(msg.repeat(4), -off, cv.height * 0.25);
+    ctx.fillStyle = "#000"; ctx.fillText(msg.repeat(4), -off, cv.height * 0.54);
+    ctx.fillStyle = "#fff"; ctx.fillText(msg.repeat(4), -off, cv.height * 0.85);
+  },
+};
+
+function canvasSource(kind) {
+  const cv = document.createElement("canvas");
+  srcCanvas = cv;
+  cv.width = inputRes.width; cv.height = inputRes.height;
+  const ctx = cv.getContext("2d");
+  const draw = PATTERNS[kind] || PATTERNS.ball;
+  let t = 0;
+  canvasTimer = setInterval(() => { t += 1 / 15; draw(ctx, cv, t); }, 1000 / 15);
+  return cv.captureStream(15);
+}
+
+async function ensureSource() {
+  if (srcStream) return srcStream;
+  await fetchInputRes();
+  const src = $("source").value;
+  srcStream = src === "camera"
+    ? await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: inputRes.width }, height: { ideal: inputRes.height } },
+      })
+    : canvasSource(src);
+  $("in").srcObject = srcStream;
+  return srcStream;
+}
+
+function dropSource() {
+  if (srcStream) { srcStream.getTracks().forEach(t => t.stop()); srcStream = null; }
+  clearInterval(canvasTimer);
+  srcCanvas = null;
+  $("in").srcObject = null;
+}
+
+// ── signaling ────────────────────────────────────────────────────────────────
+async function nonTrickle(pc) {
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(res => {
+    if (pc.iceGatheringState === "complete") return res();
+    pc.addEventListener("icegatheringstatechange",
+      () => pc.iceGatheringState === "complete" && res());
+    setTimeout(res, 2000);
+  });
+}
+
+function candStats(sdp) {
+  const kinds = { host: 0, srflx: 0, relay: 0 };
+  for (const m of sdp.matchAll(/typ (host|srflx|relay)/g)) kinds[m[1]]++;
+  return `host:${kinds.host} srflx:${kinds.srflx} relay:${kinds.relay}`;
+}
+
+async function whipWhepExchange(path, pc) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: pc.localDescription.sdp,
+  });
+  log(`POST ${path} ${r.status}`, r.status === 201 ? "ok" : "err");
+  if (r.status !== 201) { log(await r.text(), "err"); throw new Error("signaling failed"); }
+  const session = r.headers.get("Location");
+  log(`session: ${session}`, "ok");
+  const answer = await r.text();
+  log(`answer candidates — ${candStats(answer)}`, "info");
+  await pc.setRemoteDescription({ type: "answer", sdp: answer });
+  return session;
+}
+
+async function offerExchange(pc) {
+  const r = await fetch("/offer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+  });
+  log(`POST /offer ${r.status}`, r.ok ? "ok" : "err");
+  if (!r.ok) { log(await r.text(), "err"); throw new Error("signaling failed"); }
+  const ans = await r.json();
+  log(`answer candidates — ${candStats(ans.sdp)}`, "info");
+  await pc.setRemoteDescription(ans);
+}
+
+function watchStates(pc, label) {
+  pc.onconnectionstatechange = () => log(`${label}: ${pc.connectionState}`,
+    pc.connectionState === "connected" ? "ok" : pc.connectionState === "failed" ? "err" : "info");
+}
+
+async function delSession(url) {
+  if (!url) return;
+  try {
+    const r = await fetch(url, { method: "DELETE" });
+    log(`DELETE ${url} ${r.status}`, r.status === 200 ? "ok" : "err");
+  } catch (e) { log(`DELETE failed: ${e.message}`, "err"); }
+}
+
+// ── pane toggles ─────────────────────────────────────────────────────────────
+async function ensureSendrecv() {
+  if (S.srPc) return;
+  const stream = await ensureSource();
+  const pc = new RTCPeerConnection(ICE);
+  S.srPc = pc;
+  watchStates(pc, "sendrecv");
+  pc.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
+  const tr = pc.addTransceiver(stream.getVideoTracks()[0], { direction: "sendrecv", streams: [stream] });
+  S.srSender = tr.sender;
+  await nonTrickle(pc);
+  await offerExchange(pc);
+  S.inputOn = true;
+  S.outputOn = true;
+}
+
+async function toggleInput() {
+  try {
+    if ($("mode").value === "sendrecv") {
+      if (!S.srPc) { await ensureSendrecv(); }
+      else if (S.inputOn) { await S.srSender.replaceTrack(null); S.inputOn = false; log("input paused (track detached)", "info"); }
+      else { const s = await ensureSource(); await S.srSender.replaceTrack(s.getVideoTracks()[0]); S.inputOn = true; log("input resumed", "info"); }
+      if (!S.inputOn && !S.outputOn) await teardown();
+    } else {
+      if (!S.inputOn) {
+        const stream = await ensureSource();
+        const pc = new RTCPeerConnection(ICE);
+        S.pubPc = pc;
+        watchStates(pc, "whip");
+        pc.addTrack(stream.getVideoTracks()[0], stream);
+        await nonTrickle(pc);
+        S.inSession = await whipWhepExchange("/whip", pc);
+        S.inputOn = true;
+      } else {
+        await delSession(S.inSession); S.inSession = null;
+        if (S.pubPc) { S.pubPc.close(); S.pubPc = null; }
+        if (!S.outputOn) dropSource();
+        S.inputOn = false;
+      }
+    }
+  } catch (e) { log(`ERROR: ${e.message}`, "err"); }
+  icons();
+}
+
+async function toggleOutput() {
+  try {
+    if ($("mode").value === "sendrecv") {
+      if (!S.srPc) { await ensureSendrecv(); }
+      else if (S.outputOn) { $("out").pause(); S.outputOn = false; }
+      else { $("out").play().catch(() => {}); S.outputOn = true; }
+      if (!S.inputOn && !S.outputOn) await teardown();
+    } else {
+      if (!S.outputOn) {
+        const pc = new RTCPeerConnection(ICE);
+        S.viewPc = pc;
+        watchStates(pc, "whep");
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.ontrack = e => { if (e.streams[0]) $("out").srcObject = e.streams[0]; };
+        await nonTrickle(pc);
+        const w = $("outw").value;
+        S.outSession = await whipWhepExchange("/whep" + (w ? `?w=${w}` : ""), pc);
+        S.outputOn = true;
+      } else {
+        await delSession(S.outSession); S.outSession = null;
+        if (S.viewPc) { S.viewPc.close(); S.viewPc = null; }
+        $("out").srcObject = null;
+        S.outputOn = false;
+      }
+    }
+  } catch (e) { log(`ERROR: ${e.message}`, "err"); }
+  icons();
+}
+
+async function teardown() {
+  await delSession(S.inSession); S.inSession = null;
+  await delSession(S.outSession); S.outSession = null;
+  for (const k of ["pubPc", "viewPc", "srPc"]) { if (S[k]) { try { S[k].close(); } catch {} S[k] = null; } }
+  S.srSender = null;
+  S.inputOn = S.outputOn = false;
+  dropSource();
+  $("out").srcObject = null;
+  icons();
+  log("disconnected", "info");
+}
+
+// ── stats (always ticking; idle line when nothing live) ──────────────────────
+function livePcs() { return [S.pubPc, S.viewPc, S.srPc].filter(Boolean); }
+
+function countFrame() { frames++; $("out").requestVideoFrameCallback(countFrame); }
+if ($("out").requestVideoFrameCallback) $("out").requestVideoFrameCallback(countFrame);
+
+let prev = null;
+statsTimer = setInterval(async () => {
+  const pcs = livePcs();
+  if (!pcs.length) {
+    $("stIn").textContent = "idle"; $("stMid").textContent = ""; $("stOut").textContent = "";
+    prev = null;
+    return;
+  }
+  try {
+    const j = await (await fetch("/healthz", { cache: "no-store" })).json();
+    procMs = j.worker_ms ?? j.proc_time_ms ?? null;
+  } catch { procMs = null; }
+  const cur = { t: 0, fs: 0, bs: 0, fd: 0, br: 0, jbD: 0, jbN: 0, decT: 0, decN: 0, rtts: [], f: frames };
+  for (const pc of pcs) {
+    (await pc.getStats()).forEach(s => {
+      if (s.type === "outbound-rtp" && s.kind === "video") {
+        cur.fs += s.framesSent || 0;
+        cur.bs += (s.bytesSent || 0) + (s.headerBytesSent || 0);
+        cur.t = Math.max(cur.t, s.timestamp);
+      } else if (s.type === "inbound-rtp" && s.kind === "video") {
+        cur.fd += s.framesDecoded || 0;
+        cur.br += (s.bytesReceived || 0) + (s.headerBytesReceived || 0);
+        cur.jbD += s.jitterBufferDelay || 0; cur.jbN += s.jitterBufferEmittedCount || 0;
+        cur.decT += s.totalDecodeTime || 0; cur.decN += s.framesDecoded || 0;
+        cur.t = Math.max(cur.t, s.timestamp);
+      } else if (s.type === "candidate-pair" && s.state === "succeeded" && s.nominated
+                 && typeof s.currentRoundTripTime === "number") {
+        cur.rtts.push(s.currentRoundTripTime);
+      }
+    });
+  }
+  const set = srcStream && srcStream.getVideoTracks()[0]?.getSettings();
+  let inFps = "-", outFps = "-", up = "", down = "";
+  if (prev && cur.t > prev.t) {
+    const dt = (cur.t - prev.t) / 1000;
+    inFps = Math.round((cur.fs - prev.fs) / dt);
+    outFps = Math.round((cur.fd - prev.fd) / dt);
+    const kbps = b => Math.round((b * 8) / 1000 / dt);
+    up = ` ↑${kbps(cur.bs - prev.bs)}kbps`;
+    down = ` ↓${kbps(cur.br - prev.br)}kbps`;
+  }
+  $("stIn").textContent =
+    `in ${set ? set.width + "x" + set.height : "-"} @${inFps}fps${up}`;
+  $("stOut").textContent =
+    `out ${$("out").videoWidth}x${$("out").videoHeight} @${outFps}fps${down}`;
+  const net = cur.rtts.length ? (cur.rtts.reduce((a, b) => a + b) / cur.rtts.length) * 1000 : null;
+  const client = cur.jbN ? ((cur.jbD / cur.jbN) + (cur.decN ? cur.decT / cur.decN : 0)) * 1000 : null;
+  if (net != null || procMs != null || client != null) {
+    const total = Math.round((net || 0) + (procMs || 0) + (client || 0));
+    $("stMid").textContent = `delay ~${total}ms (net ${net != null ? net | 0 : "?"}`
+      + ` + proc ${procMs != null ? Math.round(procMs) : "?"}`
+      + ` + client ${client != null ? client | 0 : "?"})`;
+  } else {
+    $("stMid").textContent = "";
+  }
+  prev = cur;
+}, 1000);
+
+// ── view + params ────────────────────────────────────────────────────────────
+function applyMix() {
+  const p = $("mix").value;
+  $("stage").style.setProperty("--mix", p + "%");
+  $("stage").style.setProperty("--mixa", p / 100);
+}
+function setView() {
+  const v = $("view").value;
+  $("stage").className = v;
+  $("mix").style.display = v === "side" ? "none" : "";
+  applyMix();
+}
+
+// ── engine params — cloned from realtime-client engineControls.ts, sent via
+// REST (works in whip/whep mode where no ctrl DataChannel exists). Bundled
+// params (v2v on+strength, controlnet mode+scale) read their companion from
+// the live cfg, mirroring the clip behavior.
+async function postParam(path) {
+  try {
+    const r = await fetch(path, { method: "POST" });
+    log(`POST ${path} ${r.status}`, r.ok ? "ok" : "err");
+  } catch (e) { log(`${path} failed: ${e.message}`, "err"); }
+}
+async function postPrompt(v) {
+  if (!v.trim()) return;
+  try {
+    const r = await fetch("/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: v.trim() }),
+    });
+    log(`POST /prompt ${r.status}`, r.ok ? "ok" : "err");
+  } catch (e) { log(`prompt failed: ${e.message}`, "err"); }
+}
+
+const cfg = {};   // live values, for bundled messages
+// `hz` maps a /healthz payload to this control's server-side value — polled to
+// keep the inputs in sync with the server (other clients may change params).
+const ENGINE_CONTROLS = {
+  fluxrt: [
+    { key: "prompt", label: "prompt", kind: "text",
+      def: "make everything in frame stitched as dense embroidery, raised satin-stitch threads in saturated wool colors following every contour, visible linen weave texture",
+      hz: j => j.prompt, post: postPrompt },
+    { key: "seed", label: "seed", kind: "number", def: 0, hz: j => j.seed,
+      post: v => postParam(`/seed?value=${v}`) },
+    { key: "steps", label: "steps", kind: "number", min: 1, max: 8, def: 2, hz: j => j.steps,
+      post: v => postParam(`/steps?value=${v}`) },
+  ],
+  streamdiffusion: [
+    { key: "prompt", label: "prompt", kind: "text", def: "", hz: j => j.prompt, post: postPrompt },
+    { key: "seed", label: "seed", kind: "number", def: 789, hz: j => j.seed,
+      post: v => postParam(`/seed?value=${v}`) },
+    { key: "tindex", label: "steps", kind: "text", def: "5,10", small: true,
+      title: "t_index schedule: 1-8 comma-separated slots, each 1-49",
+      hz: j => Array.isArray(j.t_index) ? j.t_index.join(",") : undefined,
+      post: v => postParam(`/t_index?value=${encodeURIComponent(v)}`) },
+    { key: "guidance", label: "guidance", kind: "range", min: 1, max: 3, step: 0.1, def: 1,
+      hz: j => j.guidance, post: v => postParam(`/guidance?value=${v}`) },
+    { key: "delta", label: "delta", kind: "range", min: 0, max: 1.5, step: 0.05, def: 0.7,
+      hz: j => j.delta, post: v => postParam(`/delta?value=${v}`) },
+    { key: "v2v", label: "v2v", kind: "toggle", def: true, hz: j => j.v2v_enabled,
+      post: v => postParam(`/v2v?on=${v ? 1 : 0}&strength=${cfg.v2vStrength ?? 0.2}`) },
+    { key: "v2vStrength", label: "v2v str", kind: "range", min: 0, max: 1, step: 0.05, def: 0.2,
+      hz: j => j.v2v_strength,
+      post: v => postParam(`/v2v?on=${cfg.v2v ? 1 : 0}&strength=${v}`) },
+    { key: "cnMode", label: "controlnet", kind: "select", def: "off",
+      options: ["off", "canny", "openpose", "depth"],
+      hz: j => j.cn_mode,
+      post: v => postParam(`/controlnet?mode=${v}&scale=${cfg.cnScale ?? 1.2}`) },
+    { key: "cnScale", label: "cn weight", kind: "range", min: 0, max: 2, step: 0.05, def: 1.2,
+      hz: j => j.cn_scale,
+      post: v => postParam(`/controlnet?mode=${cfg.cnMode ?? "off"}&scale=${v}`) },
+  ],
+};
+
+let activeControls = [];
+const els = {};   // control key -> input element (el._val = range readout span)
+
+function buildParams(engine) {
+  const card = $("params");
+  card.innerHTML = "";
+  activeControls = ENGINE_CONTROLS[engine];
+  for (const c of activeControls) {
+    cfg[c.key] = c.def;
+    const wrap = document.createElement("span");
+    wrap.className = "ctl" + (c.kind === "text" && !c.small ? " wide" : "");
+    const lab = document.createElement("label");
+    lab.textContent = c.label;
+    wrap.appendChild(lab);
+    let el, val;
+    const apply = v => { cfg[c.key] = v; c.post(v); };
+    if (c.kind === "text") {
+      el = document.createElement("input");
+      el.type = "text"; el.value = c.def;
+      if (c.small) el.style.width = "80px";
+      if (c.title) el.title = c.title;
+      el.addEventListener("keydown", e => { if (e.key === "Enter") apply(el.value); });
+      el.addEventListener("blur", () => { if (el.value !== String(cfg[c.key])) apply(el.value); });
+    } else if (c.kind === "number") {
+      el = document.createElement("input");
+      el.type = "number"; el.value = c.def;
+      if (c.min != null) el.min = c.min;
+      if (c.max != null) el.max = c.max;
+      el.onchange = () => { const v = parseInt(el.value); if (!isNaN(v)) apply(v); };
+    } else if (c.kind === "range") {
+      el = document.createElement("input");
+      el.type = "range"; el.min = c.min; el.max = c.max; el.step = c.step; el.value = c.def;
+      val = document.createElement("span");
+      val.className = "val"; val.textContent = c.def;
+      el.oninput = () => { val.textContent = el.value; };
+      el.onchange = () => apply(parseFloat(el.value));
+    } else if (c.kind === "toggle") {
+      el = document.createElement("input");
+      el.type = "checkbox"; el.checked = c.def;
+      el.onchange = () => apply(el.checked);
+    } else if (c.kind === "select") {
+      el = document.createElement("select");
+      for (const o of c.options) {
+        const opt = document.createElement("option");
+        opt.value = o; opt.textContent = o;
+        el.appendChild(opt);
+      }
+      el.value = c.def;
+      el.onchange = () => apply(el.value);
+    }
+    wrap.appendChild(el);
+    if (val) { wrap.appendChild(val); el._val = val; }
+    els[c.key] = el;
+    card.appendChild(wrap);
+  }
+}
+
+// Per-pane badges. Input: warn when the server's input slot is already being
+// fed (by us or another publisher — FluxRT input_source/input_waiters,
+// sd-webrtc input_live). Output: this client's connection state.
+function syncBadges(j) {
+  const inB = $("badgeIn");
+  const otherStreaming =
+    (j.input_source === "peer" || j.input_live === true) && !S.inputOn;
+  if (S.inputOn) {
+    inB.textContent = "publishing";
+    inB.className = "badge live";
+  } else if (otherStreaming) {
+    inB.textContent = "input busy — another publisher" +
+      (j.input_waiters ? ` · ${j.input_waiters} waiting` : "");
+    inB.className = "badge busy";
+  } else {
+    inB.textContent = "";
+  }
+  const pc = $("mode").value === "sendrecv" ? S.srPc : S.viewPc;
+  const outB = $("badgeOut");
+  if (pc) {
+    outB.textContent = pc.connectionState;
+    outB.className = "badge" + (pc.connectionState === "connected" ? " live" : "");
+  } else {
+    outB.textContent = "";
+  }
+}
+
+// Keep inputs in sync with the server (another client may steer the same
+// pipeline) — but NEVER clobber the control being edited (focused).
+function syncParams(j) {
+  for (const c of activeControls) {
+    const el = els[c.key];
+    if (!el || !c.hz || document.activeElement === el) continue;
+    const v = c.hz(j);
+    if (v === undefined || v === null) continue;
+    if (v === "" && c.def) continue;   // blank server prompt keeps the local default
+    cfg[c.key] = c.kind === "toggle" ? !!v : v;
+    if (c.kind === "toggle") {
+      el.checked = !!v;
+    } else if (c.kind === "select") {
+      if ([...el.options].some(o => o.value === String(v))) el.value = v;
+    } else if (String(el.value) !== String(v)) {
+      el.value = v;
+      if (el._val) el._val.textContent = v;
+    }
+  }
+}
+setInterval(async () => {
+  try {
+    const j = await (await fetch("/healthz", { cache: "no-store" })).json();
+    syncParams(j);
+    syncBadges(j);
+  } catch { /* server away — leave inputs as-is */ }
+}, 2000);
+
+// Title = engine · version · model · flags · resolution, from /healthz identity
+// fields (sd-webrtc snapshot: engine/model/cfg_type/v2v/cn; FluxRT: ref +
+// interp ratio). Shown in the tab title and the page heading.
+function describeServer(engine, j) {
+  const bits = [];
+  if (engine === "streamdiffusion") {
+    bits.push("StreamDiffusion");
+    if (j.engine) bits.push(j.engine);
+    if (j.model) bits.push(String(j.model).split(/[\\/]/).pop());
+    const flags = [];
+    if (j.cfg_type) flags.push("cfg:" + j.cfg_type);
+    if (j.v2v_enabled) flags.push("v2v");
+    if (j.cn_mode && j.cn_mode !== "off") flags.push("cn:" + j.cn_mode);
+    if (flags.length) bits.push(flags.join(" "));
+  } else {
+    bits.push("FluxRT");
+    const flags = [];
+    if (j.reference_enabled) flags.push("ref");
+    if (j.fps_pipeline > 0 && j.fps_interpolated > j.fps_pipeline * 1.5)
+      flags.push(`interp x${Math.round(j.fps_interpolated / j.fps_pipeline)}`);
+    if (flags.length) bits.push(flags.join(" "));
+  }
+  if (j.resolution && j.resolution.width) bits.push(`${j.resolution.width}x${j.resolution.height}`);
+  return bits.join(" · ");
+}
+
+(async () => {
+  let engine = "fluxrt", j = {};
+  try {
+    j = await (await fetch("/healthz")).json();
+    if (String(j.backend || "").includes("streamdiffusion")) engine = "streamdiffusion";
+  } catch { /* default */ }
+  const desc = describeServer(engine, j);
+  document.title = `${desc} — WebRTC test`;
+  $("title").textContent = desc;
+  log(`server: ${desc}`, "info");
+  buildParams(engine);
+})();
+
+$("ppIn").onclick = toggleInput;
+$("ppOut").onclick = toggleOutput;
+$("source").onchange = async () => {   // live-swap the published track, no renegotiation
+  if (!srcStream) return;
+  dropSource();
+  const s = await ensureSource();
+  const sender = S.srSender || (S.pubPc && S.pubPc.getSenders()[0]);
+  if (sender) sender.replaceTrack(s.getVideoTracks()[0]);
+};
+$("mode").onchange = () => { teardown(); $("outw").disabled = $("mode").value === "sendrecv"; };
+$("outw").onchange = async () => {   // live-apply: restart the WHEP session at the new width
+  if ($("mode").value === "whipwhep" && S.outputOn) { await toggleOutput(); await toggleOutput(); }
+};
+$("view").onchange = setView;
+$("mix").oninput = applyMix;
+$("out").addEventListener("loadedmetadata", () => adaptToOutput($("out").videoWidth, $("out").videoHeight));
+$("out").addEventListener("resize", () => adaptToOutput($("out").videoWidth, $("out").videoHeight));
+setView();
+icons();
+</script>
+</body>
+</html>

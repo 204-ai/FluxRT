@@ -29,6 +29,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Optional
 
 import av
@@ -73,6 +74,7 @@ resolution = None
 out_resolution = None
 
 latest_rgb: Optional[np.ndarray] = None
+output_version = 0   # bumped per processed frame (under latest_lock) — output tracks gate on it
 # Latest pipeline INPUT frame (cropped BGR), so a recvonly/listening client can
 # preview what's being sent in. Guarded by latest_lock alongside latest_rgb.
 latest_input_bgr: Optional[np.ndarray] = None
@@ -213,19 +215,51 @@ def _drive_prompt_travel(prompt: str, frames: int, mode: str) -> None:
 # `latest_rgb` for any active video track to send out. Used by both the local
 # camera producer thread and per-peer track consumers.
 # ──────────────────────────────────────────────────────────────────────────────
+output_pump_stop = threading.Event()
+_output_pump_on = False   # True once the scheduler-counter pump owns publishing
+
+
+def output_pump() -> None:
+    """Publishes EVERY scheduler-written output frame (including interpolated
+    in-betweens) to latest_rgb/output_version, at the scheduler's own pace.
+    The old path sampled the output tensor once per INPUT frame, which pinned
+    the webrtc output at the input fps and silently dropped the interpolated
+    frames (SPEC B2)."""
+    global latest_rgb, output_version
+    log.info("Output pump started (scheduler frame counter).")
+    last = sp.frame_counter.value
+    while not output_pump_stop.is_set():
+        c = sp.frame_counter.value
+        if c == last:
+            time.sleep(0.002)
+            continue
+        last = c
+        with pipeline_lock:
+            out_bgr = output_tensor.to_numpy()
+        rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        with latest_lock:
+            latest_rgb = rgb
+            output_version += 1   # gates output tracks: 1 send per scheduled frame
+    log.info("Output pump stopped.")
+
+
 def push_input_frame(frame_bgr: np.ndarray) -> None:
-    global latest_rgb, latest_input_bgr
+    global latest_rgb, latest_input_bgr, output_version
     h, w = resolution["height"], resolution["width"]
     cropped = crop_maximal_rectangle(frame_bgr, h, w)
-    # Hold pipeline_lock across write+read so the producer thread and a peer's
-    # executor call can't interleave shared-tensor access during handoff.
+    # Hold pipeline_lock across the shared-tensor access so the producer thread
+    # and a peer's executor call can't interleave during handoff.
     with pipeline_lock:
         input_tensor.copy_from(cropped)
-        out_bgr = output_tensor.to_numpy()
-    rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        # Legacy publish path (StreamProcessor without frame_counter): sample
+        # the output at the input rate. With the pump active, publishing is
+        # ENTIRELY the pump's job so interpolated frames aren't skipped.
+        out_bgr = None if _output_pump_on else output_tensor.to_numpy()
     with latest_lock:
-        latest_rgb = rgb
         latest_input_bgr = cropped  # served to listeners via GET /input.jpg
+        if out_bgr is not None:
+            latest_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+            output_version += 1
 
 
 def _decode_and_push(frame) -> None:
@@ -302,36 +336,57 @@ def _input_notify(event: str, pc, outcome=None) -> None:
 # WebRTC video track — emits latest_rgb at a fixed frame rate.
 # ──────────────────────────────────────────────────────────────────────────────
 class FluxRTTrack(VideoStreamTrack):
-    """Yields the latest FluxRT output frame as `av.VideoFrame`s at `fps` Hz."""
+    """Yields the latest FluxRT output frame as `av.VideoFrame`s at `fps` Hz.
+
+    `width` (WHEP `?w=`, SPEC V15) downscales this session's frames before
+    encode — aiortc encodes per-sender (§R5) and reconfigures from frame dims
+    (§R6), so this is a genuine per-viewer bandwidth/CPU knob. None → native
+    path, zero resize calls."""
 
     kind = "video"
 
-    def __init__(self, fps: int = 30):
+    def __init__(self, fps: int = 30, width: Optional[int] = None):
         super().__init__()
-        self.fps = fps
+        self.fps = fps                # CAP: never send faster than this
         self._t0 = time.time()
-        self._n = 0
+        self._last_v = -1
+        self._last_send = 0.0
         # Output frames are at the (possibly upscaled) output resolution.
         h, w = out_resolution["height"], out_resolution["width"]
+        self._size = None
+        if width is not None and width < w:
+            tw = max(64, int(width)) & ~1               # clamp floor 64, even (h264 mod-2)
+            th = max(2, round(h * tw / w / 2) * 2)      # aspect kept, even
+            self._size = (tw, th)
+            h, w = th, tw
         self._blank = np.zeros((h, w, 3), dtype=np.uint8)
 
     async def recv(self) -> av.VideoFrame:
-        # Pace ourselves; aiortc will pull frames as fast as recv() returns.
-        self._n += 1
-        target_t = self._t0 + self._n / self.fps
-        delay = target_t - time.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        else:
-            # Behind schedule — skip ahead so we don't accumulate debt.
-            self._t0 = time.time() - self._n / self.fps
+        # Output rate == pipeline rate: send only when push_input_frame publishes
+        # a NEW frame (output_version gate), so a slow pipeline never gets padded
+        # with re-encoded duplicates. `fps` only caps the rate; when no new frame
+        # arrives, a 1 Hz keepalive repeats the last one so the stream and the
+        # receiver's decoder stay alive.
+        wait = self._last_send + 1.0 / self.fps - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        deadline = time.time() + 1.0
+        while True:
+            with latest_lock:
+                v = output_version
+                rgb = latest_rgb if latest_rgb is not None else self._blank
+            if v != self._last_v or time.time() >= deadline:
+                break
+            await asyncio.sleep(0.005)
+        self._last_v = v
+        self._last_send = time.time()
 
-        with latest_lock:
-            rgb = latest_rgb if latest_rgb is not None else self._blank
+        if self._size is not None and (rgb.shape[1], rgb.shape[0]) != self._size:
+            rgb = cv2.resize(rgb, self._size, interpolation=cv2.INTER_AREA)
 
         frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
-        frame.pts = self._n
-        frame.time_base = fractions.Fraction(1, self.fps)
+        frame.pts = int((self._last_send - self._t0) * 90000)   # variable rate → wall-clock pts
+        frame.time_base = fractions.Fraction(1, 90000)
         return frame
 
 
@@ -351,6 +406,11 @@ async def _graceful_cleanup() -> None:
 
     log.info("Shutting down — stopping producer, peers, pipeline...")
     producer_stop.set()
+    output_pump_stop.set()
+    # Cancel input consumers up front: a consumer whose receiver never started
+    # (failed DTLS) blocks on recv() forever and pc.close() won't wake it.
+    for t in list(peer_input_tasks):
+        t.cancel()
 
     # Hard-deadline backstop. On Ctrl+C the spawned children also receive SIGINT
     # (shared process group) and die immediately, and reap_process detaches any
@@ -595,6 +655,193 @@ async def offer(request: Request):
     return JSONResponse(
         {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WHEP egress (draft-ietf-wish-whep) — playback of the FluxRT output with
+# standard clients (GStreamer whepsrc, browser WHEP libs, studio-world).
+# Decoupled from /offer by construction: each viewer gets its own recvonly PC
+# and its own FluxRTTrack (multi-consumer safe — the track only reads
+# `latest_rgb` under `latest_lock`), and no on("track")/on("datachannel")
+# handlers are registered, so a viewer can never touch input ownership or the
+# control channel. Sessions join `pcs` so _graceful_cleanup and the /healthz
+# peer count cover them.
+# ──────────────────────────────────────────────────────────────────────────────
+whep_sessions: dict[str, RTCPeerConnection] = {}
+
+
+@app.post("/whep")
+async def whep_post(request: Request) -> Response:
+    if "application/sdp" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(status_code=415, detail="WHEP requires Content-Type: application/sdp")
+    sdp = (await request.body()).decode("utf-8", "replace")
+    if not sdp.strip():
+        raise HTTPException(status_code=400, detail="empty SDP offer")
+
+    # Per-session bandwidth knobs (SPEC V15): ?w= target width (aspect kept,
+    # clamped [64, native]), ?fps= frame pacing (clamped [1, 60], default 30).
+    try:
+        req_w: Optional[int] = int(request.query_params["w"])
+    except (KeyError, ValueError):
+        req_w = None
+    try:
+        req_fps = min(60, max(1, int(request.query_params["fps"])))
+    except (KeyError, ValueError):
+        req_fps = 30
+
+    pc = RTCPeerConnection(_rtc_config())
+    session_id = uuid.uuid4().hex
+    whep_sessions[session_id] = pc
+    pcs.add(pc)
+    closing = {"v": False}
+
+    async def _close_whep() -> None:
+        if closing["v"]:        # single-shot: failed -> close() also emits closed
+            return
+        closing["v"] = True
+        with contextlib.suppress(Exception):
+            await pc.close()
+        whep_sessions.pop(session_id, None)
+        pcs.discard(pc)
+
+    @pc.on("connectionstatechange")
+    async def _on_state() -> None:
+        log.info("WHEP %s state: %s", session_id[:8], pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
+            await _close_whep()
+
+    pc.addTrack(FluxRTTrack(fps=req_fps, width=req_w))
+    try:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+    except Exception as exc:
+        await _close_whep()
+        raise HTTPException(status_code=400, detail=f"invalid SDP offer: {exc}")
+
+    # aiortc gathers ICE before setLocalDescription resolves, so the answer is
+    # complete — no trickle needed (PATCH below stays unimplemented).
+    return Response(
+        content=pc.localDescription.sdp,
+        media_type="application/sdp",
+        status_code=201,
+        headers={"Location": f"/whep/{session_id}"},
+    )
+
+
+@app.delete("/whep/{session_id}")
+async def whep_delete(session_id: str) -> Response:
+    pc = whep_sessions.pop(session_id, None)
+    if pc is None:
+        raise HTTPException(status_code=404, detail="unknown WHEP session")
+    pcs.discard(pc)
+    with contextlib.suppress(Exception):
+        await pc.close()
+    return Response(status_code=200)
+
+
+@app.patch("/whep/{session_id}")
+async def whep_patch(session_id: str) -> Response:
+    raise HTTPException(status_code=405, detail="trickle ICE not supported (answer carries full candidates)")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WHIP ingress (draft-ietf-wish-whip) — standard publishers (OBS WHIP output,
+# GStreamer whipsink, browser) feed the pipeline input. The publisher's track
+# goes through the SAME consume_peer_input ownership path as /offer, so every
+# owner/waiter/gap-handoff rule applies unchanged and a WHIP publisher is
+# indistinguishable from another browser sender to realtime-client (which sees
+# only the existing input:peer broadcast). Publish-only: no output track, no
+# datachannel — `_fluxrt_channels` stays empty so send_to_pc("input:you")
+# no-ops for this pc.
+# ──────────────────────────────────────────────────────────────────────────────
+whip_sessions: dict[str, RTCPeerConnection] = {}
+
+
+@app.post("/whip")
+async def whip_post(request: Request) -> Response:
+    if sp is None:
+        raise HTTPException(status_code=503, detail="live pipeline not running (batch-only server)")
+    if "application/sdp" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(status_code=415, detail="WHIP requires Content-Type: application/sdp")
+    sdp = (await request.body()).decode("utf-8", "replace")
+    if not sdp.strip():
+        raise HTTPException(status_code=400, detail="empty SDP offer")
+
+    pc = RTCPeerConnection(_rtc_config())
+    session_id = uuid.uuid4().hex
+    whip_sessions[session_id] = pc
+    pcs.add(pc)
+    pc._fluxrt_channels = set()
+    closing = {"v": False}
+
+    async def _close_whip() -> None:
+        if closing["v"]:        # single-shot: failed -> close() also emits closed
+            return
+        closing["v"] = True
+        # Cancel the consumer directly (same rationale as /offer's _on_state):
+        # its finally releases ownership deterministically.
+        t = getattr(pc, "_fluxrt_consume_task", None)
+        if t is not None:
+            t.cancel()
+        with contextlib.suppress(Exception):
+            await pc.close()
+        whip_sessions.pop(session_id, None)
+        pcs.discard(pc)
+
+    @pc.on("connectionstatechange")
+    async def _on_state() -> None:
+        log.info("WHIP %s state: %s", session_id[:8], pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
+            await _close_whip()
+
+    @pc.on("track")
+    def _on_track(track) -> None:
+        log.info("WHIP inbound track: kind=%s id=%s", track.kind, track.id)
+        if track.kind != "video":
+            return
+        task = asyncio.ensure_future(
+            consume_peer_input(
+                track, pc, ownership, _frame_sink, notify=_input_notify, log=log
+            )
+        )
+        peer_input_tasks.add(task)
+        task.add_done_callback(peer_input_tasks.discard)
+        pc._fluxrt_consume_task = task
+
+    try:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+    except Exception as exc:
+        await _close_whip()
+        raise HTTPException(status_code=400, detail=f"invalid SDP offer: {exc}")
+
+    return Response(
+        content=pc.localDescription.sdp,
+        media_type="application/sdp",
+        status_code=201,
+        headers={"Location": f"/whip/{session_id}"},
+    )
+
+
+@app.delete("/whip/{session_id}")
+async def whip_delete(session_id: str) -> Response:
+    pc = whip_sessions.pop(session_id, None)
+    if pc is None:
+        raise HTTPException(status_code=404, detail="unknown WHIP session")
+    pcs.discard(pc)
+    t = getattr(pc, "_fluxrt_consume_task", None)
+    if t is not None:
+        t.cancel()      # consume_peer_input's finally releases ownership
+    with contextlib.suppress(Exception):
+        await pc.close()
+    return Response(status_code=200)
+
+
+@app.patch("/whip/{session_id}")
+async def whip_patch(session_id: str) -> Response:
+    raise HTTPException(status_code=405, detail="trickle ICE not supported (answer carries full candidates)")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1157,6 +1404,18 @@ async def _test_client():
         raise HTTPException(status_code=404, detail="webrtc_test_client.html not found")
 
 
+@app.get("/webrtc-test")
+async def _webrtc_test_page():
+    """Unified same-origin test page (same URL as sd-webrtc): WHIP+WHEP pair or
+    sendrecv /offer mode, split/blend compare views, live prompt bar."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webrtc-test.html")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return Response(f.read(), media_type="text/html")
+    except OSError:
+        raise HTTPException(status_code=404, detail="webrtc-test.html not found")
+
+
 @app.get("/healthz")
 async def _health():
     # Batch-only server has no live pipeline — return a minimal payload so a client
@@ -1325,6 +1584,12 @@ def _run_server(args) -> None:
         log_level="info",
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
+        # Without a bound, uvicorn's graceful shutdown waits indefinitely for
+        # open connections (e.g. a test page's keep-alive /healthz polling or a
+        # wedged signaling request) BEFORE running lifespan shutdown — Ctrl+C
+        # then appears to hang with WHEP/WHIP sessions alive. 3s is plenty for
+        # any in-flight signaling request.
+        timeout_graceful_shutdown=3,
     )
 
 
@@ -1501,6 +1766,14 @@ def main() -> None:
         out_resolution["width"],
         out_resolution["height"],
     )
+
+    # Publish output frames at the scheduler's pace (incl. interpolation) when
+    # the counter exists; older StreamProcessor builds fall back to the
+    # input-rate sampling inside push_input_frame.
+    if getattr(sp, "frame_counter", None) is not None:
+        global _output_pump_on
+        _output_pump_on = True
+        threading.Thread(target=output_pump, daemon=True).start()
 
     if args.no_server_camera:
         log.info("--no-server-camera: skipping local camera; waiting for peer input.")
