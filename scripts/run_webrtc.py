@@ -73,17 +73,30 @@ log = logging.getLogger("fluxrt.webrtc")
 # browser keeps asking for more (REMB) and the setter keeps clamping — at 1152px
 # wide that is the mushy, blocky output. The setter reads the module global at
 # call time, so raising the constants before any PC exists lifts the ceiling
-# while REMB congestion control keeps working underneath it. H.264 is preferred
-# on negotiation (better quality per bit, hardware decode in Chrome); RTX stays
-# in the preference list so NACK retransmission survives (aiortc drops it
-# otherwise). Env: FLUXRT_MAX_BITRATE (bps, default 20 Mbps),
-# FLUXRT_START_BITRATE (bps, default 8 Mbps), FLUXRT_CODEC (h264|vp8).
+# while REMB congestion control keeps working underneath it.
+#
+# Codec: VP8 by default. aiortc's H.264 encoder pins x264 to MAX_FRAME_RATE (30)
+# and a 1/30 time_base while FluxRT emits ~6–10 fps, so x264's rate control
+# hands each frame a 30-fps share of the budget — measured 0.1 Mbps at 1152×640,
+# far worse than VP8 (libvpx CBR on real pts). H.264 stays selectable.
+#
+# Floor: Chrome's receive-side estimate only grows from bits it actually sees,
+# and aiortc follows REMB exactly, so a low first estimate is self-sustaining
+# (VP8 sat at ~1 Mbps on a clean LAN). FLUXRT_MIN_BITRATE (default 6 Mbps)
+# raises the codec MIN so REMB below it is ignored — set it low on a real WAN.
+#
+# RTX stays in the preference list so NACK retransmission survives (aiortc drops
+# it when the list is filtered). Env: FLUXRT_MAX_BITRATE (bps, default 20 Mbps),
+# FLUXRT_MIN_BITRATE (bps, default 6 Mbps), FLUXRT_START_BITRATE (bps, default
+# 8 Mbps), FLUXRT_CODEC (vp8|h264).
 EGRESS_MAX_BITRATE = int(os.environ.get("FLUXRT_MAX_BITRATE", str(20_000_000)))
+EGRESS_MIN_BITRATE = int(os.environ.get("FLUXRT_MIN_BITRATE", str(6_000_000)))
 EGRESS_START_BITRATE = int(os.environ.get("FLUXRT_START_BITRATE", str(8_000_000)))
-EGRESS_CODEC = os.environ.get("FLUXRT_CODEC", "h264").lower()
+EGRESS_CODEC = os.environ.get("FLUXRT_CODEC", "vp8").lower()
 for _codec_mod in (_aiortc_vpx, _aiortc_h264):
     _codec_mod.MAX_BITRATE = max(int(_codec_mod.MAX_BITRATE), EGRESS_MAX_BITRATE)
-    _codec_mod.DEFAULT_BITRATE = max(int(_codec_mod.DEFAULT_BITRATE), min(EGRESS_START_BITRATE, EGRESS_MAX_BITRATE))
+    _codec_mod.MIN_BITRATE = max(int(_codec_mod.MIN_BITRATE), min(EGRESS_MIN_BITRATE, _codec_mod.MAX_BITRATE))
+    _codec_mod.DEFAULT_BITRATE = max(int(_codec_mod.DEFAULT_BITRATE), min(EGRESS_START_BITRATE, _codec_mod.MAX_BITRATE))
 
 
 def _prefer_codec(pc: RTCPeerConnection, sender) -> None:
