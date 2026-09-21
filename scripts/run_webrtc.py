@@ -41,9 +41,12 @@ from aiortc import (
     RTCConfiguration,
     RTCIceServer,
     RTCPeerConnection,
+    RTCRtpSender,
     RTCSessionDescription,
     VideoStreamTrack,
 )
+import aiortc.codecs.h264 as _aiortc_h264
+import aiortc.codecs.vpx as _aiortc_vpx
 from aiortc.mediastreams import MediaStreamError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +65,39 @@ from fluxrt.webrtc.stats import connection_pool_stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("fluxrt.webrtc")
+
+
+# ── Egress bitrate ────────────────────────────────────────────────────────────
+# aiortc's encoders clamp the REMB-driven target bitrate to a module constant:
+# VP8 MAX_BITRATE = 1.5 Mbps (default 500 kbps), H264 MAX_BITRATE = 3 Mbps. The
+# browser keeps asking for more (REMB) and the setter keeps clamping — at 1152px
+# wide that is the mushy, blocky output. The setter reads the module global at
+# call time, so raising the constants before any PC exists lifts the ceiling
+# while REMB congestion control keeps working underneath it. H.264 is preferred
+# on negotiation (better quality per bit, hardware decode in Chrome); RTX stays
+# in the preference list so NACK retransmission survives (aiortc drops it
+# otherwise). Env: FLUXRT_MAX_BITRATE (bps, default 12 Mbps),
+# FLUXRT_START_BITRATE (bps, default 4 Mbps), FLUXRT_CODEC (h264|vp8).
+EGRESS_MAX_BITRATE = int(os.environ.get("FLUXRT_MAX_BITRATE", str(12_000_000)))
+EGRESS_START_BITRATE = int(os.environ.get("FLUXRT_START_BITRATE", str(4_000_000)))
+EGRESS_CODEC = os.environ.get("FLUXRT_CODEC", "h264").lower()
+for _codec_mod in (_aiortc_vpx, _aiortc_h264):
+    _codec_mod.MAX_BITRATE = max(int(_codec_mod.MAX_BITRATE), EGRESS_MAX_BITRATE)
+    _codec_mod.DEFAULT_BITRATE = max(int(_codec_mod.DEFAULT_BITRATE), min(EGRESS_START_BITRATE, EGRESS_MAX_BITRATE))
+
+
+def _prefer_codec(pc: RTCPeerConnection, sender) -> None:
+    """Reorder (not filter) this sender's codec preferences so EGRESS_CODEC negotiates
+    first. Keeping the full list keeps `video/rtx` — filtering it out would lose
+    NACK-driven retransmission."""
+    want = "video/" + EGRESS_CODEC
+    codecs = RTCRtpSender.getCapabilities("video").codecs
+    order = sorted(codecs, key=lambda c: 0 if c.mimeType.lower() == want else 1)
+    for transceiver in pc.getTransceivers():
+        if transceiver.sender is sender:
+            transceiver.setCodecPreferences(order)
+            return
+    log.warning("egress: no transceiver for the output sender — codec preference not applied")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -646,7 +682,7 @@ async def offer(request: Request):
                 except ValueError:
                     safe_send(channel, "err:steps")
 
-    pc.addTrack(FluxRTTrack(fps=30))
+    _prefer_codec(pc, pc.addTrack(FluxRTTrack(fps=30)))
 
     await pc.setRemoteDescription(offer_sdp)
     answer = await pc.createAnswer()
@@ -710,7 +746,7 @@ async def whep_post(request: Request) -> Response:
         if pc.connectionState in ("failed", "closed"):
             await _close_whep()
 
-    pc.addTrack(FluxRTTrack(fps=req_fps, width=req_w))
+    _prefer_codec(pc, pc.addTrack(FluxRTTrack(fps=req_fps, width=req_w)))
     try:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         answer = await pc.createAnswer()
