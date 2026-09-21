@@ -77,9 +77,9 @@ log = logging.getLogger("fluxrt.webrtc")
 # on negotiation (better quality per bit, hardware decode in Chrome); RTX stays
 # in the preference list so NACK retransmission survives (aiortc drops it
 # otherwise). Env: FLUXRT_MAX_BITRATE (bps, default 12 Mbps),
-# FLUXRT_START_BITRATE (bps, default 4 Mbps), FLUXRT_CODEC (h264|vp8).
+# FLUXRT_START_BITRATE (bps, default 6 Mbps), FLUXRT_CODEC (h264|vp8).
 EGRESS_MAX_BITRATE = int(os.environ.get("FLUXRT_MAX_BITRATE", str(12_000_000)))
-EGRESS_START_BITRATE = int(os.environ.get("FLUXRT_START_BITRATE", str(4_000_000)))
+EGRESS_START_BITRATE = int(os.environ.get("FLUXRT_START_BITRATE", str(6_000_000)))
 EGRESS_CODEC = os.environ.get("FLUXRT_CODEC", "h264").lower()
 for _codec_mod in (_aiortc_vpx, _aiortc_h264):
     _codec_mod.MAX_BITRATE = max(int(_codec_mod.MAX_BITRATE), EGRESS_MAX_BITRATE)
