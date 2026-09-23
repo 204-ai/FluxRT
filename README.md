@@ -491,6 +491,12 @@ Below is a comparison against the baseline (resolution: 576 × 320, 2 inference 
 
 
 
+### Per-Stage Profiling
+
+`FLUXRT_PROFILE=1 python scripts/run_webrtc.py ...` prints per-stage times for every generated frame (prompt, preprocess, VAE encode, timesteps, transformer per step, upscale, decode). Each stage synchronizes the GPU, so leave it off in production. `"logging": true` in the config prints fps and the recomputed-token share at most once per second.
+
+Reference tokens (`use_reference_image: true`) are only in the sequence while a reference image is actually set (startup `reference_image_path`, `POST /reference`); `DELETE /reference` removes them again. The first reference set after boot triggers one `torch.compile` recompile for the longer sequence.
+
 ### Real-Time Frame Interpolation
 
 To ensure smooth visual transitions, FluxRT integrates real-time frame interpolation using the **RIFE** model.

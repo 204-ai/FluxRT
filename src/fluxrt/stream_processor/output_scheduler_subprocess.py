@@ -70,6 +70,7 @@ class OutputSchedulerSubprocess:
 
         while self.running.value:
             if not self.pack_is_ready.value:
+                time.sleep(0.0005)  # was a hot spin: one core + the Value lock per read
                 continue
 
             proc_time = min(max(self.last_processing_time.value, 0.001), 1.0)
