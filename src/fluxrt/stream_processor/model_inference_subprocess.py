@@ -313,9 +313,10 @@ class ModelInferenceSubprocess:
         )
         # Full-frame execute (the expensive spatial-cache-disabling dense pass)
         # is applied only every `stride` frames during the morph instead of
-        # every frame; >=1, default 2 (~halves the dense-execute cost). Override
-        # with config "prompt_travel_full_execute_every" (1 = old behaviour).
-        stride = max(1, int(self.config.get("prompt_travel_full_execute_every", 2)))
+        # every frame; >=1, default 3 (measured: stride 2 pulled a ~5 fps
+        # pipeline to ~3.6 during morphs). Override with config
+        # "prompt_travel_full_execute_every" (1 = old behaviour).
+        stride = max(1, int(self.config.get("prompt_travel_full_execute_every", 3)))
         self._travel = {
             "src": self.prompt_embeds,
             "tgt": target_embeds,
