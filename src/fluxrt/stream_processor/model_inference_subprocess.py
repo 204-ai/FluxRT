@@ -251,6 +251,9 @@ class ModelInferenceSubprocess:
             reference_image_seq_len = (reference_image_res["width"] // 16) * (
                 reference_image_res["height"] // 16
             )
+        # Reference tokens join the sequence only while a real reference is set
+        # (see _set_reference_active); remembered here for when one arrives.
+        self.reference_image_seq_len = reference_image_seq_len
 
         self.update_controller = UpdateController(
             self.config,
@@ -402,20 +405,23 @@ class ModelInferenceSubprocess:
         self.update_prompt_embeds(self.process_state["prompt"])
         self.previous_frame = None
 
+        self.reference_image = None
+        self.reference_active = True  # flipped off below unless a real image loads
+        self._last_log = 0.0
         if self.config.get("use_reference_image", False):
-            image = cv2.imread(self.config.get("reference_image_path", ""))
+            path = self.config.get("reference_image_path", "")
+            image = cv2.imread(path) if path else None
             resolution = self.config.get("reference_image_resolution")
-            if image is None:
-                image = np.zeros(
-                    (resolution["height"], resolution["width"], 3), dtype=np.uint8
-                )
-                print(
-                    "Warning: use_reference_image is set to true but no valid reference_image_path is provided."
-                )
-            else:
+            if image is not None:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 image = cv2.resize(image, (resolution["width"], resolution["height"]))
-            self.reference_image = Image.fromarray(image)
+                self.reference_image = Image.fromarray(image)
+            else:
+                print(
+                    "use_reference_image: no reference_image_path loaded — reference "
+                    "tokens stay off until one is set (POST /reference)."
+                )
+        self._set_reference_active(self.reference_image is not None)
 
         target_fps = self.config.get("target_fps", None)
         self.target_base_processing_time = None
@@ -542,12 +548,10 @@ class ModelInferenceSubprocess:
                         )
                         self.reference_image = Image.fromarray(image)
                     else:
-                        self.reference_image = Image.fromarray(
-                            np.zeros(
-                                (resolution["height"], resolution["width"], 3),
-                                dtype=np.uint8,
-                            )
-                        )
+                        # cleared: drop the reference tokens entirely instead of
+                        # conditioning on a black image every frame
+                        self.reference_image = None
+                    self._set_reference_active(self.reference_image is not None)
                     self.update_controller.reset_cache()
 
                 elif cmd == "set_mask":
@@ -567,6 +571,23 @@ class ModelInferenceSubprocess:
 
         except Empty:
             pass
+
+    def _set_reference_active(self, active: bool) -> None:
+        """Add / remove the reference tokens from the sequence. Only while a
+        real reference image is set: with none, the old path VAE-encoded a black
+        image every frame and carried 256 dead tokens through every block.
+        The sequence length changes, so the per-timestep spatial caches (sized
+        by it) are dropped; torch.compile specializes once per length (the first
+        reference set after boot pays one recompile)."""
+        if active == self.reference_active:
+            return
+        self.reference_active = active
+        self.update_controller.reference_image_seq_len = (
+            self.reference_image_seq_len if active else None
+        )
+        self.pipe.spatial_cache.clear()
+        self.pipe._cond_latent_cache.clear()
+        self.update_controller.reset_cache()
 
     def receive_frame(self):
         """
@@ -643,7 +664,8 @@ class ModelInferenceSubprocess:
         self.pack_is_ready.value = True
         self.memory_reserved.value = torch.cuda.memory_reserved() // (1024 * 1024)
 
-        if self.logging:
+        if self.logging and now - self._last_log >= 1.0:  # 1/s, not per frame
+            self._last_log = now
             print(
                 f"base fps: {(1 / processing_time):.2f}, interpolated fps: {(1 / processing_time * 2**self.interpolation_exp):.2f}"
             )
@@ -656,11 +678,25 @@ class ModelInferenceSubprocess:
         """
         input_frame = Image.fromarray(frame)
 
+        out = self._run_pipe(input_frame, "np")
+        out_image = out.images[0]
+        out_image = out_image * 255
+        out_image = out_image.astype(np.uint8)
+        return out_image
+
+    def process_frame_to_gpu(self, frame):
+        """Live path: np uint8 RGB in, (1,3,H,W) float16 [0,1] on the GPU out —
+        no GPU→CPU→GPU round-trip between VAE decode and RIFE (the numpy path
+        downloaded the float image, quantized it on the CPU and re-uploaded)."""
+        out = self._run_pipe(Image.fromarray(frame), "pt")
+        return out.images[:1].to(torch.float16)
+
+    def _run_pipe(self, input_frame, output_type):
         reference_list = [input_frame]
-        if self.config["use_reference_image"]:
+        if self.reference_active and self.reference_image is not None:
             reference_list.append(self.reference_image)
 
-        out = self.pipe(
+        return self.pipe(
             prompt_embeds=self.prompt_embeds,
             image=reference_list,
             height=self.resolution["height"],
@@ -671,12 +707,8 @@ class ModelInferenceSubprocess:
             generator=torch.Generator(device=self.device).manual_seed(
                 self.process_state["seed"]
             ),
-            output_type="np",
+            output_type=output_type,
         )
-        out_image = out.images[0]
-        out_image = out_image * 255
-        out_image = out_image.astype(np.uint8)
-        return out_image
 
     def convert_np_to_torch(self, frame):
         frame = (
@@ -697,13 +729,15 @@ class ModelInferenceSubprocess:
             self._advance_prompt_travel()
             original_frame = self.input_shared_tensor.to_numpy()
             original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
-            frame = self.process_frame_with_pipeline(original_frame)
             if self.lip_processor is not None and self.lip_active:
+                frame = self.process_frame_with_pipeline(original_frame)
                 # Note: we are getting the latest input frame again after flux processing to reduce latency.
                 original_frame = self.input_shared_tensor.to_numpy()
                 original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
                 frame = self.lip_processor.process(frame, original_frame)
-            frame = self.convert_np_to_torch(frame)
+                frame = self.convert_np_to_torch(frame)
+            else:
+                frame = self.process_frame_to_gpu(original_frame)
             frames = self.interpolate_frames(frame)
             prev_time = self.sync_fps_and_send(prev_time, frames)
 

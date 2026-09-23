@@ -35,6 +35,7 @@ from fluxrt.stream_processor.update_controller import UpdateController
 
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
 
+import os
 import time
 
 prev_time = time.time()
@@ -42,11 +43,18 @@ prev_time = time.time()
 import cv2
 
 
+# Per-stage timing. Each call synchronizes the GPU, so it is OFF unless
+# FLUXRT_PROFILE=1 (it used to sync ~13x per frame with the print commented out).
+PROFILE = os.environ.get("FLUXRT_PROFILE", "") == "1"
+
+
 def profile(message):
     global prev_time
+    if not PROFILE:
+        return
     torch.cuda.synchronize()
     current_time = time.time()
-    # print(f"{message} : {(current_time - prev_time):.4f} sec")
+    print(f"{message} : {(current_time - prev_time):.4f} sec")
     prev_time = current_time
 
 
@@ -251,6 +259,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         self.test_cache = {}
         self.spatial_cache = {}  # keys: timesteps, values: SpatialCache objects
+        # Condition images after the first (the reference) are static between
+        # set_reference_image calls: keep their encoded latents keyed by the
+        # source image OBJECT (identity), so the VAE encode + CPU preprocess run
+        # once per reference, not per frame. idx -> (source image, latents)
+        self._cond_latent_cache = {}
+        self._last_log = 0.0
         self.update_controller = update_controller
 
         self._progress_bar_config = {"disable": True}
@@ -598,17 +612,23 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline.prepare_image_latents
     def prepare_image_latents(
         self,
-        images: list[torch.Tensor],
+        images: list[torch.Tensor | None],
         batch_size,
         generator: torch.Generator,
         device,
         dtype,
+        sources: list | None = None,
     ):
         image_latents = []
-        for image in images:
+        for idx, image in enumerate(images):
+            if image is None:  # cached reference (see __call__)
+                image_latents.append(self._cond_latent_cache[idx][1])
+                continue
             image = image.to(device=device, dtype=dtype)
             imagge_latent = self._encode_vae_image(image=image, generator=generator)
             image_latents.append(imagge_latent)  # (1, 128, 32, 32)
+            if idx > 0 and sources is not None:
+                self._cond_latent_cache[idx] = (sources[idx], imagge_latent)
 
         image_latent_ids = self._prepare_image_ids(image_latents)
 
@@ -864,7 +884,11 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 self.image_processor.check_image_input(img)
 
             condition_images = []
-            for img in image:
+            for idx, img in enumerate(image):
+                cached = self._cond_latent_cache.get(idx) if idx > 0 else None
+                if cached is not None and cached[0] is img:
+                    condition_images.append(None)  # latents reused below
+                    continue
                 image_width, image_height = img.size
                 if image_width * image_height > 1024 * 1024:
                     img = self.image_processor._resize_to_target_area(img, 1024 * 1024)
@@ -907,6 +931,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 generator=generator,
                 device=device,
                 dtype=self.vae.dtype,
+                sources=image,
             )
 
         profile("5")
@@ -967,7 +992,9 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             reference_image_mask = self.update_controller.use_reference_image_mask()
             if reference_image_mask is not None:
                 mask = torch.cat([mask, reference_image_mask], dim=-1)
-            if self.subprocess_config["logging"]:
+            # at most 1/s: the sum is a GPU->CPU sync
+            if self.subprocess_config["logging"] and time.time() - self._last_log >= 1.0:
+                self._last_log = time.time()
                 print(
                     f"recomputing {(mask.float().sum() / mask.shape[1] * 100):.2f}% of tokens"
                 )
