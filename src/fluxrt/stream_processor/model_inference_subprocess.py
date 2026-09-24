@@ -242,9 +242,10 @@ class ModelInferenceSubprocess:
                 f"{models_path}/vae", local_files_only=True, device=self.device
             ).to(self.dtype)
 
-        # cuDNN autotuning for the fixed-shape VAE/RIFE convs (opt-in A/B knob:
-        # a different conv algorithm can round differently).
-        torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", False))
+        # cuDNN autotuning for the fixed-shape VAE/RIFE convs: -2.5 ms/frame on the
+        # RTX 4090, output within the run-to-run noise floor (LPIPS 0.0165 vs
+        # 0.0183). cudnn_benchmark=false for A/B.
+        torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", True))
 
         if self.config.get("compile_models", False):
             # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
