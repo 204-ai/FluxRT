@@ -64,6 +64,10 @@ class SparseMask:
 
     def __init__(self, mask: torch.Tensor, text_seq_len: int):
         self.tensor = mask
+        # Value 1 (execute, don't update the cache) only comes from manual masks;
+        # blocks that write the KV cache in place need every executed row to be
+        # an updated one.
+        self.exec_only = bool((mask == 1).any())
         self.full = ActiveRows(mask)
         self.txt = ActiveRows(mask[:, :text_seq_len])
         self.img = ActiveRows(mask[:, text_seq_len:])
@@ -243,6 +247,31 @@ class SpatialCache:
             self.double_block_values[block_id] = updated_values
 
         return filled_keys, filled_values
+
+    def write_kv(
+        self,
+        rows: "ActiveRows",
+        active_keys: torch.Tensor,
+        active_values: torch.Tensor,
+        block_id: int,
+        block_type: str,
+    ):
+        """sync_with_kv_cache for masks without execute-only rows (every executed
+        row is also an updated one), on the active rows only: writes their keys /
+        values into the cache in place and returns the cache as the full keys /
+        values — the same tensors sync_with_kv_cache builds with four full-length
+        torch.where per block.
+        Args:
+            rows: active rows over the joint sequence.
+            active_keys / active_values: (1, len(rows.idx), num_attention_heads, attention_head_dim)
+        """
+        if block_type == "single":
+            keys, values = self.single_block_keys[block_id], self.single_block_values[block_id]
+        else:
+            keys, values = self.double_block_keys[block_id], self.double_block_values[block_id]
+        keys.index_copy_(1, rows.idx, active_keys)
+        values.index_copy_(1, rows.idx, active_values)
+        return keys, values
 
 
 def sparse_mlp_compute(
@@ -989,6 +1018,11 @@ class Flux2ParallelSelfAttnProcessor:
         spatial_cache: SpatialCache | None = None,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if mask is not None and spatial_cache is not None and not mask.exec_only:
+            return self._compact(
+                attn, hidden_states, attention_mask, image_rotary_emb, block_id, spatial_cache, mask.full
+            )
+
         # Parallel in (QKV + MLP in) projection
 
         if mask is not None:
@@ -1055,6 +1089,65 @@ class Flux2ParallelSelfAttnProcessor:
             hidden_states = attn.to_out(hidden_states)
 
         return hidden_states
+
+
+def _flux2_parallel_compact(
+    self,
+    attn: "Flux2ParallelSelfAttention",
+    hidden_states: torch.Tensor,
+    attention_mask,
+    image_rotary_emb,
+    block_id: int,
+    spatial_cache: SpatialCache,
+    rows: ActiveRows,
+) -> torch.Tensor:
+    """The spatial-cache path of a single block on the active rows only.
+    Same values as the gather/scatter-per-op path (every op here is per row,
+    and skipped rows' K/V come from the cache either way), without the
+    full-length zero buffers (the fused projection output is ~130 MB), the
+    per-op scatters and the four full-length torch.where of the KV merge."""
+    out = torch.zeros(
+        1, hidden_states.shape[1], attn.to_out.out_features,
+        device=hidden_states.device, dtype=hidden_states.dtype,
+    )
+    if not rows.any:
+        return out  # nothing executes; the caches stay as they are
+    idx = rows.idx
+
+    projected = attn.to_qkv_mlp_proj(hidden_states.index_select(1, idx))
+    qkv, mlp_hidden_states = torch.split(
+        projected,
+        [3 * attn.inner_dim, attn.mlp_hidden_dim * attn.mlp_mult_factor],
+        dim=-1,
+    )
+    query, key, value = qkv.chunk(3, dim=-1)
+    query = attn.norm_q(query.unflatten(-1, (attn.heads, -1)))
+    key = attn.norm_k(key.unflatten(-1, (attn.heads, -1)))
+    value = value.unflatten(-1, (attn.heads, -1))
+
+    if image_rotary_emb is not None:
+        rope = (image_rotary_emb[0].index_select(0, idx), image_rotary_emb[1].index_select(0, idx))
+        query = apply_rotary_emb(query, rope, sequence_dim=1)
+        key = apply_rotary_emb(key, rope, sequence_dim=1)
+
+    key, value = spatial_cache.write_kv(rows, key, value, block_id, block_type="single")
+
+    attn_out = dispatch_attention_fn(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        backend=self._attention_backend,
+        parallel_config=self._parallel_config,
+    )
+    attn_out = attn_out.flatten(2, 3).to(query.dtype)
+
+    mlp_out = attn.mlp_act_fn(mlp_hidden_states)
+    out.index_copy_(1, idx, attn.to_out(torch.cat([attn_out, mlp_out], dim=-1)))
+    return out
+
+
+Flux2ParallelSelfAttnProcessor._compact = _flux2_parallel_compact
 
 
 class Flux2KVParallelSelfAttnProcessor:

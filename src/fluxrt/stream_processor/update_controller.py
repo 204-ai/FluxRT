@@ -52,6 +52,11 @@ class UpdateController:
 
         self.mask_calculation_method = config.get("mask_calculation_method", "auto")
         self.always_update_image_cache = config.get("always_update_image_cache", True)
+        # Change detection: mean squared RGB difference (in [-1, 1] units) a patch
+        # must exceed to be recomputed, and how many patches the recompute region
+        # grows by. Higher threshold / less dilation = fewer tokens, staler edges.
+        self.mask_threshold = float(config.get("mask_threshold", 0.1))
+        self.mask_dilation = int(config.get("mask_dilation", 2))
 
         self.requires_update_image_cache = True
 
@@ -118,17 +123,14 @@ class UpdateController:
         difference_mask = torch.max_pool2d(
             difference, (self.compression_ratio, self.compression_ratio)
         )
-        difference_mask = difference_mask > 0.1
-        difference_mask_dilated = (
-            FF.max_pool2d(difference_mask.float(), kernel_size=3, stride=1, padding=1)
-            > 0
-        )
-        difference_mask_dilated = (
-            FF.max_pool2d(
-                difference_mask_dilated.float(), kernel_size=3, stride=1, padding=1
+        difference_mask_dilated = difference_mask > self.mask_threshold
+        for _ in range(self.mask_dilation):
+            difference_mask_dilated = (
+                FF.max_pool2d(
+                    difference_mask_dilated.float(), kernel_size=3, stride=1, padding=1
+                )
+                > 0
             )
-            > 0
-        )
 
         difference_mask_upsampled = FF.interpolate(
             difference_mask_dilated.float(),

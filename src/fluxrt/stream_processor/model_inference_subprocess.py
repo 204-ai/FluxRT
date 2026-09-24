@@ -152,6 +152,11 @@ class ModelInferenceSubprocess:
         self.transformer = Flux2Transformer2DModel.from_pretrained(
             f"{models_path}/transformer", local_files_only=True, device=device
         ).to(dtype)
+        if self.config.get("int8_linear", False):
+            # W8A8 INT8 GEMMs in the blocks: faster, numerically different (opt-in)
+            from fluxrt.stream_processor.int8_linear import quantize_transformer_blocks
+
+            print(f"int8_linear: {quantize_transformer_blocks(self.transformer)} layers")
 
         self.text_encoder = Qwen3ForCausalLM.from_pretrained(
             f"{models_path}/text_encoder", local_files_only=True
@@ -246,11 +251,10 @@ class ModelInferenceSubprocess:
                 vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
                 vae_nets.encoder = torch.compile(vae_nets.encoder)
                 vae_nets.decoder = torch.compile(vae_nets.decoder)
-            # RIFE is dozens of small kernels on tiny feature maps: launch-bound.
-            # Its shapes are static per level, so CUDA graphs (reduce-overhead)
-            # replay the whole net in one launch. rife_cudagraphs=false = the
-            # previous default-mode compile, for A/B.
-            self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", True))
+            # RIFE as CUDA graphs (reduce-overhead). Opt-in: on the RTX 4090 at
+            # 576x320, interpolation_exp 1, it measured 0.3 ms/frame (RIFE is
+            # ~2.5 ms of GPU time there) — not worth the graph-pool memory by default.
+            self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", False))
             self.interpolation_model = torch.compile(
                 self.interpolation_model,
                 mode="reduce-overhead" if self.rife_cudagraphs else "default",
