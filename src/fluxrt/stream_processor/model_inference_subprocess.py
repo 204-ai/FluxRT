@@ -379,6 +379,9 @@ class ModelInferenceSubprocess:
             "mode": mode,
             "prompt": target_prompt,
             "stride": stride,
+            # "stride": full execute every stride-th frame; "rolling": a
+            # different 1/stride of the image every frame
+            "refresh": self.config.get("prompt_travel_refresh", "stride"),
         }
 
     def _advance_prompt_travel(self) -> None:
@@ -417,7 +420,14 @@ class ModelInferenceSubprocess:
         # the final frame (which must land the exact target everywhere). Caps the
         # dense-execute cost at ~1/stride of the per-frame version.
         last = tv["i"] >= tv["n"]
-        if last or tv["i"] == 1 or tv["i"] % tv["stride"] == 0:
+        if last or tv["i"] == 1:
+            self.update_controller.requires_reset = True
+        elif tv["refresh"] == "rolling":
+            # Same catch-up rate as the strided full execute (every token within
+            # `stride` frames), spread evenly: 1/stride of the image each frame
+            # instead of all of it every stride-th frame (no fps sawtooth).
+            self.update_controller.refresh = (tv["i"] % tv["stride"], tv["stride"])
+        elif tv["i"] % tv["stride"] == 0:
             self.update_controller.requires_reset = True
 
         if last:

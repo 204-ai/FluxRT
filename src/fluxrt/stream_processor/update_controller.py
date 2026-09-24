@@ -46,6 +46,10 @@ class UpdateController:
 
         self.reset_period = reset_period
         self.requires_reset = False
+        # One-shot (phase, period): also recompute the patches with
+        # (x + y) % period == phase on the next frame (rolling refresh, see
+        # ModelInferenceSubprocess._advance_prompt_travel).
+        self.refresh = None
         self.text_is_valid = False
         self.reference_image_is_valid = False
         self.config = config
@@ -131,6 +135,12 @@ class UpdateController:
                 )
                 > 0
             )
+        if self.refresh is not None:
+            phase, period = self.refresh
+            self.refresh = None
+            ys = torch.arange(self.mask_height, device=self.device).view(-1, 1)
+            xs = torch.arange(self.mask_width, device=self.device).view(1, -1)
+            difference_mask_dilated = difference_mask_dilated | ((xs + ys) % period == phase)
 
         difference_mask_upsampled = FF.interpolate(
             difference_mask_dilated.float(),
