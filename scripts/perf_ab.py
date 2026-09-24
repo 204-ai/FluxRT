@@ -221,6 +221,56 @@ def _label(img, text):
     return img
 
 
+def _quality(fa, fb, n, lpips_net):
+    """Output difference of two runs, frame by frame. Pixel PSNR alone is
+    misleading here: the same code run twice already differs in fine texture
+    (GPU nondeterminism amplified through the spatial cache and 2 steps), so
+    also measure structure (PSNR at 1/4 resolution), perceptual distance
+    (LPIPS) and flicker, and read every number against the noise floor."""
+    per_frame = []
+    for i in range(n):
+        a, b = np.asarray(fa[i]), np.asarray(fb[i])
+        d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+        small = [cv2.resize(x, (x.shape[1] // 4, x.shape[0] // 4), interpolation=cv2.INTER_AREA) for x in (a, b)]
+        per_frame.append({
+            "max": int(d.max()),
+            "mean": float(d.mean()),
+            "changed_px_pct": float((d.max(axis=-1) > 2).mean() * 100),
+            "psnr": _psnr(a, b),
+            "psnr_quarter": _psnr(*small),
+        })
+    psnrs = np.array([p["psnr"] for p in per_frame])
+    finite = psnrs[np.isfinite(psnrs)]
+    q = {
+        "identical": int(np.sum(~np.isfinite(psnrs))),
+        "first_diff": next((i for i, p in enumerate(per_frame) if p["max"] > 0), None),
+        "psnr_min": float(finite.min()) if len(finite) else float("inf"),
+        "psnr_median": float(np.median(finite)) if len(finite) else float("inf"),
+        "psnr_quarter_median": float(np.median([p["psnr_quarter"] for p in per_frame])),
+        "max_diff_worst": max(p["max"] for p in per_frame),
+        "mean_abs_diff": float(np.mean([p["mean"] for p in per_frame])),
+        "per_frame": per_frame,
+    }
+    if lpips_net is not None:
+        import torch
+
+        vals = []
+        with torch.no_grad():
+            for i in range(n):
+                t = [torch.from_numpy(np.ascontiguousarray(x[i][..., ::-1])).permute(2, 0, 1)[None]
+                     .float().div(127.5).sub(1).cuda() for x in (fa, fb)]
+                vals.append(float(lpips_net(*t)))
+        q["lpips_mean"] = float(np.mean(vals))
+        q["lpips_p95"] = float(np.percentile(vals, 95))
+    return q
+
+
+def _flicker(frames, n):
+    """Mean |frame_t - frame_t-1| (0-255): how much the output moves frame to frame."""
+    return float(np.mean([np.abs(np.asarray(frames[i]).astype(np.int16) - np.asarray(frames[i - 1]).astype(np.int16)).mean()
+                          for i in range(1, n)]))
+
+
 def cmd_compare(args):
     A, B = _load_run(args.a), _load_run(args.b)
     ma, mb = A["meta"], B["meta"]
@@ -234,34 +284,20 @@ def cmd_compare(args):
     fa, fb = A["frames"], B["frames"]
     n = min(len(fa), len(fb))
 
-    per_frame = []
-    for i in range(n):
-        a, b = np.asarray(fa[i]), np.asarray(fb[i])
-        d = np.abs(a.astype(np.int16) - b.astype(np.int16))
-        per_frame.append({
-            "max": int(d.max()),
-            "mean": float(d.mean()),
-            "changed_px_pct": float((d.max(axis=-1) > 2).mean() * 100),
-            "psnr": _psnr(a, b),
-        })
-    psnrs = np.array([p["psnr"] for p in per_frame])
-    finite = psnrs[np.isfinite(psnrs)]
-    identical = int(np.sum(~np.isfinite(psnrs)))
-    first_diff = next((i for i, p in enumerate(per_frame) if p["max"] > 0), None)
-
-    lpips_mean = None
+    lpips_net = None
     if args.lpips:
-        import torch
         import lpips
 
-        net = lpips.LPIPS(net="alex").cuda().eval()
-        vals = []
-        with torch.no_grad():
-            for i in range(0, n, max(1, n // 60)):
-                t = [torch.from_numpy(np.ascontiguousarray(x[i][..., ::-1])).permute(2, 0, 1)[None]
-                     .float().div(127.5).sub(1).cuda() for x in (fa, fb)]
-                vals.append(float(net(*t)))
-        lpips_mean = float(np.mean(vals))
+        lpips_net = lpips.LPIPS(net="alex", verbose=False).cuda().eval()
+    q = _quality(fa, fb, n, lpips_net)
+    per_frame = q["per_frame"]
+    qn = None
+    if args.noise:
+        N = _load_run(args.noise)
+        if N["meta"]["clip_sha1"] != ma["clip_sha1"]:
+            warnings.append("noise run used a different clip")
+        qn = _quality(fa, N["frames"], min(n, len(N["frames"])), lpips_net)
+    flicker_a, flicker_b = _flicker(fa, n), _flicker(fb, n)
 
     sa, sb = _stats(A["ms"]), _stats(B["ms"])
     os.makedirs(args.out, exist_ok=True)
@@ -311,16 +347,27 @@ def cmd_compare(args):
         "",
         "## Output difference (A = reference)",
         "",
-        f"- bit-identical frames: {identical}/{n}"
-        + (f"; first differing frame #{first_diff}" if first_diff is not None else ""),
-        f"- PSNR over differing frames: min {finite.min():.1f} dB, median {np.median(finite):.1f} dB"
-        if len(finite) else "- PSNR: all frames identical",
-        f"- max abs pixel diff (0-255): worst frame {max(p['max'] for p in per_frame)}, "
-        f"median frame {int(np.median([p['max'] for p in per_frame]))}",
-        f"- pixels off by > 2 levels: median frame {np.median([p['changed_px_pct'] for p in per_frame]):.3f}%",
+        "| metric | B vs A |" + (" A vs A again (noise floor) |" if qn else "") ,
+        "|---|---:|" + ("---:|" if qn else ""),
     ]
-    if lpips_mean is not None:
-        lines.append(f"- LPIPS (alex, sampled): {lpips_mean:.4f}")
+    def row(name, key, fmt):
+        return f"| {name} | {fmt(q[key])} |" + (f" {fmt(qn[key])} |" if qn else "")
+    lines += [
+        row("bit-identical frames", "identical", lambda v: f"{v}/{n}"),
+        row("PSNR full res, median (dB)", "psnr_median", lambda v: f"{v:.1f}"),
+        row("PSNR full res, worst frame (dB)", "psnr_min", lambda v: f"{v:.1f}"),
+        row("PSNR at 1/4 res, median (dB) — structure/colour", "psnr_quarter_median", lambda v: f"{v:.1f}"),
+        row("mean abs pixel diff (0-255)", "mean_abs_diff", lambda v: f"{v:.2f}"),
+    ]
+    if "lpips_mean" in q:
+        lines += [
+            row("LPIPS mean (lower = closer; ~0.1 visible)", "lpips_mean", lambda v: f"{v:.4f}"),
+            row("LPIPS p95", "lpips_p95", lambda v: f"{v:.4f}"),
+        ]
+    lines += [
+        "",
+        f"Flicker (mean |frame t - frame t-1|, 0-255): A {flicker_a:.2f}, B {flicker_b:.2f}.",
+    ]
     lines += [
         "",
         "Compare against a noise-floor run (the same side twice): GPU kernels are not "
@@ -335,7 +382,7 @@ def cmd_compare(args):
         f.write(report)
     with open(os.path.join(args.out, "compare.json"), "w") as f:
         json.dump({"a": ma, "b": mb, "speed_a": sa, "speed_b": sb, "speedup": speedup,
-                   "identical": identical, "per_frame": per_frame, "lpips": lpips_mean,
+                   "quality": q, "noise_floor": qn, "flicker": {"a": flicker_a, "b": flicker_b},
                    "warnings": warnings}, f, indent=1)
     print(report)
 
@@ -366,6 +413,8 @@ def main():
     c.add_argument("--gain", type=int, default=8, help="diff amplification in the visuals")
     c.add_argument("--video-fps", type=float, default=12)
     c.add_argument("--lpips", action="store_true", help="needs `pip install lpips`")
+    c.add_argument("--noise", default=None, metavar="RUN",
+                   help="a second run of A's side: its difference to A is the noise floor")
 
     args = p.parse_args()
     if args.cmd == "run":
