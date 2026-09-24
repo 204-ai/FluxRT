@@ -700,6 +700,18 @@ class Flux2AttnProcessor:
         spatial_cache: SpatialCache | None = None,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if (
+            mask is not None
+            and spatial_cache is not None
+            and not mask.exec_only
+            and encoder_hidden_states is not None
+            and attn.added_kv_proj_dim is not None
+        ):
+            return self._compact(
+                attn, hidden_states, encoder_hidden_states, attention_mask,
+                image_rotary_emb, block_id, spatial_cache, mask,
+            )
+
         query, key, value, encoder_query, encoder_key, encoder_value = (
             _get_qkv_projections(attn, hidden_states, encoder_hidden_states, mask=mask)
         )
@@ -1089,6 +1101,74 @@ class Flux2ParallelSelfAttnProcessor:
             hidden_states = attn.to_out(hidden_states)
 
         return hidden_states
+
+
+def _flux2_attn_compact(
+    self,
+    attn: "Flux2Attention",
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    attention_mask,
+    image_rotary_emb,
+    block_id: int,
+    spatial_cache: SpatialCache,
+    mask: SparseMask,
+):
+    """The spatial-cache path of a double block on the active rows only (see
+    _flux2_parallel_compact): active text rows through the added projections,
+    active image rows through to_q/k/v, joined in sequence order (text first,
+    as mask.full), K/V written into the cache in place."""
+    img_out = torch.zeros(
+        1, hidden_states.shape[1], attn.to_out[0].out_features,
+        device=hidden_states.device, dtype=hidden_states.dtype,
+    )
+    txt_out = torch.zeros(
+        1, encoder_hidden_states.shape[1], attn.to_add_out.out_features,
+        device=encoder_hidden_states.device, dtype=encoder_hidden_states.dtype,
+    )
+    if not mask.full.any:
+        return img_out, txt_out
+
+    queries, keys, values = [], [], []
+    if mask.txt.any:
+        txt = encoder_hidden_states.index_select(1, mask.txt.idx)
+        queries.append(attn.norm_added_q(attn.add_q_proj(txt).unflatten(-1, (attn.heads, -1))))
+        keys.append(attn.norm_added_k(attn.add_k_proj(txt).unflatten(-1, (attn.heads, -1))))
+        values.append(attn.add_v_proj(txt).unflatten(-1, (attn.heads, -1)))
+    if mask.img.any:
+        img = hidden_states.index_select(1, mask.img.idx)
+        queries.append(attn.norm_q(attn.to_q(img).unflatten(-1, (attn.heads, -1))))
+        keys.append(attn.norm_k(attn.to_k(img).unflatten(-1, (attn.heads, -1))))
+        values.append(attn.to_v(img).unflatten(-1, (attn.heads, -1)))
+    query, key, value = torch.cat(queries, 1), torch.cat(keys, 1), torch.cat(values, 1)
+
+    if image_rotary_emb is not None:
+        idx = mask.full.idx
+        rope = (image_rotary_emb[0].index_select(0, idx), image_rotary_emb[1].index_select(0, idx))
+        query = apply_rotary_emb(query, rope, sequence_dim=1)
+        key = apply_rotary_emb(key, rope, sequence_dim=1)
+
+    key, value = spatial_cache.write_kv(mask.full, key, value, block_id, block_type="double")
+
+    attn_out = dispatch_attention_fn(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        backend=self._attention_backend,
+        parallel_config=self._parallel_config,
+    )
+    attn_out = attn_out.flatten(2, 3).to(query.dtype)
+
+    n_txt = mask.txt.idx.numel()
+    if mask.txt.any:
+        txt_out.index_copy_(1, mask.txt.idx, attn.to_add_out(attn_out[:, :n_txt]))
+    if mask.img.any:
+        img_out.index_copy_(1, mask.img.idx, attn.to_out[1](attn.to_out[0](attn_out[:, n_txt:])))
+    return img_out, txt_out
+
+
+Flux2AttnProcessor._compact = _flux2_attn_compact
 
 
 def _flux2_parallel_compact(

@@ -41,17 +41,28 @@ class Int8Linear(nn.Module):
         return out.reshape(*shape[:-1], self.out_features)
 
 
-def quantize_transformer_blocks(transformer: nn.Module) -> int:
-    """Swap every nn.Linear inside the double and single blocks for Int8Linear
-    (embedders, modulation and the output projection stay bf16). Returns the
-    number of layers swapped."""
+# Output-side projections: their inputs (attention / SwiGLU outputs) carry the
+# activation outliers per-token int8 handles worst. "inputs" mode keeps them bf16.
+_OUTPUT_SIDE = ("to_out", "to_add_out", "linear_out")
+
+
+def quantize_transformer_blocks(transformer: nn.Module, mode="all") -> int:
+    """Swap nn.Linear layers inside the double and single blocks for Int8Linear
+    (embedders, modulation and the output projection always stay bf16).
+    mode "all": every block linear; "inputs": only the input-side projections
+    (q/k/v, the fused single-block projection, FF in) — ~70% of the GEMM work.
+    Returns the number of layers swapped."""
     swapped = 0
     for blocks in (transformer.transformer_blocks, transformer.single_transformer_blocks):
         for block in blocks:
-            for parent in list(block.modules()):
+            for module_name, parent in list(block.named_modules()):
                 for name, child in list(parent.named_children()):
-                    if type(child) is nn.Linear:
-                        setattr(parent, name, Int8Linear(child))
-                        swapped += 1
+                    if type(child) is not nn.Linear:
+                        continue
+                    path = f"{module_name}.{name}"
+                    if mode == "inputs" and any(part in path.split(".") for part in _OUTPUT_SIDE):
+                        continue
+                    setattr(parent, name, Int8Linear(child))
+                    swapped += 1
     torch.cuda.empty_cache()
     return swapped

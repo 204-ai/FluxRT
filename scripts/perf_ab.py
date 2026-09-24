@@ -153,6 +153,8 @@ def _profile(sub, step, frames, input_tensor, out_dir, torch):
     vae = pipe.vae
     vae.encode = timer.wrap("vae_encode", vae.encode)
     vae.decode = timer.wrap("vae_decode", vae.decode)
+    if getattr(pipe, "tiny_decoder", None) is not None:
+        pipe.tiny_decoder.decode = timer.wrap("vae_decode", pipe.tiny_decoder.decode)
     pipe.transformer = _CallProxy(pipe.transformer, timer.wrap("transformer", pipe.transformer))
     sub.interpolation_model = _CallProxy(sub.interpolation_model, timer.wrap("rife", sub.interpolation_model))
 

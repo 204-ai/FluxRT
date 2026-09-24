@@ -152,11 +152,14 @@ class ModelInferenceSubprocess:
         self.transformer = Flux2Transformer2DModel.from_pretrained(
             f"{models_path}/transformer", local_files_only=True, device=device
         ).to(dtype)
-        if self.config.get("int8_linear", False):
-            # W8A8 INT8 GEMMs in the blocks: faster, numerically different (opt-in)
+        int8_mode = self.config.get("int8_linear", False)
+        if int8_mode:
+            # W8A8 INT8 GEMMs in the blocks: faster, numerically different (opt-in).
+            # true = every block linear, "inputs" = input-side projections only.
             from fluxrt.stream_processor.int8_linear import quantize_transformer_blocks
 
-            print(f"int8_linear: {quantize_transformer_blocks(self.transformer)} layers")
+            mode = "inputs" if int8_mode == "inputs" else "all"
+            print(f"int8_linear ({mode}): {quantize_transformer_blocks(self.transformer, mode)} layers")
 
         self.text_encoder = Qwen3ForCausalLM.from_pretrained(
             f"{models_path}/text_encoder", local_files_only=True
@@ -239,9 +242,16 @@ class ModelInferenceSubprocess:
                 f"{models_path}/vae", local_files_only=True, device=self.device
             ).to(self.dtype)
 
+        # cuDNN autotuning for the fixed-shape VAE/RIFE convs (opt-in A/B knob:
+        # a different conv algorithm can round differently).
+        torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", False))
+
         if self.config.get("compile_models", False):
+            # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
+            # against cuBLAS per shape (longer warm-up; opt-in A/B knob).
             self.transformer = torch.compile(
                 self.transformer,
+                mode=self.config.get("transformer_compile_mode", "default"),
             )
             # torch.compile(module) only compiles forward(); the pipeline calls
             # vae.encode / vae.decode, so the VAE always ran eager. Compile the
@@ -289,6 +299,16 @@ class ModelInferenceSubprocess:
             upscaler_pipeline=self.upscaler_pipe,
         )
         self.pipe.to(self.device)
+
+        # "vae_decoder": "taef2" — full VAE encoder (the model's reading of the
+        # input stays exact), TAEF2 decoder (~2 ms vs ~19 ms). Changes the output
+        # look (softer fine detail): opt-in. enable_tiny_vae swaps both sides.
+        self.pipe.tiny_decoder = None
+        if self.config.get("vae_decoder", "full") == "taef2" and not self.config.get("enable_tiny_vae", False):
+            tiny = DiffusersTAEF2Wrapper(path="taef2/taef2.safetensors").to(self.device, self.dtype)
+            if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
+                tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
+            self.pipe.tiny_decoder = tiny
 
         if self.config.get("use_lora", False):
             self.pipe.load_lora_weights(self.config.get("lora_weights_path", ""))

@@ -1139,12 +1139,19 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             latents = self._patchify_latents(latents)
             profile("upscale")
 
-        latents = latents * latents_bn_std + latents_bn_mean
+        tiny_decoder = getattr(self, "tiny_decoder", None)
+        if tiny_decoder is None or output_type == "latent":
+            latents = latents * latents_bn_std + latents_bn_mean
         latents = self._unpatchify_latents(latents)
 
         profile("7")
         if output_type == "latent":
             image = latents
+        elif tiny_decoder is not None:
+            # TAEF2 decodes the normalized latents the transformer works in
+            # (no batch-norm de-normalization; checked by round trip:
+            # full encode -> TAEF2 decode 39.5 dB vs 16.5 dB de-normalized)
+            image = tiny_decoder.decode(latents, return_dict=False)[0]
         else:
             image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
