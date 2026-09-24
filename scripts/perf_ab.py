@@ -83,6 +83,130 @@ def _legacy_step(sub):
     return sub.interpolate_frames(out)
 
 
+class _StageTimer:
+    """CUDA-event spans around the big stages (VAE encode/decode, transformer,
+    RIFE), for the --profile phase only."""
+
+    def __init__(self, torch):
+        self.torch = torch
+        self.open = []  # (stage, start, end) recorded this frame
+
+    def wrap(self, stage, fn):
+        torch = self.torch
+
+        def timed(*a, **kw):
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start.record()
+            out = fn(*a, **kw)
+            end.record()
+            self.open.append((stage, start, end))
+            return out
+
+        return timed
+
+    def collect(self):
+        self.torch.cuda.synchronize()
+        spans = {}
+        for stage, start, end in self.open:
+            spans[stage] = spans.get(stage, 0.0) + start.elapsed_time(end)
+        self.open = []
+        return spans
+
+
+class _CallProxy:
+    """Stands in for a module the pipeline both calls and reads attributes of."""
+
+    def __init__(self, target, call):
+        object.__setattr__(self, "_target", target)
+        object.__setattr__(self, "_call", call)
+
+    def __call__(self, *a, **kw):
+        return self._call(*a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+
+_KERNEL_GROUPS = [
+    ("attention", ("flash", "fmha", "attention", "sdpa", "efficient")),
+    ("conv (VAE / RIFE)", ("conv", "cudnn", "implicit", "winograd", "dgrad", "wgrad", "fprop")),
+    ("GEMM", ("gemm", "cutlass", "xmma", "cublas", "mm_", "_mm", "matmul", "tem_fused")),
+    ("gather / scatter / copy", ("index", "scatter", "gather", "copy", "memcpy", "memset", "where", "cat_")),
+    ("fused elementwise (triton)", ("triton_",)),
+]
+
+
+def _kernel_group(name):
+    low = name.lower()
+    for group, keys in _KERNEL_GROUPS:
+        if any(k in low for k in keys):
+            return group
+    return "other"
+
+
+def _profile(sub, step, frames, input_tensor, out_dir, torch):
+    """K extra frames after the measured ones: stage spans, kernel groups, GPU busy %."""
+    from torch.profiler import ProfilerActivity, profile
+
+    timer = _StageTimer(torch)
+    pipe = sub.pipe
+    vae = pipe.vae
+    vae.encode = timer.wrap("vae_encode", vae.encode)
+    vae.decode = timer.wrap("vae_decode", vae.decode)
+    pipe.transformer = _CallProxy(pipe.transformer, timer.wrap("transformer", pipe.transformer))
+    sub.interpolation_model = _CallProxy(sub.interpolation_model, timer.wrap("rife", sub.interpolation_model))
+
+    stage_rows, walls = [], []
+    for frame in frames[:5]:  # re-warm with the wrappers in place
+        np.copyto(input_tensor.array, frame)
+        step()
+        timer.collect()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for frame in frames:
+            np.copyto(input_tensor.array, frame)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            step()
+            walls.append((time.perf_counter() - t0) * 1000.0)
+            stage_rows.append(timer.collect())
+    prof.export_chrome_trace(os.path.join(out_dir, "trace.json"))
+
+    k = len(frames)
+    groups, kernels = {}, []
+    for ev in prof.key_averages():
+        t = getattr(ev, "self_device_time_total", None)
+        if t is None:
+            t = getattr(ev, "self_cuda_time_total", 0.0)
+        if t <= 0 or getattr(ev, "device_type", None) is not None and "CUDA" not in str(ev.device_type):
+            continue
+        ms = t / 1000.0 / k
+        groups[_kernel_group(ev.key)] = groups.get(_kernel_group(ev.key), 0.0) + ms
+        kernels.append((ms, ev.count // k, ev.key[:110]))
+    kernels.sort(reverse=True)
+    wall = float(np.mean(walls))
+    stages = {s_: float(np.mean([r.get(s_, 0.0) for r in stage_rows])) for s_ in
+              ("vae_encode", "transformer", "vae_decode", "rife")}
+    stages["everything else (wall - stages)"] = wall - sum(stages.values())
+    kernel_ms = sum(groups.values())
+    summary = {
+        "frames": k,
+        "wall_ms": wall,
+        "gpu_kernel_ms": kernel_ms,
+        "gpu_busy_pct": 100.0 * kernel_ms / wall,
+        "stages_ms": stages,
+        "kernel_groups_ms": dict(sorted(groups.items(), key=lambda x: -x[1])),
+        "top_kernels": [{"ms": round(m, 3), "calls_per_frame": c, "name": n} for m, c, n in kernels[:25]],
+    }
+    with open(os.path.join(out_dir, "profile.json"), "w") as f:
+        json.dump(summary, f, indent=1)
+    print(f"profile ({k} frames): wall {wall:.1f} ms, GPU kernels {kernel_ms:.1f} ms "
+          f"({summary['gpu_busy_pct']:.0f}% busy)")
+    print("  stages: " + ", ".join(f"{n} {v:.1f}" for n, v in stages.items()))
+    print("  kernels: " + ", ".join(f"{n} {v:.1f}" for n, v in summary["kernel_groups_ms"].items()))
+    for m, c, n in kernels[:12]:
+        print(f"    {m:6.2f} ms  x{c:<4} {n}")
+
+
 def cmd_run(args):
     repo = os.path.abspath(args.repo)
     os.chdir(repo)  # model paths in the config are relative to the repo root
@@ -131,6 +255,21 @@ def cmd_run(args):
         load_s = time.perf_counter() - t_load
         step = sub.step_live if hasattr(sub, "step_live") else (lambda: _legacy_step(sub))
 
+        # Share of image tokens the spatial cache recomputes per step (perf
+        # revisions only: they resolve the active rows in the pipeline).
+        active = []
+        import fluxrt.stream_processor.pipeline as pipeline_mod
+
+        if hasattr(pipeline_mod, "SparseMask"):
+            base_mask = pipeline_mod.SparseMask
+
+            class _Recording(base_mask):
+                def __init__(self, mask, text_seq_len):
+                    super().__init__(mask, text_seq_len)
+                    active.append(self.img.idx.numel() / (mask.shape[1] - text_seq_len))
+
+            pipeline_mod.SparseMask = _Recording
+
         outputs = np.empty((args.frames, out_h, out_w, 3), dtype=np.uint8)
         ms = []
         warmup_ms = []
@@ -147,6 +286,12 @@ def cmd_run(args):
             outputs[i - args.warmup] = pack[-1]  # the generated frame (last in the pack)
             if (i - args.warmup) % 50 == 0:
                 print(f"frame {i - args.warmup}/{args.frames}: {dt:.1f} ms", flush=True)
+        n_steps = len(active) // len(frames_in) if active else 0
+        active_measured = active[args.warmup * n_steps:] if n_steps else []
+        if args.profile:
+            os.makedirs(args.out, exist_ok=True)
+            _profile(sub, step, frames_in[args.warmup:args.warmup + args.profile],
+                     input_tensor, args.out, torch)
     finally:
         input_tensor.close_and_unlink()
         output_tensor.close_and_unlink()
@@ -175,13 +320,15 @@ def cmd_run(args):
         "torch": torch.__version__,
         "python": platform.python_version(),
         "max_reserved_mb": torch.cuda.max_memory_reserved() // (1024 * 1024),
+        "active_img_tokens_pct": round(100 * float(np.mean(active_measured)), 1) if active_measured else None,
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     with open(os.path.join(args.out, "run.json"), "w") as f:
         json.dump({"meta": meta, "ms": [round(x, 3) for x in ms]}, f, indent=1)
     s = _stats(ms)
     print(f"{meta['label']}: mean {s['mean']:.1f} ms  p50 {s['p50']:.1f}  p95 {s['p95']:.1f}  "
-          f"-> {s['fps']:.2f} fps generated  ({args.out})")
+          f"-> {s['fps']:.2f} fps generated  ({args.out})"
+          + (f"  active image tokens {meta['active_img_tokens_pct']}%" if meta["active_img_tokens_pct"] else ""))
 
 
 def _stats(ms):
@@ -404,6 +551,8 @@ def main():
                    help="untimed frames first (torch.compile + cache warm-up)")
     r.add_argument("--out", required=True)
     r.add_argument("--label", default=None)
+    r.add_argument("--profile", type=int, default=0, metavar="K",
+                   help="after the measured frames, profile K more: stage ms, kernel groups, GPU busy %%")
 
     c = sp.add_parser("compare", help="speed + visual diff of two runs")
     c.add_argument("a")
