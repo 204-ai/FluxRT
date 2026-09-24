@@ -246,8 +246,14 @@ class ModelInferenceSubprocess:
                 vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
                 vae_nets.encoder = torch.compile(vae_nets.encoder)
                 vae_nets.decoder = torch.compile(vae_nets.decoder)
+            # RIFE is dozens of small kernels on tiny feature maps: launch-bound.
+            # Its shapes are static per level, so CUDA graphs (reduce-overhead)
+            # replay the whole net in one launch. rife_cudagraphs=false = the
+            # previous default-mode compile, for A/B.
+            self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", True))
             self.interpolation_model = torch.compile(
                 self.interpolation_model,
+                mode="reduce-overhead" if self.rife_cudagraphs else "default",
             )
 
         reference_image_seq_len = None
@@ -631,6 +637,10 @@ class ModelInferenceSubprocess:
             frames_out = frame
         else:
             frames = torch.cat([self.previous_frame, frame], dim=0)
+            if getattr(self, "rife_cudagraphs", False):
+                # New frame: earlier graph outputs may be overwritten. Each
+                # call's output is copied into new_frames right away.
+                torch.compiler.cudagraph_mark_step_begin()
             with torch.no_grad():
                 for _ in range(self.interpolation_exp):
                     B = frames.size(0)
