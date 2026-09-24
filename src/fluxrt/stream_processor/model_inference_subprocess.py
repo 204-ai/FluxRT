@@ -5,6 +5,7 @@ import numpy as np
 import json
 import os
 import signal
+import gc
 from safetensors.torch import load_file
 from multiprocessing import Process, Value, Manager
 from queue import Empty
@@ -843,6 +844,27 @@ class ModelInferenceSubprocess:
         self.pipe._cond_latent_cache.clear()
         self.previous_frame = None
         print(f"warm-up: {time.time() - start:.1f} s")
+        self._freeze_heap()
+
+    def _freeze_heap(self):
+        """Compilation leaves millions of long-lived Python objects; a full
+        garbage collection walking them stalled live frames for seconds. Collect
+        once, then move everything alive now out of the collector's view, and log
+        any collection that still takes long."""
+        gc.collect()
+        gc.freeze()
+        started = {}
+
+        def timing(phase, info):
+            if phase == "start":
+                started["t"] = time.perf_counter()
+            elif "t" in started:
+                ms = (time.perf_counter() - started.pop("t")) * 1000
+                if ms > 200:
+                    print(f"slow gc: generation {info.get('generation')} took {ms:.0f} ms")
+
+        gc.callbacks.append(timing)
+        print(f"gc: froze {gc.get_freeze_count()} objects")
 
     def process_main(self):
         self.process_init()
