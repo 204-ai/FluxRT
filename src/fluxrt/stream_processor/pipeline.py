@@ -1152,6 +1152,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             # (no batch-norm de-normalization; checked by round trip:
             # full encode -> TAEF2 decode 39.5 dB vs 16.5 dB de-normalized)
             image = tiny_decoder.decode(latents, return_dict=False)[0]
+            image = self.image_processor.postprocess(image, output_type=output_type)
         else:
             image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
