@@ -801,9 +801,9 @@ class ModelInferenceSubprocess:
 
     def warm_up(self):
         """Compile the graph variants live input will hit before the first real
-        frame: a full frame, nothing changed, part of the frame changed (two
+        frame: a full frame, nothing changed, part of the frame changed (three
         sizes, so the row count compiles dynamic), text tokens active (prompt
-        change / travel), and all of it again with a reference image when
+        change / travel) with and without image changes, and all of it again with a reference image when
         references are enabled. Leaves every cache as a fresh boot would."""
         rng = np.random.default_rng(0)
         base = rng.integers(0, 256, self.input_shared_tensor.shape, dtype=np.uint8)
@@ -815,7 +815,10 @@ class ModelInferenceSubprocess:
                 moved = base.copy()
                 moved[:size, :size] = 255 - moved[:size, :size]
                 yield moved
-            self.update_controller.text_is_valid = False  # text tokens active
+            self.update_controller.text_is_valid = False  # text tokens active, image moved
+            yield base
+            yield base  # nothing changed
+            self.update_controller.text_is_valid = False  # text tokens active, image still
             yield base
 
         def run():
