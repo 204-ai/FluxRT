@@ -47,6 +47,28 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+class ActiveRows:
+    """Rows of one mask span that a sparse_* call computes. Resolved once per
+    step (see SparseMask): each sparse call used to run `mask.any()` +
+    `nonzero()` itself — a GPU->CPU sync and a Dynamo graph break, ~140 times
+    per denoising step with the GPU idle in between."""
+
+    def __init__(self, mask: torch.Tensor):  # mask: (1, span_len)
+        self.idx = mask.squeeze(0).nonzero(as_tuple=False).squeeze(-1)
+        self.any = self.idx.numel() > 0
+
+
+class SparseMask:
+    """The spatial-cache mask (already through SpatialCache.preprocess_mask)
+    plus its active rows over the joint sequence and its text / image spans."""
+
+    def __init__(self, mask: torch.Tensor, text_seq_len: int):
+        self.tensor = mask
+        self.full = ActiveRows(mask)
+        self.txt = ActiveRows(mask[:, :text_seq_len])
+        self.img = ActiveRows(mask[:, text_seq_len:])
+
+
 class SpatialCache:
     """
     Stores all data of per-token, per-layer KV cache.
@@ -225,11 +247,11 @@ class SpatialCache:
 
 def sparse_mlp_compute(
     mlp_function,
-    mask: torch.Tensor | None,
+    rows: ActiveRows | None,
     input_hidden_states: torch.Tensor,
     output_dims: int,
 ):
-    if mask is None:
+    if rows is None:
         mlp_out = mlp_function(input_hidden_states)
         return mlp_out
 
@@ -241,9 +263,8 @@ def sparse_mlp_compute(
         dtype=input_hidden_states.dtype,
     )
 
-    seq_mask = mask.squeeze(0)
-    if seq_mask.any():
-        active_idx = seq_mask.nonzero(as_tuple=False).squeeze(-1)
+    if rows.any:
+        active_idx = rows.idx
 
         # Gather -> Compute -> Scatter
         mlp_active = input_hidden_states.index_select(1, active_idx)
@@ -260,9 +281,9 @@ def sparse_attention_compute(
     attn_mask,
     backend,
     parallel_config,
-    query_mask: torch.Tensor | None = None,
+    query_rows: ActiveRows | None = None,
 ):
-    if query_mask is None:
+    if query_rows is None:
         hidden_states = dispatch_attention_fn(
             query,
             key,
@@ -274,9 +295,8 @@ def sparse_attention_compute(
         return hidden_states
 
     hidden_states = torch.zeros_like(query)
-    seq_mask = query_mask.squeeze(0)
-    if seq_mask.any():
-        active_idx = seq_mask.nonzero(as_tuple=False).squeeze(-1)
+    if query_rows.any:
+        active_idx = query_rows.idx
 
         # Gather -> Compute -> Scatter
         query_active = query.index_select(1, active_idx)
@@ -521,32 +541,32 @@ def _get_projections(
     text_seq_len = encoder_hidden_states.shape[1]
     if mask is not None:
         query = sparse_mlp_compute(
-            attn.to_q, mask[:, text_seq_len:], hidden_states, attn.to_q.out_features
+            attn.to_q, mask.img, hidden_states, attn.to_q.out_features
         )
         key = sparse_mlp_compute(
-            attn.to_k, mask[:, text_seq_len:], hidden_states, attn.to_k.out_features
+            attn.to_k, mask.img, hidden_states, attn.to_k.out_features
         )
         value = sparse_mlp_compute(
-            attn.to_v, mask[:, text_seq_len:], hidden_states, attn.to_v.out_features
+            attn.to_v, mask.img, hidden_states, attn.to_v.out_features
         )
 
         encoder_query = encoder_key = encoder_value = None
         if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
             encoder_query = sparse_mlp_compute(
                 attn.add_q_proj,
-                mask[:, :text_seq_len],
+                mask.txt,
                 encoder_hidden_states,
                 attn.add_q_proj.out_features,
             )
             encoder_key = sparse_mlp_compute(
                 attn.add_k_proj,
-                mask[:, :text_seq_len],
+                mask.txt,
                 encoder_hidden_states,
                 attn.add_k_proj.out_features,
             )
             encoder_value = sparse_mlp_compute(
                 attn.add_v_proj,
-                mask[:, :text_seq_len],
+                mask.txt,
                 encoder_hidden_states,
                 attn.add_v_proj.out_features,
             )
@@ -680,7 +700,7 @@ class Flux2AttnProcessor:
 
         if spatial_cache is not None:
             key, value = spatial_cache.sync_with_kv_cache(
-                mask, key, value, block_id, block_type="double"
+                mask.tensor, key, value, block_id, block_type="double"
             )
 
         hidden_states = sparse_attention_compute(
@@ -690,7 +710,7 @@ class Flux2AttnProcessor:
             attn_mask=attention_mask,
             backend=self._attention_backend,
             parallel_config=self._parallel_config,
-            query_mask=mask,
+            query_rows=mask.full if mask is not None else None,
         )
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
@@ -707,7 +727,7 @@ class Flux2AttnProcessor:
             if mask is not None:
                 encoder_hidden_states = sparse_mlp_compute(
                     attn.to_add_out,
-                    mask[:, : encoder_hidden_states.shape[1]],
+                    mask.txt,
                     encoder_hidden_states,
                     attn.to_add_out.out_features,
                 )
@@ -717,16 +737,14 @@ class Flux2AttnProcessor:
         if mask is not None:
             hidden_states = sparse_mlp_compute(
                 attn.to_out[0],
-                mask[:, encoder_hidden_states.shape[1] :],
+                mask.img,
                 hidden_states,
                 hidden_states.shape[2],
             )
-            hidden_states = sparse_mlp_compute(
-                attn.to_out[1],
-                mask[:, encoder_hidden_states.shape[1] :],
-                hidden_states,
-                hidden_states.shape[2],
-            )
+            # to_out[1] is Dropout (identity in eval) and the rows skipped
+            # above are already zero: dense is the same result without the
+            # gather/scatter.
+            hidden_states = attn.to_out[1](hidden_states)
         else:
             hidden_states = attn.to_out[0](hidden_states)
             hidden_states = attn.to_out[1](hidden_states)
@@ -976,7 +994,7 @@ class Flux2ParallelSelfAttnProcessor:
         if mask is not None:
             hidden_states = sparse_mlp_compute(
                 attn.to_qkv_mlp_proj,
-                mask,
+                mask.full,
                 hidden_states,
                 attn.to_qkv_mlp_proj.out_features,
             )
@@ -1005,7 +1023,7 @@ class Flux2ParallelSelfAttnProcessor:
 
         if spatial_cache is not None:
             key, value = spatial_cache.sync_with_kv_cache(
-                mask, key, value, block_id, block_type="single"
+                mask.tensor, key, value, block_id, block_type="single"
             )
 
         hidden_states = sparse_attention_compute(
@@ -1015,28 +1033,23 @@ class Flux2ParallelSelfAttnProcessor:
             attn_mask=attention_mask,
             backend=self._attention_backend,
             parallel_config=self._parallel_config,
-            query_mask=mask,
+            query_rows=mask.full if mask is not None else None,
         )
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
         # Handle the feedforward (FF) logic
-        if mask is not None:
-            mlp_out = sparse_mlp_compute(
-                attn.mlp_act_fn,
-                mask,
-                mlp_hidden_states,
-                mlp_hidden_states.shape[2] // 2,
-            )
-        else:
-            mlp_out = attn.mlp_act_fn(mlp_hidden_states)
+        # Elementwise SwiGLU: skipped rows of mlp_hidden_states are zero from the
+        # sparse projection above and silu(0) * 0 == 0, so dense is the same
+        # result without the gather/scatter.
+        mlp_out = attn.mlp_act_fn(mlp_hidden_states)
 
         # Concatenate and parallel output projection
         hidden_states = torch.cat([hidden_states, mlp_out], dim=-1)
 
         if mask is not None:
             hidden_states = sparse_mlp_compute(
-                attn.to_out, mask, hidden_states, attn.to_out.out_features
+                attn.to_out, mask.full, hidden_states, attn.to_out.out_features
             )
         else:
             hidden_states = attn.to_out(hidden_states)
@@ -1400,7 +1413,7 @@ class Flux2TransformerBlock(nn.Module):
         if mask is not None:
             ff_output = sparse_mlp_compute(
                 self.ff,
-                mask[:, text_seq_len:],
+                mask.img,
                 norm_hidden_states,
                 norm_hidden_states.shape[2],
             )
@@ -1421,7 +1434,7 @@ class Flux2TransformerBlock(nn.Module):
         if mask is not None:
             context_ff_output = sparse_mlp_compute(
                 self.ff_context,
-                mask[:, :text_seq_len],
+                mask.txt,
                 norm_encoder_hidden_states,
                 norm_encoder_hidden_states.shape[2],
             )
@@ -1710,7 +1723,7 @@ class Flux2Transformer2DModel(
         num_ref_tokens: int = 0,
         ref_fixed_timestep: float = 0.0,
         spatial_cache: "SpatialCache | None" = None,
-        mask: torch.Tensor = None,
+        mask: "SparseMask | torch.Tensor | None" = None,
     ) -> torch.Tensor | Flux2Transformer2DModelOutput:
         """
         The [`Flux2Transformer2DModel`] forward method.
@@ -1747,8 +1760,12 @@ class Flux2Transformer2DModel(
             populated `Flux2KVCache`.
         """
 
-        if mask is not None:
-            mask = spatial_cache.preprocess_mask(mask)
+        if mask is not None and not isinstance(mask, SparseMask):
+            # Callers should pass a SparseMask built outside the compiled graph
+            # (see the pipeline); a raw mask is resolved here.
+            mask = SparseMask(
+                spatial_cache.preprocess_mask(mask), encoder_hidden_states.shape[1]
+            )
         num_txt_tokens = encoder_hidden_states.shape[1]
 
         # 1. Calculate timestep embedding and modulation parameters
@@ -1916,7 +1933,7 @@ class Flux2Transformer2DModel(
         if mask is not None:
             output = sparse_mlp_compute(
                 self.proj_out,
-                mask[:, encoder_hidden_states.shape[1] :],
+                mask.img,
                 hidden_states,
                 self.proj_out.out_features,
             )
@@ -1924,7 +1941,7 @@ class Flux2Transformer2DModel(
             output = self.proj_out(hidden_states)
 
         if spatial_cache is not None:
-            output = spatial_cache.sync_with_output_cache(mask, output)
+            output = spatial_cache.sync_with_output_cache(mask.tensor, output)
 
         if kv_cache_mode == "extract":
             if not return_dict:

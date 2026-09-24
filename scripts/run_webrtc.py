@@ -295,7 +295,9 @@ def output_pump() -> None:
 def push_input_frame(frame_bgr: np.ndarray) -> None:
     global latest_rgb, latest_input_bgr, output_version
     h, w = resolution["height"], resolution["width"]
-    cropped = crop_maximal_rectangle(frame_bgr, h, w)
+    cropped = crop_maximal_rectangle(
+        frame_bgr, h, w, area_downscale=bool(sp.config.get("area_downscale", True))
+    )
     # Hold pipeline_lock across the shared-tensor access so the producer thread
     # and a peer's executor call can't interleave during handoff.
     with pipeline_lock:

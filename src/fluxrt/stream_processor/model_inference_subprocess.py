@@ -238,9 +238,14 @@ class ModelInferenceSubprocess:
             self.transformer = torch.compile(
                 self.transformer,
             )
-            self.vae = torch.compile(
-                self.vae,
-            )
+            # torch.compile(module) only compiles forward(); the pipeline calls
+            # vae.encode / vae.decode, so the VAE always ran eager. Compile the
+            # conv stacks those methods run. compile_vae=false = the old (eager)
+            # behavior, for A/B — compiled convs round slightly differently.
+            if self.config.get("compile_vae", True):
+                vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
+                vae_nets.encoder = torch.compile(vae_nets.encoder)
+                vae_nets.decoder = torch.compile(vae_nets.decoder)
             self.interpolation_model = torch.compile(
                 self.interpolation_model,
             )
@@ -404,6 +409,15 @@ class ModelInferenceSubprocess:
         self.load_models()
         self.update_prompt_embeds(self.process_state["prompt"])
         self.previous_frame = None
+
+        # Live input path (see condition_from_input): one pinned upload per frame,
+        # and a uint8 -> [-1, 1] lookup built with the exact math of
+        # Flux2ImageProcessor.preprocess (np.float32 / 255.0, then 2.0 * x - 1.0).
+        self.input_pinned = torch.empty(
+            self.input_shared_tensor.shape, dtype=torch.uint8
+        ).pin_memory()
+        lut = torch.from_numpy(np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0)
+        self.input_lut = (2.0 * lut - 1.0).to(self.device)
 
         self.reference_image = None
         self.reference_active = True  # flipped off below unless a real image loads
@@ -632,8 +646,10 @@ class ModelInferenceSubprocess:
                     frames = new_frames
             frames_out = frames[1:]
 
+        # RGB -> BGR on the GPU (a negative-stride numpy view made the shm copy slow)
         frames_cpu = (
-            frames_out.mul(255)
+            frames_out.flip(1)
+            .mul(255)
             .to(torch.uint8)
             .permute(0, 2, 3, 1)
             .contiguous()
@@ -643,7 +659,7 @@ class ModelInferenceSubprocess:
 
         self.previous_frame = frame
 
-        return frames_cpu[..., ::-1]
+        return frames_cpu
 
     def send_frames(self, frames):
         self.output_batch_shared_tensor.copy_from(frames)
@@ -684,11 +700,24 @@ class ModelInferenceSubprocess:
         out_image = out_image.astype(np.uint8)
         return out_image
 
-    def process_frame_to_gpu(self, frame):
-        """Live path: np uint8 RGB in, (1,3,H,W) float16 [0,1] on the GPU out —
-        no GPU→CPU→GPU round-trip between VAE decode and RIFE (the numpy path
-        downloaded the float image, quantized it on the CPU and re-uploaded)."""
-        out = self._run_pipe(Image.fromarray(frame), "pt")
+    def condition_from_input(self):
+        """Live path input: the latest BGR uint8 frame in shared memory ->
+        (1,3,H,W) float32 in [-1, 1] on the GPU, the same values the PIL path
+        produces (cvtColor -> PIL -> Flux2ImageProcessor.preprocess), without
+        the CPU float math and with one pinned upload instead of two pageable
+        ones. The pinned buffer is free again once the previous frame's output
+        download (a sync) has returned."""
+        np.copyto(self.input_pinned.numpy(), self.input_shared_tensor.array)
+        frame = self.input_pinned.to(self.device, non_blocking=True)
+        rgb = frame.flip(-1).permute(2, 0, 1).unsqueeze(0)  # BGR HWC -> RGB CHW
+        return self.input_lut[rgb.long()]
+
+    def process_frame_to_gpu(self, condition):
+        """Live path: preprocessed condition tensor in, (1,3,H,W) float16 [0,1]
+        on the GPU out — no GPU→CPU→GPU round-trip between VAE decode and RIFE
+        (the numpy path downloaded the float image, quantized it on the CPU and
+        re-uploaded)."""
+        out = self._run_pipe(condition, "pt")
         return out.images[:1].to(torch.float16)
 
     def _run_pipe(self, input_frame, output_type):
@@ -725,21 +754,27 @@ class ModelInferenceSubprocess:
         self.process_init()
         prev_time = time.time()
         while self.running.value:
-            self.update_process_state()
-            self._advance_prompt_travel()
+            frames = self.step_live()
+            prev_time = self.sync_fps_and_send(prev_time, frames)
+
+    def step_live(self):
+        """One live-loop iteration: the latest input frame -> generated frame ->
+        RIFE pack (uint8 BGR on the CPU). process_main runs it free; the A/B
+        harness (scripts/perf_ab.py) runs it once per fixed input frame."""
+        self.update_process_state()
+        self._advance_prompt_travel()
+        if self.lip_processor is not None and self.lip_active:
             original_frame = self.input_shared_tensor.to_numpy()
             original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
-            if self.lip_processor is not None and self.lip_active:
-                frame = self.process_frame_with_pipeline(original_frame)
-                # Note: we are getting the latest input frame again after flux processing to reduce latency.
-                original_frame = self.input_shared_tensor.to_numpy()
-                original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
-                frame = self.lip_processor.process(frame, original_frame)
-                frame = self.convert_np_to_torch(frame)
-            else:
-                frame = self.process_frame_to_gpu(original_frame)
-            frames = self.interpolate_frames(frame)
-            prev_time = self.sync_fps_and_send(prev_time, frames)
+            frame = self.process_frame_with_pipeline(original_frame)
+            # Note: we are getting the latest input frame again after flux processing to reduce latency.
+            original_frame = self.input_shared_tensor.to_numpy()
+            original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
+            frame = self.lip_processor.process(frame, original_frame)
+            frame = self.convert_np_to_torch(frame)
+        else:
+            frame = self.process_frame_to_gpu(self.condition_from_input())
+        return self.interpolate_frames(frame)
 
     def process_main_batch(self):
         """Synchronous one-output-per-input render loop for OFFLINE batch jobs.
@@ -769,7 +804,10 @@ class ModelInferenceSubprocess:
             # Batch inputs are arbitrary-size video frames, so crop+resize to
             # (height, width) here too; otherwise the spatial-cache mask length won't
             # match the model's token count (e.g. a 1080p frame → oversized mask).
-            frame_rgb = crop_maximal_rectangle(frame_rgb, self.height, self.width)
+            frame_rgb = crop_maximal_rectangle(
+                frame_rgb, self.height, self.width,
+                area_downscale=bool(self.config.get("area_downscale", True)),
+            )
             # Drain prompt/seed/steps set before OR during the job (live steering),
             # then step any in-progress slerp morph — same order as the live loop.
             self.update_process_state()

@@ -30,7 +30,7 @@ from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
-from fluxrt.stream_processor.transformer_flux2 import SpatialCache
+from fluxrt.stream_processor.transformer_flux2 import SpatialCache, SparseMask
 from fluxrt.stream_processor.update_controller import UpdateController
 
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
@@ -259,6 +259,11 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         self.test_cache = {}
         self.spatial_cache = {}  # keys: timesteps, values: SpatialCache objects
+        # Spatial-cache keys (int timesteps) per (num_inference_steps,
+        # image_seq_len) — the schedule depends on nothing else (no caller
+        # passes custom sigmas). int(timestep) on the CUDA tensor was a
+        # GPU->CPU sync before every transformer step; now once per schedule.
+        self._timestep_keys = {}
         # Condition images after the first (the reference) are static between
         # set_reference_image calls: keep their encoded latents keyed by the
         # source image OBJECT (identity), so the VAE encode + CPU preprocess run
@@ -881,10 +886,18 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         condition_images = None
         if image is not None:
             for img in image:
-                self.image_processor.check_image_input(img)
+                if not torch.is_tensor(img):
+                    self.image_processor.check_image_input(img)
 
             condition_images = []
             for idx, img in enumerate(image):
+                if torch.is_tensor(img):
+                    # Already preprocessed on the device by the caller:
+                    # (1, 3, H, W) float32 in [-1, 1], H/W multiples of 16.
+                    condition_images.append(img)
+                    height = height or img.shape[-2]
+                    width = width or img.shape[-1]
+                    continue
                 cached = self._cond_latent_cache.get(idx) if idx > 0 else None
                 if cached is not None and cached[0] is img:
                     condition_images.append(None)  # latents reused below
@@ -962,6 +975,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             len(timesteps) - num_inference_steps * self.scheduler.order, 0
         )
         self._num_timesteps = len(timesteps)
+        schedule = (num_inference_steps, image_seq_len)
+        if schedule not in self._timestep_keys:
+            self._timestep_keys[schedule] = [int(t) for t in timesteps.tolist()]
+        timestep_keys = self._timestep_keys[schedule]
 
         profile("6")
 
@@ -1025,13 +1042,21 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
                     spatial_cache = None
                     if self.subprocess_config["enable_spatial_cache"]:
-                        timestep_key = int(timestep)
+                        timestep_key = timestep_keys[i]
                         if timestep_key not in self.spatial_cache:
                             self.spatial_cache[timestep_key] = SpatialCache(
                                 image_seq_len=latent_model_input.shape[1],
                                 output_channels=128,
                             )
                         spatial_cache = self.spatial_cache[timestep_key]
+
+                    # Active rows resolved here, eagerly, in 3 syncs — not
+                    # inside the compiled transformer on every sparse call.
+                    step_mask = None
+                    if mask is not None:
+                        step_mask = SparseMask(
+                            spatial_cache.preprocess_mask(mask), prompt_embeds.shape[1]
+                        )
 
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)
@@ -1042,7 +1067,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                         img_ids=latent_image_ids,  # B, image_seq_len, 4
                         joint_attention_kwargs=self.attention_kwargs,
                         return_dict=False,
-                        mask=mask,
+                        mask=step_mask,
                         spatial_cache=spatial_cache,
                     )[0]
                     profile("transformer only")
