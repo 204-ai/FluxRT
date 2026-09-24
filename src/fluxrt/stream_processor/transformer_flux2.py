@@ -56,6 +56,9 @@ class ActiveRows:
     def __init__(self, mask: torch.Tensor):  # mask: (1, span_len)
         self.idx = mask.squeeze(0).nonzero(as_tuple=False).squeeze(-1)
         self.any = self.idx.numel() > 0
+        # The count changes every frame: compile it as a dynamic size from the
+        # first call instead of specializing on it and recompiling later.
+        torch._dynamo.maybe_mark_dynamic(self.idx, 0)
 
 
 class SparseMask:
@@ -248,13 +251,19 @@ class SpatialCache:
 
         return filled_keys, filled_values
 
+    def kv_tensors(self, block_id: int, block_type: str):
+        """This block's (keys, values) cache tensors, looked up outside the
+        compiled block so its graph doesn't specialize on the block index."""
+        if block_type == "single":
+            return self.single_block_keys[block_id], self.single_block_values[block_id]
+        return self.double_block_keys[block_id], self.double_block_values[block_id]
+
+    @staticmethod
     def write_kv(
-        self,
         rows: "ActiveRows",
         active_keys: torch.Tensor,
         active_values: torch.Tensor,
-        block_id: int,
-        block_type: str,
+        kv: tuple,
     ):
         """sync_with_kv_cache for masks without execute-only rows (every executed
         row is also an updated one), on the active rows only: writes their keys /
@@ -264,11 +273,9 @@ class SpatialCache:
         Args:
             rows: active rows over the joint sequence.
             active_keys / active_values: (1, len(rows.idx), num_attention_heads, attention_head_dim)
+            kv: this block's cache tensors (kv_tensors)
         """
-        if block_type == "single":
-            keys, values = self.single_block_keys[block_id], self.single_block_values[block_id]
-        else:
-            keys, values = self.double_block_keys[block_id], self.double_block_values[block_id]
+        keys, values = kv
         keys.index_copy_(1, rows.idx, active_keys)
         values.index_copy_(1, rows.idx, active_values)
         return keys, values
@@ -699,17 +706,18 @@ class Flux2AttnProcessor:
         block_id: int = None,
         spatial_cache: SpatialCache | None = None,
         mask: torch.Tensor | None = None,
+        spatial_kv: tuple | None = None,
     ) -> torch.Tensor:
         if (
             mask is not None
-            and spatial_cache is not None
+            and spatial_kv is not None
             and not mask.exec_only
             and encoder_hidden_states is not None
             and attn.added_kv_proj_dim is not None
         ):
             return self._compact(
                 attn, hidden_states, encoder_hidden_states, attention_mask,
-                image_rotary_emb, block_id, spatial_cache, mask,
+                image_rotary_emb, spatial_kv, mask,
             )
 
         query, key, value, encoder_query, encoder_key, encoder_value = (
@@ -1029,10 +1037,11 @@ class Flux2ParallelSelfAttnProcessor:
         block_id: int = None,
         spatial_cache: SpatialCache | None = None,
         mask: torch.Tensor | None = None,
+        spatial_kv: tuple | None = None,
     ) -> torch.Tensor:
-        if mask is not None and spatial_cache is not None and not mask.exec_only:
+        if mask is not None and spatial_kv is not None and not mask.exec_only:
             return self._compact(
-                attn, hidden_states, attention_mask, image_rotary_emb, block_id, spatial_cache, mask.full
+                attn, hidden_states, attention_mask, image_rotary_emb, spatial_kv, mask.full
             )
 
         # Parallel in (QKV + MLP in) projection
@@ -1110,8 +1119,7 @@ def _flux2_attn_compact(
     encoder_hidden_states: torch.Tensor,
     attention_mask,
     image_rotary_emb,
-    block_id: int,
-    spatial_cache: SpatialCache,
+    spatial_kv: tuple,
     mask: SparseMask,
 ):
     """The spatial-cache path of a double block on the active rows only (see
@@ -1148,7 +1156,7 @@ def _flux2_attn_compact(
         query = apply_rotary_emb(query, rope, sequence_dim=1)
         key = apply_rotary_emb(key, rope, sequence_dim=1)
 
-    key, value = spatial_cache.write_kv(mask.full, key, value, block_id, block_type="double")
+    key, value = SpatialCache.write_kv(mask.full, key, value, spatial_kv)
 
     attn_out = dispatch_attention_fn(
         query,
@@ -1177,8 +1185,7 @@ def _flux2_parallel_compact(
     hidden_states: torch.Tensor,
     attention_mask,
     image_rotary_emb,
-    block_id: int,
-    spatial_cache: SpatialCache,
+    spatial_kv: tuple,
     rows: ActiveRows,
 ) -> torch.Tensor:
     """The spatial-cache path of a single block on the active rows only.
@@ -1210,7 +1217,7 @@ def _flux2_parallel_compact(
         query = apply_rotary_emb(query, rope, sequence_dim=1)
         key = apply_rotary_emb(key, rope, sequence_dim=1)
 
-    key, value = spatial_cache.write_kv(rows, key, value, block_id, block_type="single")
+    key, value = SpatialCache.write_kv(rows, key, value, spatial_kv)
 
     attn_out = dispatch_attention_fn(
         query,
@@ -2025,6 +2032,9 @@ class Flux2Transformer2DModel(
             kv_attn_kwargs["block_id"] = index_block
             kv_attn_kwargs["spatial_cache"] = spatial_cache
             kv_attn_kwargs["mask"] = mask
+            kv_attn_kwargs["spatial_kv"] = (
+                spatial_cache.kv_tensors(index_block, "double") if spatial_cache is not None else None
+            )
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 encoder_hidden_states, hidden_states = (
@@ -2076,6 +2086,9 @@ class Flux2Transformer2DModel(
             kv_attn_kwargs["block_id"] = index_block
             kv_attn_kwargs["spatial_cache"] = spatial_cache
             kv_attn_kwargs["mask"] = mask
+            kv_attn_kwargs["spatial_kv"] = (
+                spatial_cache.kv_tensors(index_block, "single") if spatial_cache is not None else None
+            )
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = self._gradient_checkpointing_func(

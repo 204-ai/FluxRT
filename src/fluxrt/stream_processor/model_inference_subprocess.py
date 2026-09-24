@@ -18,6 +18,11 @@ from PIL import Image
 # up partway and falls back to eager mode for the remaining graphs, costing
 # ~10-25% throughput. Raising the limit lets every variant compile, then warm
 # up once and stay hot.
+# Compiled kernels outside /tmp, so a reboot doesn't mean compiling from scratch.
+os.environ.setdefault(
+    "TORCHINDUCTOR_CACHE_DIR", os.path.expanduser("~/.cache/fluxrt/torchinductor")
+)
+
 try:
     torch._dynamo.config.recompile_limit = 64
     torch._dynamo.config.cache_size_limit = 256
@@ -250,10 +255,19 @@ class ModelInferenceSubprocess:
         if self.config.get("compile_models", False):
             # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
             # against cuBLAS per shape (longer warm-up; opt-in A/B knob).
-            self.transformer = torch.compile(
-                self.transformer,
-                mode=self.config.get("transformer_compile_mode", "default"),
-            )
+            mode = self.config.get("transformer_compile_mode", "default")
+            if self.config.get("compile_regional", True):
+                # One compiled graph per block class, shared by all 20 single /
+                # 5 double blocks. A whole-model graph recompiled for 30-60 s
+                # whenever the live input hit a new variant (reference on/off,
+                # nothing changed, text tokens active); a block graph takes
+                # seconds, and the warm-up at boot covers the variants.
+                for block in list(self.transformer.transformer_blocks) + list(
+                    self.transformer.single_transformer_blocks
+                ):
+                    block.compile(mode=mode)
+            else:
+                self.transformer = torch.compile(self.transformer, mode=mode)
             # torch.compile(module) only compiles forward(); the pipeline calls
             # vae.encode / vae.decode, so the VAE always ran eager. Compile the
             # conv stacks those methods run. compile_vae=false = the old (eager)
@@ -785,8 +799,52 @@ class ModelInferenceSubprocess:
         )
         return frame
 
+    def warm_up(self):
+        """Compile the graph variants live input will hit before the first real
+        frame: a full frame, nothing changed, part of the frame changed (two
+        sizes, so the row count compiles dynamic), text tokens active (prompt
+        change / travel), and all of it again with a reference image when
+        references are enabled. Leaves every cache as a fresh boot would."""
+        rng = np.random.default_rng(0)
+        base = rng.integers(0, 256, self.input_shared_tensor.shape, dtype=np.uint8)
+
+        def frames():
+            yield base  # first frame: everything
+            yield base  # nothing changed
+            for size in (48, 96, 160):  # part of the frame changed
+                moved = base.copy()
+                moved[:size, :size] = 255 - moved[:size, :size]
+                yield moved
+            self.update_controller.text_is_valid = False  # text tokens active
+            yield base
+
+        def run():
+            for frame in frames():
+                np.copyto(self.input_shared_tensor.array, frame)
+                self.step_live()
+
+        start = time.time()
+        run()
+        if self.config.get("use_reference_image", False):
+            size = self.config["reference_image_resolution"]
+            saved = self.reference_image
+            self.reference_image = Image.fromarray(
+                rng.integers(0, 256, (size["height"], size["width"], 3), dtype=np.uint8)
+            )
+            self._set_reference_active(True)
+            run()
+            self.reference_image = saved
+            self._set_reference_active(saved is not None)
+        self.update_controller.reset_cache()
+        self.pipe.spatial_cache.clear()
+        self.pipe._cond_latent_cache.clear()
+        self.previous_frame = None
+        print(f"warm-up: {time.time() - start:.1f} s")
+
     def process_main(self):
         self.process_init()
+        if self.config.get("compile_models", False) and self.config.get("warmup", True):
+            self.warm_up()
         prev_time = time.time()
         while self.running.value:
             frames = self.step_live()

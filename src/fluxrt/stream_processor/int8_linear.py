@@ -30,12 +30,13 @@ class Int8Linear(nn.Module):
         shape = x.shape
         x2 = x.reshape(-1, self.in_features)
         rows = x2.shape[0]
-        if rows <= 16:  # _int_mm needs more than 16 rows
-            x2 = torch.cat([x2, x2.new_zeros(17 - rows, self.in_features)])
         x_scale = x2.abs().amax(dim=1, keepdim=True).float().clamp(min=1e-8) / 127.0
         x_int8 = (x2.float() / x_scale).round().clamp(-127, 127).to(torch.int8)
-        acc = torch._int_mm(x_int8, self.weight_int8.t())
-        out = (acc.float() * x_scale * self.weight_scale).to(x.dtype)[:rows]
+        # _int_mm needs more than 16 rows; always pad (no size branch, so the
+        # compiled graph doesn't split into small / large row-count variants)
+        x_int8 = torch.nn.functional.pad(x_int8, (0, 0, 0, 17))
+        acc = torch._int_mm(x_int8, self.weight_int8.t())[:rows]
+        out = (acc.float() * x_scale * self.weight_scale).to(x.dtype)
         if self.bias is not None:
             out = out + self.bias
         return out.reshape(*shape[:-1], self.out_features)
