@@ -295,7 +295,9 @@ def output_pump() -> None:
 def push_input_frame(frame_bgr: np.ndarray) -> None:
     global latest_rgb, latest_input_bgr, output_version
     h, w = resolution["height"], resolution["width"]
-    cropped = crop_maximal_rectangle(frame_bgr, h, w)
+    cropped = crop_maximal_rectangle(
+        frame_bgr, h, w, area_downscale=bool(sp.config.get("area_downscale", True))
+    )
     # Hold pipeline_lock across the shared-tensor access so the producer thread
     # and a peer's executor call can't interleave during handoff.
     with pipeline_lock:
@@ -1678,6 +1680,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Override any config key at boot (repeatable; VALUE parsed as JSON, "
+            "else a string), e.g. --set int8_linear=true --set vae_decoder=taef2 "
+            "--set mask_dilation=1. Same syntax as scripts/perf_ab.py."
+        ),
+    )
+    parser.add_argument(
         "--no-server-camera",
         action="store_true",
         help=(
@@ -1742,6 +1755,16 @@ def main() -> None:
         overrides["enable_tiny_vae"] = True
     if args.flow_upscaler:
         overrides["enable_flow_upscaler"] = True
+    for item in args.set:
+        key, sep, raw = item.partition("=")
+        if not sep or not key:
+            parser.error(f"--set expects KEY=VALUE, got {item!r}")
+        try:
+            overrides[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            overrides[key] = raw
+    if overrides:
+        log.info("Config overrides: %s", overrides)
     if overrides:
         import atexit
         import json as _json
