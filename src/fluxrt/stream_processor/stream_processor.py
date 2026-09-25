@@ -98,6 +98,19 @@ class StreamProcessor:
         p = getattr(self.model_inference_subprocess, "process", None)
         return bool(p is not None and p.is_alive())
 
+    def worker_exitcode(self):
+        """The inference subprocess's exit code once it has died (negative = killed
+        by that signal, e.g. -9 from the OOM killer), else None."""
+        return self.model_inference_subprocess.exitcode()
+
+    def reset(self, timeout: float = 120.0) -> None:
+        """Batch mode only: return a kept-warm instance to a fresh instance's
+        temporal state (caches, previous frame, prompt travel) before the next
+        job. Blocks until the worker has done it; raises on death/timeout."""
+        if not self.batch_mode:
+            raise RuntimeError("reset() requires batch_mode=true")
+        self.model_inference_subprocess.reset(timeout=timeout)
+
     def get_input_tensor(self) -> SharedTensor:
         return self.input_shared_tensor
 

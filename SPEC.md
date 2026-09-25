@@ -1,9 +1,10 @@
-# SPEC — FluxRT webrtc server
+# SPEC — FluxRT webrtc server + batch render
 
 ## §G GOAL
 input: ∀ time ≤1 peer drives pipeline input; owner death/leave → oldest waiter takes over seamless (≤~9s worst case, next-frame when graceful); transient blip ⊥ force full renegotiation (client grace); no-waiter owner ⊥ evicted on gap. [done T1-T8]
 egress: WHEP endpoint — standard players (GStreamer whepsrc, browser WHEP libs, studio-world) watch FluxRT output; per-session resolution/fps knobs for bandwidth. `/offer` + ownership behavior identical.
 ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, browser) feed pipeline input as ordinary ownership claimants; realtime-client protocol & contention semantics untouched.
+batch: `--batch-only` render gets live-path speedups — GPU-side in/out, encode overlapped w/ render, small IPC, warm-up + heap freeze @ load, processor kept warm across jobs → 2nd back-to-back job first frame in seconds (not ~35s), steady fps ↑ vs baseline (1280×720→2560×1440 4 steps: ~1.0 fps, 72 fr job 107s). Baseline `perf/hot-path` @ 24ced69.
 
 ## §C CONSTRAINTS
 - C1: InputOwnership sole mutator of owner/waiter/active state; policy fns pure, unit-testable w/o aiortc/GPU (existing module ethos).
@@ -15,6 +16,13 @@ ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, br
 - C7: old test client `scripts/webrtc_test_client.html` ! keep working unmodified.
 - C8: WHEP lives in `run_webrtc.py`, own section; no new deps; egress-only — ⊥ on("track")/on("datachannel") wiring on WHEP PCs; ported from sd-webrtc PR#9 pattern.
 - C9: `/offer` path diff ! additive-only (`_rtc_config` already extracted — reuse as-is).
+- C10: batch work ⊥ changes live output: `process_main`, `step_live`, `condition_from_input` behavior frozen; shared helpers may gain opt-in params (default = current behavior).
+- C11: `ProcessorFactory` duck interface (`start/is_ready/set_*/submit_frame/stop`, opt `worker_alive`) kept → fake-processor tests `tests/test_batch_render.py` run unmodified; new methods (`reset`) probed via `getattr`, absent → cold path.
+- C12: keep-warm default ON only under `--batch-only` / `FLUXRT_BATCH_ONLY=1`; live + batch VRAM ⊥ co-fit.
+- C13: batch lip transfer stays disabled (`_batch_config`); `process_frame_with_pipeline` kept as lip fallback only, ⊥ optimized.
+- C14: GPU kernels ⊥ bit-deterministic (`scripts/perf_ab.py` docstring) ∴ ∀ quality gate = LPIPS/PSNR vs noise floor (`perf_ab compare --noise`), ⊥ byte equality.
+- C15: out of scope: multi-frame pipelining in child (submit n+1 before n returns), live-path changes, WebRTC egress.
+- C16: ∀ batch change measured on RTX 5090, same server cfg, 72-fr 1080p clip (seed 52, steps 4, interp 0, flow upscaler on) before & after.
 
 ## §I INTERFACES
 - fn: `owner_gap_should_release(gap_s: float, other_waiters: int) -> bool`  // pure, input_ownership.py; True iff gap_s ≥ OWNER_GAP_WITH_WAITER & other_waiters ≥ 1
@@ -30,6 +38,16 @@ ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, br
 - api: `POST /whip` (Content-Type `application/sdp`, offer w/ video) → 201 + `Location: /whip/<uuid>` + answer SDP; 415/400 same as WHEP; 503 when `sp is None` (like `/offer`)
 - api: `DELETE /whip/<uuid>` → 200 (cancels consume task → ownership released via existing finally) | 404; `PATCH` → 405
 - page: `GET /webrtc-test` → `scripts/webrtc-test.html` — unified test page, URL standard w/ sd-webrtc: mode whip+whep (2 PCs) | sendrecv `/offer` (1 PC, realtime-client style); view side|split|blend + mix; prompt bar → `POST /prompt`; capture @ healthz `resolution`; legacy `/test` stays (C7)
+- fn: `ModelInferenceSubprocess.condition_from_rgb(frame_rgb) -> Tensor`  // batch twin of `condition_from_input`: RGB uint8 model-res → `input_pinned` → non_blocking upload → `input_lut` → (1,3,H,W) [-1,1]; no flip
+- fn: `interpolate_frames(frame, bgr: bool = True)`  // batch passes `bgr=False` → uint8 RGB (N,H,W,3) straight off GPU; live default unchanged (C10)
+- ipc: `request_queue` item ∈ `(seq, frame_rgb)` | `("reset", seq)` | `None`; reset → `response_queue.put((seq, []))` ack
+- method: `StreamProcessor.reset(timeout)` / `ModelInferenceSubprocess.reset(timeout)`  // parent-side, blocks for ack; same death/timeout polling as `submit_frame`
+- config: `batch_keep_warm: bool`  // default = batch-only mode (C12)
+- config: `batch_keep_warm_idle_s: float`  // 0 = never idle-evict (default ?)
+- config: `batch_encoder: "libx264" | "h264_nvenc"`  // default libx264; nvenc absent in PyAV build → libx264 + log line
+- env: `FLUXRT_PROFILE=1` → batch per-N-frame span log: decode, parent crop, ipc out, render (CUDA events), quant+download, ipc back, encode
+- error: `batch inference subprocess died during render (exitcode=<n>)` & same suffix on load-death msg
+- api: `POST /batch/jobs` 409 iff prior job non-terminal | preflight fail; job `done` ⇒ slot free
 
 ## §R RESEARCH
 id|topic|finding|src
@@ -64,6 +82,17 @@ V21: shutdown bounded w/ live WHEP/WHIP: uvicorn `timeout_graceful_shutdown=3` (
 V16: `POST /whip` valid SDP → 201 + Location + `application/sdp`; 415 wrong ct; 400 empty/bad; 503 no pipeline
 V17: WHIP publisher = ordinary ownership claimant — same `consume_peer_input(track, pc, ownership, _frame_sink, notify=_input_notify)` path as `/offer` ∴ V1-V5,V9 apply unchanged; WHIP PC gets empty `_fluxrt_channels` → `send_to_pc` no-op; ⊥ datachannel wiring
 V18: realtime-client surfaces byte-identical — `/offer` route, ctrl vocabulary, `/healthz` fields untouched; WHIP claim visible to client only as existing `input:peer` broadcast (same as 2nd browser sender)
+V22: batch out frames == in frames × 2**interp, submit order preserved, CFR fps = (job.fps | src fps | 25) × 2**interp — holds through encoder thread & streamed decode
+V23: batch child (lip off) ⊥ PIL, ⊥ `process_frame_with_pipeline`, ⊥ float image GPU→CPU; only uint8 RGB leaves GPU (≈11 MB/fr @ 2560×1440, was ≈44 MB float32)
+V24: batch output quality: new path vs baseline LPIPS/PSNR within noise floor (C14); frame count identical
+V25: encoder queue bounded (maxsize ≤4) → parent RAM bounded; encoder exception → job `error` w/ msg; cancel → encoder thread drained & joined, partial file deleted (existing rule)
+V26: input decode streamed ⊥ full frame list → parent RSS independent of clip length; `frames_total` = stream frame count, fallback = counted after decode (? progress % unknown until then)
+V27: parent crops to model res via same `crop_maximal_rectangle(frame, h, w, area_downscale=cfg)` before `request_queue.put`; child crop kept as no-op guard ∴ child always gets model-res frames
+V28: `compile_models` & `warmup` → `warm_up()` & `_freeze_heap()` finish before `proc_ready = True`; warm-up leaves caches as fresh boot ∴ first real frame time ≈ steady frame time (no compile on frame 1)
+V29: warm reuse ⊥ observable carry-over: job on reused proc (after `reset`) vs same job on fresh proc within noise floor; `reset` clears update_controller cache, `pipe.spatial_cache`, `pipe._cond_latent_cache`, `previous_frame`, prompt-travel state; acked before first frame of new job
+V30: reuse iff new job `interp` == proc build `interp`; else teardown + rebuild; reset/submit error → teardown (⊥ reuse suspect proc); shutdown | idle > `batch_keep_warm_idle_s` (>0) → teardown
+V31: job `done` observable ⇒ `_active` cleared (teardown, if any, already finished) ∴ submit after polling `done` ⊥ 409; submit while non-terminal still 409 (existing tests)
+V32: `FLUXRT_PROFILE` unset → batch path adds ⊥ CUDA events, ⊥ syncs, ⊥ per-frame log
 
 ## §T TASKS
 id|status|task|cites
@@ -84,6 +113,18 @@ T14|x|`scripts/whip_test_client.html` + `GET /whip-client` route (mirror `/test`
 T15|x|smoke test `scripts/test_whip.py`: shim + fake sp + `_frame_sink` collector — publish → ownership active & frames collected; 2nd publisher joins/leaves → 1st still owner; DELETE → ownership released, repeat 404|V16,V17
 T16|x|unify test pages → `GET /webrtc-test` (whip+whep | sendrecv toggle); drop `/whip-client` + `/whep-client` routes & files|I.page
 T17|x|version-gated output pacing: `output_version` bump in `push_input_frame`, gated `FluxRTTrack.recv` w/ fps cap + 1Hz keepalive|V19
+T18|~|batch profiling behind `FLUXRT_PROFILE`: spans decode / parent crop / ipc out / render (CUDA events) / quant+dl / ipc back / encode, log every N fr; record baseline table (72 & 255 fr 1080p→1440p, 576×320 steps 2/4/6/8)|V32,C16
+T19|~|P1 child GPU I/O: `condition_from_rgb` + `process_frame_to_gpu` + `interpolate_frames(bgr=False)` in `process_main_batch`; drop `convert_np_to_torch` & CPU `[:, :, ::-1]` flip; lip-active → old path|V23,V22,C10,C13,I.fn
+T20|.|P1 A/B: 72-fr clip old vs new + noise-floor run; LPIPS/PSNR, fps, peak VRAM|V24,C14,C16
+T21|x|P2 `BatchJobManager._run`: encoder thread + bounded queue; streamed decode producer thread; tests w/ fake proc: order, count, encoder raise → error, cancel mid-job → threads joined & no file|V22,V25,V26,C11
+T22|x|P2 opt `batch_encoder` = `h264_nvenc` probe + libx264 fallback|I.config
+T23|x|P3 parent-side crop before `request_queue.put` (in `_run` | `StreamProcessor.submit_frame`); test: child receives model-res frame|V27
+T24|~|P4 `process_main_batch`: `warm_up()` before `proc_ready` when `compile_models` & `warmup`; measure load vs first-frame shift|V28
+T25|x|P5 `("reset", seq)` request + ack in child; `reset()` on subprocess & StreamProcessor; `BatchJobManager` keeps proc per `batch_keep_warm`, reuse rules, idle timer, shutdown teardown; tests w/ fake proc: 2 jobs same interp → 1 start, different interp → rebuild, error → teardown|V29,V30,C11,C12
+T26|.|P5 GPU check: 2 back-to-back jobs — 2nd first frame seconds; warm vs fresh output within noise floor|V29,V24
+T27|x|P6 set `done` after teardown & `_active` clear (finally ordering); test: submit immediately after poll sees `done` → 201|V31
+T28|~|P7 exitcode in death errors; repro restart w/ `--set 'resolution={"width":1280,"height":720}'` → first job, capture child stderr; root cause → `/spec bug:`|I.error,V28
+T29|.|report: per change load / first frame / steady fps (fr 2..N) / job total 72 & 255 fr / out count / LPIPS+PSNR vs baseline / noise floor / peak VRAM|C16,V24
 
 ## §B BUGS
 id|date|cause|fix
