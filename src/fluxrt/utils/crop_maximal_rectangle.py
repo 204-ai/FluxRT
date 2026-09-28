@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 
 
-def crop_maximal_rectangle(image: np.ndarray, target_height: int, target_width: int) -> np.ndarray:
+def crop_maximal_rectangle(image: np.ndarray, target_height: int, target_width: int, area_downscale: bool = True) -> np.ndarray:
     """
     Crops maximal rectangle with target aspect ratio centered by remaining axis,
     then resizes cropped tile to target shape. Output is not "stretched" like with common resize.
@@ -33,6 +33,11 @@ def crop_maximal_rectangle(image: np.ndarray, target_height: int, target_width: 
     start_y = (input_image_height - crop_height) // 2
 
     cropped_image = image[start_y:start_y + crop_height, start_x:start_x + crop_width]
-    image = cv2.resize(cropped_image, (target_width, target_height), cv2.INTER_AREA)
+    # INTER_AREA was passed positionally (the `dst` slot), so this always ran
+    # INTER_LINEAR — which aliases on a downscale. AREA to shrink, LINEAR to grow;
+    # area_downscale=False restores the old always-LINEAR behavior for A/B.
+    shrinking = crop_width > target_width or crop_height > target_height
+    interpolation = cv2.INTER_AREA if shrinking and area_downscale else cv2.INTER_LINEAR
+    image = cv2.resize(cropped_image, (target_width, target_height), interpolation=interpolation)
 
     return image

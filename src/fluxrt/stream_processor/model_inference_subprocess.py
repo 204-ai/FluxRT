@@ -5,6 +5,7 @@ import numpy as np
 import json
 import os
 import signal
+import gc
 from safetensors.torch import load_file
 from multiprocessing import Process, Value, Manager
 from queue import Empty
@@ -18,6 +19,11 @@ from PIL import Image
 # up partway and falls back to eager mode for the remaining graphs, costing
 # ~10-25% throughput. Raising the limit lets every variant compile, then warm
 # up once and stay hot.
+# Compiled kernels outside /tmp, so a reboot doesn't mean compiling from scratch.
+os.environ.setdefault(
+    "TORCHINDUCTOR_CACHE_DIR", os.path.expanduser("~/.cache/fluxrt/torchinductor")
+)
+
 try:
     torch._dynamo.config.recompile_limit = 64
     torch._dynamo.config.cache_size_limit = 256
@@ -110,8 +116,8 @@ class ModelInferenceSubprocess:
         self.batch_mode = bool(self.config.get("batch_mode", False))
         self.proc_ready = Value("b", False)  # set once models are loaded (batch readiness)
         self._seq = 0
-        self.request_queue = self._manager.Queue()   # parent -> worker: (seq, rgb)
-        self.response_queue = self._manager.Queue()  # worker -> parent: (seq, rgb_out)
+        self.request_queue = self._manager.Queue()   # parent -> worker: (seq, rgb) | ("reset", seq)
+        self.response_queue = self._manager.Queue()  # worker -> parent: (seq, [rgb_out, ...])
 
     def __getstate__(self):
         # The subprocess is spawned via Process(target=self.process_main),
@@ -152,6 +158,14 @@ class ModelInferenceSubprocess:
         self.transformer = Flux2Transformer2DModel.from_pretrained(
             f"{models_path}/transformer", local_files_only=True, device=device
         ).to(dtype)
+        int8_mode = self.config.get("int8_linear", False)
+        if int8_mode:
+            # W8A8 INT8 GEMMs in the blocks: faster, numerically different (opt-in).
+            # true = every block linear, "inputs" = input-side projections only.
+            from fluxrt.stream_processor.int8_linear import quantize_transformer_blocks
+
+            mode = "inputs" if int8_mode == "inputs" else "all"
+            print(f"int8_linear ({mode}): {quantize_transformer_blocks(self.transformer, mode)} layers")
 
         self.text_encoder = Qwen3ForCausalLM.from_pretrained(
             f"{models_path}/text_encoder", local_files_only=True
@@ -234,15 +248,42 @@ class ModelInferenceSubprocess:
                 f"{models_path}/vae", local_files_only=True, device=self.device
             ).to(self.dtype)
 
+        # cuDNN autotuning for the fixed-shape VAE/RIFE convs: -2.5 ms/frame on the
+        # RTX 4090, output within the run-to-run noise floor (LPIPS 0.0165 vs
+        # 0.0183). cudnn_benchmark=false for A/B.
+        torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", True))
+
         if self.config.get("compile_models", False):
-            self.transformer = torch.compile(
-                self.transformer,
-            )
-            self.vae = torch.compile(
-                self.vae,
-            )
+            # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
+            # against cuBLAS per shape (longer warm-up; opt-in A/B knob).
+            mode = self.config.get("transformer_compile_mode", "default")
+            if self.config.get("compile_regional", True):
+                # One compiled graph per block class, shared by all 20 single /
+                # 5 double blocks. A whole-model graph recompiled for 30-60 s
+                # whenever the live input hit a new variant (reference on/off,
+                # nothing changed, text tokens active); a block graph takes
+                # seconds, and the warm-up at boot covers the variants.
+                for block in list(self.transformer.transformer_blocks) + list(
+                    self.transformer.single_transformer_blocks
+                ):
+                    block.compile(mode=mode)
+            else:
+                self.transformer = torch.compile(self.transformer, mode=mode)
+            # torch.compile(module) only compiles forward(); the pipeline calls
+            # vae.encode / vae.decode, so the VAE always ran eager. Compile the
+            # conv stacks those methods run. compile_vae=false = the old (eager)
+            # behavior, for A/B — compiled convs round slightly differently.
+            if self.config.get("compile_vae", True):
+                vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
+                vae_nets.encoder = torch.compile(vae_nets.encoder)
+                vae_nets.decoder = torch.compile(vae_nets.decoder)
+            # RIFE as CUDA graphs (reduce-overhead). Opt-in: on the RTX 4090 at
+            # 576x320, interpolation_exp 1, it measured 0.3 ms/frame (RIFE is
+            # ~2.5 ms of GPU time there) — not worth the graph-pool memory by default.
+            self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", False))
             self.interpolation_model = torch.compile(
                 self.interpolation_model,
+                mode="reduce-overhead" if self.rife_cudagraphs else "default",
             )
 
         reference_image_seq_len = None
@@ -274,6 +315,16 @@ class ModelInferenceSubprocess:
             upscaler_pipeline=self.upscaler_pipe,
         )
         self.pipe.to(self.device)
+
+        # "vae_decoder": "taef2" — full VAE encoder (the model's reading of the
+        # input stays exact), TAEF2 decoder (~2 ms vs ~19 ms). Changes the output
+        # look (softer fine detail): opt-in. enable_tiny_vae swaps both sides.
+        self.pipe.tiny_decoder = None
+        if self.config.get("vae_decoder", "full") == "taef2" and not self.config.get("enable_tiny_vae", False):
+            tiny = DiffusersTAEF2Wrapper(path="taef2/taef2.safetensors").to(self.device, self.dtype)
+            if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
+                tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
+            self.pipe.tiny_decoder = tiny
 
         if self.config.get("use_lora", False):
             self.pipe.load_lora_weights(self.config.get("lora_weights_path", ""))
@@ -328,6 +379,9 @@ class ModelInferenceSubprocess:
             "mode": mode,
             "prompt": target_prompt,
             "stride": stride,
+            # "stride": full execute every stride-th frame; "rolling": a
+            # different 1/stride of the image every frame
+            "refresh": self.config.get("prompt_travel_refresh", "stride"),
         }
 
     def _advance_prompt_travel(self) -> None:
@@ -366,7 +420,14 @@ class ModelInferenceSubprocess:
         # the final frame (which must land the exact target everywhere). Caps the
         # dense-execute cost at ~1/stride of the per-frame version.
         last = tv["i"] >= tv["n"]
-        if last or tv["i"] == 1 or tv["i"] % tv["stride"] == 0:
+        if last or tv["i"] == 1:
+            self.update_controller.requires_reset = True
+        elif tv["refresh"] == "rolling":
+            # Same catch-up rate as the strided full execute (every token within
+            # `stride` frames), spread evenly: 1/stride of the image each frame
+            # instead of all of it every stride-th frame (no fps sawtooth).
+            self.update_controller.refresh = (tv["i"] % tv["stride"], tv["stride"])
+        elif tv["i"] % tv["stride"] == 0:
             self.update_controller.requires_reset = True
 
         if last:
@@ -404,6 +465,15 @@ class ModelInferenceSubprocess:
         self.load_models()
         self.update_prompt_embeds(self.process_state["prompt"])
         self.previous_frame = None
+
+        # Live input path (see condition_from_input): one pinned upload per frame,
+        # and a uint8 -> [-1, 1] lookup built with the exact math of
+        # Flux2ImageProcessor.preprocess (np.float32 / 255.0, then 2.0 * x - 1.0).
+        self.input_pinned = torch.empty(
+            self.input_shared_tensor.shape, dtype=torch.uint8
+        ).pin_memory()
+        lut = torch.from_numpy(np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0)
+        self.input_lut = (2.0 * lut - 1.0).to(self.device)
 
         self.reference_image = None
         self.reference_active = True  # flipped off below unless a real image loads
@@ -444,16 +514,35 @@ class ModelInferenceSubprocess:
         self._seq += 1
         seq = self._seq
         self.request_queue.put((seq, frame_rgb))
+        return self._await_response(seq, timeout, "render")
+
+    def reset(self, timeout: float = 120.0) -> None:
+        """Parent-side (batch keep-warm): return the worker to a fresh instance's
+        temporal state before the next job. In order with frames, blocks for the ack."""
+        self._seq += 1
+        seq = self._seq
+        self.request_queue.put(("reset", seq))
+        self._await_response(seq, timeout, "reset")
+
+    def exitcode(self):
+        return self.process.exitcode if self.process is not None else None
+
+    def _await_response(self, seq: int, timeout: float, what: str):
         deadline = time.time() + timeout
         while True:
             try:
-                _, out = self.response_queue.get(timeout=0.5)
-                return out
+                got, out = self.response_queue.get(timeout=0.5)
             except Empty:
                 if self.process is not None and not self.process.is_alive():
-                    raise RuntimeError("batch inference subprocess died during render")
+                    raise RuntimeError(
+                        f"batch inference subprocess died during {what} (exitcode={self.process.exitcode})"
+                    )
                 if time.time() >= deadline:
-                    raise RuntimeError("batch render timed out waiting for the inference subprocess")
+                    raise RuntimeError(f"batch {what} timed out waiting for the inference subprocess")
+                continue
+            if got == seq:
+                return out
+            # else: a late answer to an earlier request that timed out — skip it
 
     def stop(self):
         # Reap the child with a bounded escalation that also detaches a SIGKILL
@@ -604,11 +693,12 @@ class ModelInferenceSubprocess:
         )
         return frame_gpu
 
-    def interpolate_frames(self, frame):
+    def interpolate_frames(self, frame, bgr: bool = True):
         """
         Takes one new generated frame (torch tensor, RGB, on GPU, float16)
         Interpolates according to interpolation_exp times.
-        Batches to [interpolated frames, new frame].
+        Batches to [interpolated frames, new frame], uint8 on the CPU: BGR for the
+        live shared-memory path, RGB with bgr=False (batch).
         """
         if self.previous_frame is None:
             self.previous_frame = frame
@@ -617,6 +707,10 @@ class ModelInferenceSubprocess:
             frames_out = frame
         else:
             frames = torch.cat([self.previous_frame, frame], dim=0)
+            if getattr(self, "rife_cudagraphs", False):
+                # New frame: earlier graph outputs may be overwritten. Each
+                # call's output is copied into new_frames right away.
+                torch.compiler.cudagraph_mark_step_begin()
             with torch.no_grad():
                 for _ in range(self.interpolation_exp):
                     B = frames.size(0)
@@ -632,8 +726,12 @@ class ModelInferenceSubprocess:
                     frames = new_frames
             frames_out = frames[1:]
 
+        # RGB -> BGR on the GPU (a negative-stride numpy view made the shm copy slow)
+        if bgr:
+            frames_out = frames_out.flip(1)
         frames_cpu = (
-            frames_out.mul(255)
+            frames_out
+            .mul(255)
             .to(torch.uint8)
             .permute(0, 2, 3, 1)
             .contiguous()
@@ -643,7 +741,7 @@ class ModelInferenceSubprocess:
 
         self.previous_frame = frame
 
-        return frames_cpu[..., ::-1]
+        return frames_cpu
 
     def send_frames(self, frames):
         self.output_batch_shared_tensor.copy_from(frames)
@@ -684,11 +782,33 @@ class ModelInferenceSubprocess:
         out_image = out_image.astype(np.uint8)
         return out_image
 
-    def process_frame_to_gpu(self, frame):
-        """Live path: np uint8 RGB in, (1,3,H,W) float16 [0,1] on the GPU out —
-        no GPU→CPU→GPU round-trip between VAE decode and RIFE (the numpy path
-        downloaded the float image, quantized it on the CPU and re-uploaded)."""
-        out = self._run_pipe(Image.fromarray(frame), "pt")
+    def condition_from_input(self):
+        """Live path input: the latest BGR uint8 frame in shared memory ->
+        (1,3,H,W) float32 in [-1, 1] on the GPU, the same values the PIL path
+        produces (cvtColor -> PIL -> Flux2ImageProcessor.preprocess), without
+        the CPU float math and with one pinned upload instead of two pageable
+        ones. The pinned buffer is free again once the previous frame's output
+        download (a sync) has returned."""
+        np.copyto(self.input_pinned.numpy(), self.input_shared_tensor.array)
+        frame = self.input_pinned.to(self.device, non_blocking=True)
+        rgb = frame.flip(-1).permute(2, 0, 1).unsqueeze(0)  # BGR HWC -> RGB CHW
+        return self.input_lut[rgb.long()]
+
+    def condition_from_rgb(self, frame_rgb):
+        """Batch twin of condition_from_input: an RGB uint8 frame at the model
+        resolution -> (1,3,H,W) float32 in [-1, 1] on the GPU, through the same
+        pinned buffer and lookup (batch frames are already RGB: no flip)."""
+        np.copyto(self.input_pinned.numpy(), frame_rgb)
+        frame = self.input_pinned.to(self.device, non_blocking=True)
+        rgb = frame.permute(2, 0, 1).unsqueeze(0)
+        return self.input_lut[rgb.long()]
+
+    def process_frame_to_gpu(self, condition):
+        """Live path: preprocessed condition tensor in, (1,3,H,W) float16 [0,1]
+        on the GPU out — no GPU→CPU→GPU round-trip between VAE decode and RIFE
+        (the numpy path downloaded the float image, quantized it on the CPU and
+        re-uploaded)."""
+        out = self._run_pipe(condition, "pt")
         return out.images[:1].to(torch.float16)
 
     def _run_pipe(self, input_frame, output_type):
@@ -721,41 +841,124 @@ class ModelInferenceSubprocess:
         )
         return frame
 
+    def warm_up(self):
+        """Compile the graph variants live input will hit before the first real
+        frame: a full frame, nothing changed, part of the frame changed (three
+        sizes, so the row count compiles dynamic), text tokens active (prompt
+        change / travel) with and without image changes, and all of it again with a reference image when
+        references are enabled. Leaves every cache as a fresh boot would."""
+        rng = np.random.default_rng(0)
+        base = rng.integers(0, 256, self.input_shared_tensor.shape, dtype=np.uint8)
+
+        def frames():
+            yield base  # first frame: everything
+            yield base  # nothing changed
+            for size in (48, 96, 160):  # part of the frame changed
+                moved = base.copy()
+                moved[:size, :size] = 255 - moved[:size, :size]
+                yield moved
+            self.update_controller.text_is_valid = False  # text tokens active, image moved
+            yield base
+            yield base  # nothing changed
+            self.update_controller.text_is_valid = False  # text tokens active, image still
+            yield base
+
+        def run():
+            for frame in frames():
+                np.copyto(self.input_shared_tensor.array, frame)
+                self.step_live()
+
+        start = time.time()
+        run()
+        if self.config.get("use_reference_image", False):
+            size = self.config["reference_image_resolution"]
+            saved = self.reference_image
+            self.reference_image = Image.fromarray(
+                rng.integers(0, 256, (size["height"], size["width"], 3), dtype=np.uint8)
+            )
+            self._set_reference_active(True)
+            run()
+            self.reference_image = saved
+            self._set_reference_active(saved is not None)
+        self.update_controller.reset_cache()
+        self.pipe.spatial_cache.clear()
+        self.pipe._cond_latent_cache.clear()
+        self.previous_frame = None
+        print(f"warm-up: {time.time() - start:.1f} s")
+        self._freeze_heap()
+
+    def _freeze_heap(self):
+        """Compilation leaves millions of long-lived Python objects; a full
+        garbage collection walking them stalled live frames for seconds. Collect
+        once, then move everything alive now out of the collector's view, and log
+        any collection that still takes long."""
+        gc.collect()
+        gc.freeze()
+        started = {}
+
+        def timing(phase, info):
+            if phase == "start":
+                started["t"] = time.perf_counter()
+            elif "t" in started:
+                ms = (time.perf_counter() - started.pop("t")) * 1000
+                if ms > 200:
+                    print(f"slow gc: generation {info.get('generation')} took {ms:.0f} ms")
+
+        gc.callbacks.append(timing)
+        print(f"gc: froze {gc.get_freeze_count()} objects")
+
     def process_main(self):
         self.process_init()
+        if self.config.get("compile_models", False) and self.config.get("warmup", True):
+            self.warm_up()
         prev_time = time.time()
         while self.running.value:
-            self.update_process_state()
-            self._advance_prompt_travel()
+            frames = self.step_live()
+            prev_time = self.sync_fps_and_send(prev_time, frames)
+
+    def step_live(self):
+        """One live-loop iteration: the latest input frame -> generated frame ->
+        RIFE pack (uint8 BGR on the CPU). process_main runs it free; the A/B
+        harness (scripts/perf_ab.py) runs it once per fixed input frame."""
+        self.update_process_state()
+        self._advance_prompt_travel()
+        if self.lip_processor is not None and self.lip_active:
             original_frame = self.input_shared_tensor.to_numpy()
             original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
-            if self.lip_processor is not None and self.lip_active:
-                frame = self.process_frame_with_pipeline(original_frame)
-                # Note: we are getting the latest input frame again after flux processing to reduce latency.
-                original_frame = self.input_shared_tensor.to_numpy()
-                original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
-                frame = self.lip_processor.process(frame, original_frame)
-                frame = self.convert_np_to_torch(frame)
-            else:
-                frame = self.process_frame_to_gpu(original_frame)
-            frames = self.interpolate_frames(frame)
-            prev_time = self.sync_fps_and_send(prev_time, frames)
+            frame = self.process_frame_with_pipeline(original_frame)
+            # Note: we are getting the latest input frame again after flux processing to reduce latency.
+            original_frame = self.input_shared_tensor.to_numpy()
+            original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
+            frame = self.lip_processor.process(frame, original_frame)
+            frame = self.convert_np_to_torch(frame)
+        else:
+            frame = self.process_frame_to_gpu(self.condition_from_input())
+        return self.interpolate_frames(frame)
 
     def process_main_batch(self):
         """Synchronous one-output-per-input render loop for OFFLINE batch jobs.
 
         Unlike process_main (the live free-run path), there is NO drain-to-latest,
-        NO interpolation, NO fixed-fps pacing and NO shared-tensor output: each
-        input frame arrives on request_queue, is rendered once via the SAME
-        pipeline call the live loop uses (process_frame_with_pipeline), and the
-        uint8 RGB result goes back on response_queue — exactly one output per input.
+        NO fixed-fps pacing and NO shared-tensor output: each input frame arrives
+        on request_queue, is rendered once through the same GPU path the live loop
+        uses (pinned upload -> pipeline -> RIFE pack, uint8 off the GPU), and the
+        uint8 RGB result goes back on response_queue — exactly one output per input
+        (2**interpolation_exp with RIFE).
 
         The temporal caches (update_controller, previous_frame) are NOT reset
-        between frames, so a video keeps its frame-to-frame coherence; they start
-        clean because this is a fresh, dedicated instance (process_init).
+        between frames, so a video keeps its frame-to-frame coherence. They start
+        clean: a fresh instance (process_init, then warm-up, which leaves them as
+        booted), or a kept-warm one after a ("reset", seq) request.
         """
         self.process_init()
+        # Compile before reporting ready: the graph variants compile at load time
+        # instead of on the first frames of a job (and never mid-render).
+        if self.config.get("compile_models", False) and self.config.get("warmup", True):
+            self.warm_up()
         self.proc_ready.value = True
+        profile = os.environ.get("FLUXRT_PROFILE", "") == "1"
+        spans = {"render": 0.0, "download": 0.0}
+        rendered = 0
         while self.running.value:
             try:
                 item = self.request_queue.get(timeout=0.2)
@@ -763,26 +966,69 @@ class ModelInferenceSubprocess:
                 continue
             if item is None:  # poison pill -> exit the loop on teardown
                 break
+            if item[0] == "reset":
+                self._reset_batch_state()
+                self.response_queue.put((item[1], []))
+                continue
             seq, frame_rgb = item
-            # The model only ever sees frames at its OWN resolution — the live path
-            # crops every frame via push_input_frame before it reaches the pipeline.
-            # Batch inputs are arbitrary-size video frames, so crop+resize to
-            # (height, width) here too; otherwise the spatial-cache mask length won't
-            # match the model's token count (e.g. a 1080p frame → oversized mask).
-            frame_rgb = crop_maximal_rectangle(frame_rgb, self.height, self.width)
+            # The model only ever sees frames at its OWN resolution. The parent
+            # already crops (batch_render), so this is a guard for other callers;
+            # otherwise the spatial-cache mask length won't match the model's
+            # token count (e.g. a 1080p frame → oversized mask).
+            if frame_rgb.shape[:2] != (self.height, self.width):
+                frame_rgb = crop_maximal_rectangle(
+                    frame_rgb, self.height, self.width,
+                    area_downscale=bool(self.config.get("area_downscale", True)),
+                )
             # Drain prompt/seed/steps set before OR during the job (live steering),
             # then step any in-progress slerp morph — same order as the live loop.
             self.update_process_state()
             self._advance_prompt_travel()
-            out = self.process_frame_with_pipeline(frame_rgb)
             if self.lip_processor is not None and self.lip_active:
+                # LivePortrait works on numpy frames: the old CPU path, unchanged
+                # (batch disables lip transfer, see batch_render._batch_config).
+                out = self.process_frame_with_pipeline(frame_rgb)
                 out = self.lip_processor.process(out, frame_rgb)
+                if self.interpolation_exp <= 0:
+                    outs = [out]
+                else:
+                    batch = self.interpolate_frames(self.convert_np_to_torch(out), bgr=False)
+                    outs = [batch[j] for j in range(batch.shape[0])]
+                self.response_queue.put((seq, outs))
+                continue
+            if profile:
+                ev = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
+                ev[0].record()
+            frame = self.process_frame_to_gpu(self.condition_from_rgb(frame_rgb))
+            if profile:
+                ev[1].record()
             # interpolation_exp == 0 → exactly one output per input (1:1). >0 → RIFE
             # interpolation emits 2**exp frames per input (smoother / higher fps);
-            # the caller scales the output fps by the same factor.
-            if self.interpolation_exp <= 0:
-                outs = [out]
-            else:
-                batch = self.interpolate_frames(self.convert_np_to_torch(out))  # (2**exp,H,W,3) BGR
-                outs = [batch[j][:, :, ::-1].copy() for j in range(batch.shape[0])]  # -> RGB
+            # the caller scales the output fps by the same factor. Either way only
+            # uint8 RGB leaves the GPU.
+            batch = self.interpolate_frames(frame, bgr=False)  # (2**exp,H,W,3) RGB uint8
+            outs = [batch[j] for j in range(batch.shape[0])]
+            if profile:
+                ev[2].record()  # the download above synced, so the events are done
+                spans["render"] += ev[0].elapsed_time(ev[1])
+                spans["download"] += ev[1].elapsed_time(ev[2])
+                rendered += 1
+                if rendered % 24 == 0:
+                    print(
+                        f"batch child profile @ frame {rendered} (ms/frame): "
+                        f"render {spans['render'] / 24:.1f}, rife+quantize+download {spans['download'] / 24:.1f}"
+                    )
+                    spans = {"render": 0.0, "download": 0.0}
             self.response_queue.put((seq, outs))
+
+    def _reset_batch_state(self):
+        """Kept-warm batch worker between jobs: the temporal state a fresh
+        instance starts with. Steering left over from the previous job is applied
+        first (the next job's own prompt/seed/steps come after), then any prompt
+        travel is dropped."""
+        self.update_process_state()
+        self._travel = None
+        self.update_controller.reset_cache()
+        self.pipe.spatial_cache.clear()
+        self.pipe._cond_latent_cache.clear()
+        self.previous_frame = None
