@@ -1595,10 +1595,14 @@ def _get_batch_manager():
     if _batch_manager is None:
         from batch_render import BatchJobManager  # local import: pulls PyAV only when used
 
+        base = _batch_base_config()
         _batch_manager = BatchJobManager(
-            base_config=_batch_base_config(),
+            base_config=base,
             make_processor=lambda cfg: StreamProcessor(cfg),
             preflight=_batch_vram_preflight,
+            # Keep the batch model loaded between jobs only when it has the GPU to
+            # itself: next to a live model the second one must go when idle.
+            keep_warm=bool(base.get("batch_keep_warm", _batch_only)),
         )
     return _batch_manager
 

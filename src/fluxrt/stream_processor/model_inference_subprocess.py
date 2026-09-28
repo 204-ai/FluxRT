@@ -116,8 +116,8 @@ class ModelInferenceSubprocess:
         self.batch_mode = bool(self.config.get("batch_mode", False))
         self.proc_ready = Value("b", False)  # set once models are loaded (batch readiness)
         self._seq = 0
-        self.request_queue = self._manager.Queue()   # parent -> worker: (seq, rgb)
-        self.response_queue = self._manager.Queue()  # worker -> parent: (seq, rgb_out)
+        self.request_queue = self._manager.Queue()   # parent -> worker: (seq, rgb) | ("reset", seq)
+        self.response_queue = self._manager.Queue()  # worker -> parent: (seq, [rgb_out, ...])
 
     def __getstate__(self):
         # The subprocess is spawned via Process(target=self.process_main),
@@ -514,16 +514,35 @@ class ModelInferenceSubprocess:
         self._seq += 1
         seq = self._seq
         self.request_queue.put((seq, frame_rgb))
+        return self._await_response(seq, timeout, "render")
+
+    def reset(self, timeout: float = 120.0) -> None:
+        """Parent-side (batch keep-warm): return the worker to a fresh instance's
+        temporal state before the next job. In order with frames, blocks for the ack."""
+        self._seq += 1
+        seq = self._seq
+        self.request_queue.put(("reset", seq))
+        self._await_response(seq, timeout, "reset")
+
+    def exitcode(self):
+        return self.process.exitcode if self.process is not None else None
+
+    def _await_response(self, seq: int, timeout: float, what: str):
         deadline = time.time() + timeout
         while True:
             try:
-                _, out = self.response_queue.get(timeout=0.5)
-                return out
+                got, out = self.response_queue.get(timeout=0.5)
             except Empty:
                 if self.process is not None and not self.process.is_alive():
-                    raise RuntimeError("batch inference subprocess died during render")
+                    raise RuntimeError(
+                        f"batch inference subprocess died during {what} (exitcode={self.process.exitcode})"
+                    )
                 if time.time() >= deadline:
-                    raise RuntimeError("batch render timed out waiting for the inference subprocess")
+                    raise RuntimeError(f"batch {what} timed out waiting for the inference subprocess")
+                continue
+            if got == seq:
+                return out
+            # else: a late answer to an earlier request that timed out — skip it
 
     def stop(self):
         # Reap the child with a bounded escalation that also detaches a SIGKILL
@@ -674,11 +693,12 @@ class ModelInferenceSubprocess:
         )
         return frame_gpu
 
-    def interpolate_frames(self, frame):
+    def interpolate_frames(self, frame, bgr: bool = True):
         """
         Takes one new generated frame (torch tensor, RGB, on GPU, float16)
         Interpolates according to interpolation_exp times.
-        Batches to [interpolated frames, new frame].
+        Batches to [interpolated frames, new frame], uint8 on the CPU: BGR for the
+        live shared-memory path, RGB with bgr=False (batch).
         """
         if self.previous_frame is None:
             self.previous_frame = frame
@@ -707,8 +727,10 @@ class ModelInferenceSubprocess:
             frames_out = frames[1:]
 
         # RGB -> BGR on the GPU (a negative-stride numpy view made the shm copy slow)
+        if bgr:
+            frames_out = frames_out.flip(1)
         frames_cpu = (
-            frames_out.flip(1)
+            frames_out
             .mul(255)
             .to(torch.uint8)
             .permute(0, 2, 3, 1)
@@ -770,6 +792,15 @@ class ModelInferenceSubprocess:
         np.copyto(self.input_pinned.numpy(), self.input_shared_tensor.array)
         frame = self.input_pinned.to(self.device, non_blocking=True)
         rgb = frame.flip(-1).permute(2, 0, 1).unsqueeze(0)  # BGR HWC -> RGB CHW
+        return self.input_lut[rgb.long()]
+
+    def condition_from_rgb(self, frame_rgb):
+        """Batch twin of condition_from_input: an RGB uint8 frame at the model
+        resolution -> (1,3,H,W) float32 in [-1, 1] on the GPU, through the same
+        pinned buffer and lookup (batch frames are already RGB: no flip)."""
+        np.copyto(self.input_pinned.numpy(), frame_rgb)
+        frame = self.input_pinned.to(self.device, non_blocking=True)
+        rgb = frame.permute(2, 0, 1).unsqueeze(0)
         return self.input_lut[rgb.long()]
 
     def process_frame_to_gpu(self, condition):
@@ -908,17 +939,26 @@ class ModelInferenceSubprocess:
         """Synchronous one-output-per-input render loop for OFFLINE batch jobs.
 
         Unlike process_main (the live free-run path), there is NO drain-to-latest,
-        NO interpolation, NO fixed-fps pacing and NO shared-tensor output: each
-        input frame arrives on request_queue, is rendered once via the SAME
-        pipeline call the live loop uses (process_frame_with_pipeline), and the
-        uint8 RGB result goes back on response_queue — exactly one output per input.
+        NO fixed-fps pacing and NO shared-tensor output: each input frame arrives
+        on request_queue, is rendered once through the same GPU path the live loop
+        uses (pinned upload -> pipeline -> RIFE pack, uint8 off the GPU), and the
+        uint8 RGB result goes back on response_queue — exactly one output per input
+        (2**interpolation_exp with RIFE).
 
         The temporal caches (update_controller, previous_frame) are NOT reset
-        between frames, so a video keeps its frame-to-frame coherence; they start
-        clean because this is a fresh, dedicated instance (process_init).
+        between frames, so a video keeps its frame-to-frame coherence. They start
+        clean: a fresh instance (process_init, then warm-up, which leaves them as
+        booted), or a kept-warm one after a ("reset", seq) request.
         """
         self.process_init()
+        # Compile before reporting ready: the graph variants compile at load time
+        # instead of on the first frames of a job (and never mid-render).
+        if self.config.get("compile_models", False) and self.config.get("warmup", True):
+            self.warm_up()
         self.proc_ready.value = True
+        profile = os.environ.get("FLUXRT_PROFILE", "") == "1"
+        spans = {"render": 0.0, "download": 0.0}
+        rendered = 0
         while self.running.value:
             try:
                 item = self.request_queue.get(timeout=0.2)
@@ -926,29 +966,69 @@ class ModelInferenceSubprocess:
                 continue
             if item is None:  # poison pill -> exit the loop on teardown
                 break
+            if item[0] == "reset":
+                self._reset_batch_state()
+                self.response_queue.put((item[1], []))
+                continue
             seq, frame_rgb = item
-            # The model only ever sees frames at its OWN resolution — the live path
-            # crops every frame via push_input_frame before it reaches the pipeline.
-            # Batch inputs are arbitrary-size video frames, so crop+resize to
-            # (height, width) here too; otherwise the spatial-cache mask length won't
-            # match the model's token count (e.g. a 1080p frame → oversized mask).
-            frame_rgb = crop_maximal_rectangle(
-                frame_rgb, self.height, self.width,
-                area_downscale=bool(self.config.get("area_downscale", True)),
-            )
+            # The model only ever sees frames at its OWN resolution. The parent
+            # already crops (batch_render), so this is a guard for other callers;
+            # otherwise the spatial-cache mask length won't match the model's
+            # token count (e.g. a 1080p frame → oversized mask).
+            if frame_rgb.shape[:2] != (self.height, self.width):
+                frame_rgb = crop_maximal_rectangle(
+                    frame_rgb, self.height, self.width,
+                    area_downscale=bool(self.config.get("area_downscale", True)),
+                )
             # Drain prompt/seed/steps set before OR during the job (live steering),
             # then step any in-progress slerp morph — same order as the live loop.
             self.update_process_state()
             self._advance_prompt_travel()
-            out = self.process_frame_with_pipeline(frame_rgb)
             if self.lip_processor is not None and self.lip_active:
+                # LivePortrait works on numpy frames: the old CPU path, unchanged
+                # (batch disables lip transfer, see batch_render._batch_config).
+                out = self.process_frame_with_pipeline(frame_rgb)
                 out = self.lip_processor.process(out, frame_rgb)
+                if self.interpolation_exp <= 0:
+                    outs = [out]
+                else:
+                    batch = self.interpolate_frames(self.convert_np_to_torch(out), bgr=False)
+                    outs = [batch[j] for j in range(batch.shape[0])]
+                self.response_queue.put((seq, outs))
+                continue
+            if profile:
+                ev = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
+                ev[0].record()
+            frame = self.process_frame_to_gpu(self.condition_from_rgb(frame_rgb))
+            if profile:
+                ev[1].record()
             # interpolation_exp == 0 → exactly one output per input (1:1). >0 → RIFE
             # interpolation emits 2**exp frames per input (smoother / higher fps);
-            # the caller scales the output fps by the same factor.
-            if self.interpolation_exp <= 0:
-                outs = [out]
-            else:
-                batch = self.interpolate_frames(self.convert_np_to_torch(out))  # (2**exp,H,W,3) BGR
-                outs = [batch[j][:, :, ::-1].copy() for j in range(batch.shape[0])]  # -> RGB
+            # the caller scales the output fps by the same factor. Either way only
+            # uint8 RGB leaves the GPU.
+            batch = self.interpolate_frames(frame, bgr=False)  # (2**exp,H,W,3) RGB uint8
+            outs = [batch[j] for j in range(batch.shape[0])]
+            if profile:
+                ev[2].record()  # the download above synced, so the events are done
+                spans["render"] += ev[0].elapsed_time(ev[1])
+                spans["download"] += ev[1].elapsed_time(ev[2])
+                rendered += 1
+                if rendered % 24 == 0:
+                    print(
+                        f"batch child profile @ frame {rendered} (ms/frame): "
+                        f"render {spans['render'] / 24:.1f}, rife+quantize+download {spans['download'] / 24:.1f}"
+                    )
+                    spans = {"render": 0.0, "download": 0.0}
             self.response_queue.put((seq, outs))
+
+    def _reset_batch_state(self):
+        """Kept-warm batch worker between jobs: the temporal state a fresh
+        instance starts with. Steering left over from the previous job is applied
+        first (the next job's own prompt/seed/steps come after), then any prompt
+        travel is dropped."""
+        self.update_process_state()
+        self._travel = None
+        self.update_controller.reset_cache()
+        self.pipe.spatial_cache.clear()
+        self.pipe._cond_latent_cache.clear()
+        self.previous_frame = None
