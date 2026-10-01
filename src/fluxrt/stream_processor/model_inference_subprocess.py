@@ -245,6 +245,12 @@ class ModelInferenceSubprocess:
             set_priority=True,
         )
         self._sdpa_priority.__enter__()
+        # The kernel is chosen when a block is compiled and that choice is baked
+        # into the cached artifact: a cache filled under the default order would
+        # keep serving the memory-efficient kernel. Separate cache for this order.
+        cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR", "")
+        if cache_dir and not cache_dir.endswith("-cudnn-attn"):
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir + "-cudnn-attn"
         print("attention backend: cuDNN first")
 
     def load_models(self):

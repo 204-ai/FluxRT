@@ -283,6 +283,11 @@ def cmd_run(args):
             dt = (time.perf_counter() - t0) * 1000.0
             if i < args.warmup:
                 warmup_ms.append(dt)
+                if i == args.warmup - 1 and hasattr(sub, "_freeze_heap"):
+                    # Same as the live server after its warm-up: without it, full
+                    # garbage collections over the objects compilation leaves
+                    # behind stall measured frames (0.45 s each on the laptop).
+                    sub._freeze_heap()
                 continue
             ms.append(dt)
             outputs[i - args.warmup] = pack[-1]  # the generated frame (last in the pack)
