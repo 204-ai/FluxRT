@@ -264,6 +264,13 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         # passes custom sigmas). int(timestep) on the CUDA tensor was a
         # GPU->CPU sync before every transformer step; now once per schedule.
         self._timestep_keys = {}
+        # Position ids depend only on tensor shapes, yet were rebuilt on the CPU
+        # and uploaded every frame; the transformer can only reuse its rotary
+        # embeddings when it is handed the same id tensors again. Keyed by shape.
+        self._ids_cache = {}
+        # diffusers resolves the device / module dtypes by walking every module
+        # (17k named_modules steps per frame); they never change after load.
+        self._fixed = {}
         # Condition images after the first (the reference) are static between
         # set_reference_image calls: keep their encoded latents keyed by the
         # source image OBJECT (identity), so the VAE encode + CPU preprocess run
@@ -554,9 +561,21 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             batch_size * num_images_per_prompt, seq_len, -1
         )
 
-        text_ids = self._prepare_text_ids(prompt_embeds)
-        text_ids = text_ids.to(device)
+        text_ids = self._memo_ids(
+            ("txt", tuple(prompt_embeds.shape[:2]), str(device)),
+            lambda: self._prepare_text_ids(prompt_embeds).to(device),
+        )
         return prompt_embeds, text_ids
+
+    def _memo_ids(self, key, build):
+        if key not in self._ids_cache:
+            self._ids_cache[key] = build()
+        return self._ids_cache[key]
+
+    def _fixed_attr(self, name, read):
+        if name not in self._fixed:
+            self._fixed[name] = read()
+        return self._fixed[name]
 
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._encode_vae_image
     def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
@@ -608,8 +627,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         else:
             latents = latents.to(device=device, dtype=dtype)
 
-        latent_ids = self._prepare_latent_ids(latents)
-        latent_ids = latent_ids.to(device)
+        latent_ids = self._memo_ids(
+            ("lat", tuple(latents.shape), str(device)),
+            lambda: self._prepare_latent_ids(latents).to(device),
+        )
 
         latents = self._pack_latents(latents)  # [B, C, H, W] -> [B, H*W, C]
         return latents, latent_ids
@@ -635,7 +656,11 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             if idx > 0 and sources is not None:
                 self._cond_latent_cache[idx] = (sources[idx], imagge_latent)
 
-        image_latent_ids = self._prepare_image_ids(image_latents)
+        image_shapes = tuple(tuple(latent.shape) for latent in image_latents)
+        image_latent_ids = self._memo_ids(
+            ("img", image_shapes, batch_size, str(device)),
+            lambda: self._prepare_image_ids(image_latents).repeat(batch_size, 1, 1).to(device),
+        )
 
         # Pack each latent and concatenate
         packed_latents = []
@@ -650,8 +675,6 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         image_latents = image_latents.unsqueeze(0)  # (1, N*1024, 128)
 
         image_latents = image_latents.repeat(batch_size, 1, 1)
-        image_latent_ids = image_latent_ids.repeat(batch_size, 1, 1)
-        image_latent_ids = image_latent_ids.to(device)
 
         return image_latents, image_latent_ids
 
@@ -852,7 +875,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self._execution_device
+        device = self._fixed_attr("device", lambda: self._execution_device)
         profile("2")
 
         # 3. prepare text embeddings
@@ -943,7 +966,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 batch_size=batch_size * num_images_per_prompt,
                 generator=generator,
                 device=device,
-                dtype=self.vae.dtype,
+                dtype=self._fixed_attr("vae_dtype", lambda: self.vae.dtype),
                 sources=image,
             )
 
@@ -1028,14 +1051,20 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-                latent_model_input = latents.to(self.transformer.dtype)
+                transformer_dtype = self._fixed_attr(
+                    "transformer_dtype", lambda: self.transformer.dtype
+                )
+                latent_model_input = latents.to(transformer_dtype)
                 latent_image_ids = latent_ids
 
                 if image_latents is not None:
                     latent_model_input = torch.cat([latents, image_latents], dim=1).to(
-                        self.transformer.dtype
+                        transformer_dtype
                     )
-                    latent_image_ids = torch.cat([latent_ids, image_latent_ids], dim=1)
+                    latent_image_ids = self._memo_ids(
+                        ("cat", id(latent_ids), id(image_latent_ids)),
+                        lambda: torch.cat([latent_ids, image_latent_ids], dim=1),
+                    )
 
                 with self.transformer.cache_context("cond"):
                     profile("reset")

@@ -24,6 +24,16 @@ os.environ.setdefault(
     "TORCHINDUCTOR_CACHE_DIR", os.path.expanduser("~/.cache/fluxrt/torchinductor")
 )
 
+# Generated kernels re-check every input's size / stride / alignment on each call
+# (~2,000 Python-side asserts per frame). The shapes are guarded by Dynamo already.
+try:
+    import torch._inductor.config as _inductor_config
+
+    _inductor_config.size_asserts = False
+    _inductor_config.alignment_asserts = False
+except Exception:
+    pass
+
 try:
     torch._dynamo.config.recompile_limit = 64
     torch._dynamo.config.cache_size_limit = 256

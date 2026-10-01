@@ -2007,18 +2007,28 @@ class Flux2Transformer2DModel(
         hidden_states = self.x_embedder(hidden_states)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-        # 3. Calculate RoPE embeddings from image and text tokens
-        if img_ids.ndim == 3:
-            img_ids = img_ids[0]
-        if txt_ids.ndim == 3:
-            txt_ids = txt_ids[0]
+        # 3. Calculate RoPE embeddings from image and text tokens. They depend
+        # only on the ids: when the caller hands in the same id tensors again
+        # (the pipeline memoizes them by shape), reuse the last result instead
+        # of redoing the fp64 frequency math on every step.
+        rope_cache = None if torch.compiler.is_compiling() else getattr(self, "_rope_cache", None)
+        if rope_cache is not None and rope_cache[0] is img_ids and rope_cache[1] is txt_ids:
+            concat_rotary_emb = rope_cache[2]
+        else:
+            ids_in = (img_ids, txt_ids)
+            if img_ids.ndim == 3:
+                img_ids = img_ids[0]
+            if txt_ids.ndim == 3:
+                txt_ids = txt_ids[0]
 
-        image_rotary_emb = self.pos_embed(img_ids)
-        text_rotary_emb = self.pos_embed(txt_ids)
-        concat_rotary_emb = (
-            torch.cat([text_rotary_emb[0], image_rotary_emb[0]], dim=0),
-            torch.cat([text_rotary_emb[1], image_rotary_emb[1]], dim=0),
-        )
+            image_rotary_emb = self.pos_embed(img_ids)
+            text_rotary_emb = self.pos_embed(txt_ids)
+            concat_rotary_emb = (
+                torch.cat([text_rotary_emb[0], image_rotary_emb[0]], dim=0),
+                torch.cat([text_rotary_emb[1], image_rotary_emb[1]], dim=0),
+            )
+            if not torch.compiler.is_compiling():
+                self._rope_cache = (ids_in[0], ids_in[1], concat_rotary_emb)
 
         if joint_attention_kwargs is None:
             joint_attention_kwargs = {}
