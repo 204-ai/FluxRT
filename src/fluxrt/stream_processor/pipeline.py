@@ -30,7 +30,7 @@ from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
-from fluxrt.stream_processor.transformer_flux2 import SpatialCache, SparseMask
+from fluxrt.stream_processor.transformer_flux2 import SpatialCache, SparseMask, MaskStaging
 from fluxrt.stream_processor.update_controller import UpdateController
 
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
@@ -268,6 +268,8 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         # and uploaded every frame; the transformer can only reuse its rotary
         # embeddings when it is handed the same id tensors again. Keyed by shape.
         self._ids_cache = {}
+        # Pinned upload buffers for the per-step masks, one set per step index.
+        self._mask_staging = {}
         # diffusers resolves the device / module dtypes by walking every module
         # (17k named_modules steps per frame); they never change after load.
         self._fixed = {}
@@ -1039,6 +1041,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                     f"recomputing {(mask.float().sum() / mask.shape[1] * 100):.2f}% of tokens"
                 )
 
+        # One download of the frame's mask; everything derived from it per step is
+        # then computed on the host ("host_masks": false = resolve on the GPU).
+        mask_host = None
+        if mask is not None and self.subprocess_config.get("host_masks", True):
+            mask_host = mask[0].cpu().numpy()
+
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
         self.scheduler.set_begin_index(0)
@@ -1081,14 +1089,30 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
                     # Active rows resolved here, eagerly — not inside the
                     # compiled transformer on every sparse call. Counts are
-                    # bucketed ("active_row_bucket", 1 = exact counts).
+                    # bucketed ("active_row_bucket", 1 = exact counts). With
+                    # "host_masks" (default) this needs no GPU round trip, so the
+                    # next step's launches overlap the previous step's GPU work.
                     step_mask = None
                     if mask is not None:
-                        step_mask = SparseMask(
-                            spatial_cache.preprocess_mask(mask),
-                            prompt_embeds.shape[1],
-                            int(self.subprocess_config.get("active_row_bucket", 64)),
-                        )
+                        bucket = int(self.subprocess_config.get("active_row_bucket", 64))
+                        if mask_host is not None:
+                            if i not in self._mask_staging or (
+                                self._mask_staging[i].buffers["mask"].numel() < mask_host.size + bucket
+                            ):
+                                self._mask_staging[i] = MaskStaging(mask_host.size + 2 * bucket)
+                            step_mask = SparseMask.from_host(
+                                spatial_cache.preprocess_mask_host(mask_host),
+                                prompt_embeds.shape[1],
+                                bucket,
+                                device,
+                                self._mask_staging[i],
+                            )
+                        else:
+                            step_mask = SparseMask(
+                                spatial_cache.preprocess_mask(mask),
+                                prompt_embeds.shape[1],
+                                bucket,
+                            )
 
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)

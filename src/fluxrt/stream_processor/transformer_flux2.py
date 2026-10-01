@@ -16,6 +16,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -92,6 +93,56 @@ class SparseMask:
         # double blocks concatenate their two streams.
         self.full = ActiveRows(idx=torch.cat([self.txt.idx, self.img.idx + text_seq_len]))
 
+    @classmethod
+    def from_host(cls, mask: np.ndarray, text_seq_len: int, bucket: int, device, staging: "MaskStaging"):
+        """Same result as SparseMask(mask_on_gpu, ...), built from a host copy of
+        the mask. The GPU version needs the mask's values on the host four times
+        per denoising step (any / nonzero), each a wait for everything queued on
+        the GPU, so the CPU could never prepare step 2 while step 1 was still
+        running. Here the indices are computed in numpy and sent over through
+        pinned buffers without waiting.
+        Args:
+            mask: (full_seq_len,) int32 host array, already through
+                SpatialCache.preprocess_mask_host.
+            staging: pinned buffers for this denoising step (see MaskStaging)."""
+        self = cls.__new__(cls)
+        self.exec_only = bool((mask == 1).any())
+
+        def rows(span):
+            idx = np.flatnonzero(span)
+            pad = (-idx.size) % bucket if bucket > 1 else 0
+            if pad and idx.size:
+                idx = np.concatenate([idx, np.full(pad, idx[-1])])
+            return idx
+
+        txt = rows(mask[:text_seq_len])
+        img = rows(mask[text_seq_len:])
+        self.tensor = staging.send("mask", mask.astype(np.int32, copy=False), device).unsqueeze(0)
+        self.txt = ActiveRows(idx=staging.send("txt", txt, device))
+        self.img = ActiveRows(idx=staging.send("img", img, device))
+        self.full = ActiveRows(idx=staging.send("full", np.concatenate([txt, img + text_seq_len]), device))
+        return self
+
+
+class MaskStaging:
+    """Pinned host buffers for one denoising step's mask and index uploads.
+    A non-blocking copy from pinned memory is queued without waiting for the
+    GPU; from pageable memory PyTorch waits for the stream first. Each buffer
+    is rewritten only after the frame's final download has synchronized."""
+
+    def __init__(self, capacity: int):
+        self.buffers = {
+            "mask": torch.empty(capacity, dtype=torch.int32).pin_memory(),
+            "txt": torch.empty(capacity, dtype=torch.int64).pin_memory(),
+            "img": torch.empty(capacity, dtype=torch.int64).pin_memory(),
+            "full": torch.empty(capacity, dtype=torch.int64).pin_memory(),
+        }
+
+    def send(self, name: str, values: np.ndarray, device) -> torch.Tensor:
+        buffer = self.buffers[name][: values.size]
+        buffer.numpy()[:] = values
+        return buffer.to(device, non_blocking=True)
+
 
 class SpatialCache:
     """
@@ -142,6 +193,8 @@ class SpatialCache:
         )
 
         self.valid = torch.zeros(1, self.full_seq_len, device=device, dtype=torch.bool)
+        # Host mirror of `valid` for preprocess_mask_host (no GPU round trip).
+        self.valid_host = np.zeros(self.full_seq_len, dtype=bool)
 
         def get_empty_cache_tensor():
             return torch.zeros(
@@ -179,6 +232,14 @@ class SpatialCache:
             torch.tensor(2, device=self.device, dtype=torch.int32),
             input_mask,
         )
+
+    def preprocess_mask_host(self, input_mask: np.ndarray) -> np.ndarray:
+        """preprocess_mask on a host copy of the mask ((full_seq_len,) int32),
+        plus the `valid` update sync_with_output_cache applies after the forward
+        (valid |= mask == 2), so the mirror stays in step with the GPU state."""
+        mask = np.where(self.valid_host, input_mask, 2).astype(np.int32)
+        self.valid_host |= mask == 2
+        return mask
 
     def sync_with_output_cache(
         self, mask: torch.Tensor, masked_prediction: torch.Tensor
