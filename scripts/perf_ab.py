@@ -266,8 +266,8 @@ def cmd_run(args):
             base_mask = pipeline_mod.SparseMask
 
             class _Recording(base_mask):
-                def __init__(self, mask, text_seq_len):
-                    super().__init__(mask, text_seq_len)
+                def __init__(self, mask, text_seq_len, *args):
+                    super().__init__(mask, text_seq_len, *args)
                     active.append(self.img.idx.numel() / (mask.shape[1] - text_seq_len))
 
             pipeline_mod.SparseMask = _Recording
