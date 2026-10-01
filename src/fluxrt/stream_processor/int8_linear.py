@@ -14,6 +14,15 @@ import torch
 import torch.nn as nn
 
 
+# cuBLAS picks an algorithm per matmul shape, and for int8 a never-seen row
+# count costs ~3 ms extra per layer on Windows (RTX 5090 Laptop: 3.27 ms vs
+# 0.40 ms repeated). The active-row count differs almost every frame, so across
+# 100 layers that was a 300-450 ms stall on every new count. Row counts are
+# therefore padded up to a multiple of ROW_BUCKET: ~40 shapes in total, primed
+# once at startup (prime_row_buckets).
+ROW_BUCKET = 64
+
+
 class Int8Linear(nn.Module):
     def __init__(self, linear: nn.Linear):
         super().__init__()
@@ -32,9 +41,10 @@ class Int8Linear(nn.Module):
         rows = x2.shape[0]
         x_scale = x2.abs().amax(dim=1, keepdim=True).float().clamp(min=1e-8) / 127.0
         x_int8 = (x2.float() / x_scale).round().clamp(-127, 127).to(torch.int8)
-        # _int_mm needs more than 16 rows; always pad (no size branch, so the
-        # compiled graph doesn't split into small / large row-count variants)
-        x_int8 = torch.nn.functional.pad(x_int8, (0, 0, 0, 17))
+        # Pad to the next ROW_BUCKET multiple, at least 17 rows more (_int_mm needs
+        # more than 16 rows). No size branch: one compiled graph for every count.
+        pad = 17 + (-(rows + 17)) % ROW_BUCKET
+        x_int8 = torch.cat([x_int8, x_int8.new_zeros(pad, self.in_features)])
         acc = torch._int_mm(x_int8, self.weight_int8.t())[:rows]
         out = (acc.float() * x_scale * self.weight_scale).to(x.dtype)
         if self.bias is not None:
@@ -67,3 +77,20 @@ def quantize_transformer_blocks(transformer: nn.Module, mode="all") -> int:
                     swapped += 1
     torch.cuda.empty_cache()
     return swapped
+
+
+def prime_row_buckets(transformer: nn.Module, max_rows: int) -> int:
+    """Run every Int8Linear once at every bucketed row count up to max_rows, so
+    cuBLAS has its algorithm for each shape before the first live frame.
+    Returns the number of (layer, bucket) pairs touched."""
+    layers = [m for m in transformer.modules() if isinstance(m, Int8Linear)]
+    touched = 0
+    with torch.no_grad():
+        for layer in layers:
+            weight = layer.weight_int8
+            for rows in range(ROW_BUCKET, max_rows + ROW_BUCKET + 1, ROW_BUCKET):
+                torch._int_mm(weight.new_zeros(rows, layer.in_features), weight.t())
+                touched += 1
+    if layers:
+        torch.cuda.synchronize()
+    return touched

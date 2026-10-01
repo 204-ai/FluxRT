@@ -359,6 +359,16 @@ class ModelInferenceSubprocess:
         )
         self.pipe.to(self.device)
 
+        if self.config.get("int8_linear", False):
+            from fluxrt.stream_processor.int8_linear import prime_row_buckets
+
+            # longest sequence a layer can see: text + latent + condition (+ reference)
+            tokens = (self.height // 16) * (self.width // 16)
+            longest = 512 + 2 * tokens + (reference_image_seq_len or 0)
+            start = time.time()
+            n = prime_row_buckets(self.transformer, longest)
+            print(f"int8_linear: primed {n} matmul shapes in {time.time() - start:.1f} s")
+
         # "vae_decoder": "taef2" — full VAE encoder (the model's reading of the
         # input stays exact), TAEF2 decoder (~2 ms vs ~19 ms). Changes the output
         # look (softer fine detail): opt-in. enable_tiny_vae swaps both sides.
