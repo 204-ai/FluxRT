@@ -211,6 +211,42 @@ class ModelInferenceSubprocess:
             f"{int8_models_path}/tokenizer", local_files_only=True
         )
 
+    def _select_attention_backend(self):
+        """PyTorch's Windows builds ship no flash attention: scaled_dot_product_attention
+        silently falls back to the memory-efficient kernel, 2.3x slower than
+        cuDNN's at our shapes (RTX 5090 Laptop, 700 queries x 1952 keys, bf16:
+        0.63 vs 0.27 ms; max diff 1e-3). "attention_backend": "auto" puts cuDNN
+        first only where flash is missing (Linux keeps flash), "cudnn" always,
+        "default" leaves PyTorch's own order."""
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        choice = self.config.get("attention_backend", "auto")
+        if choice == "default":
+            return
+        if choice == "auto":
+            probe = torch.zeros(1, 1, 8, 16, device=self.device, dtype=torch.bfloat16)
+            try:
+                with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
+                    torch.nn.functional.scaled_dot_product_attention(probe, probe, probe)
+                return  # flash works here
+            except RuntimeError:
+                pass
+        # Priority order only: every kernel stays enabled, so calls cuDNN can't
+        # take (fp32, some masks) still fall back. Disabling flash + memory-
+        # efficient instead would select the math kernel (5x slower), which
+        # ranks above cuDNN by default. Entered once, for the process lifetime.
+        self._sdpa_priority = sdpa_kernel(
+            [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ],
+            set_priority=True,
+        )
+        self._sdpa_priority.__enter__()
+        print("attention backend: cuDNN first")
+
     def load_models(self):
         self.interpolation_model = IFNet()
         self.interpolation_model.load_state_dict(
@@ -252,6 +288,7 @@ class ModelInferenceSubprocess:
         # RTX 4090, output within the run-to-run noise floor (LPIPS 0.0165 vs
         # 0.0183). cudnn_benchmark=false for A/B.
         torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", True))
+        self._select_attention_backend()
 
         if self.config.get("compile_models", False):
             # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
