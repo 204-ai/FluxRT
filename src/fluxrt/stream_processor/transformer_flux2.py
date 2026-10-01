@@ -47,14 +47,29 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+# Shapes that depend on the active-row count are expensive the first time they
+# occur: cuDNN attention builds a plan per query length (~480 ms on the RTX 5090
+# laptop, 0.26 ms afterwards) and cuBLAS searches an int8 algorithm per row count
+# (~3 ms per layer). The count differs almost every frame, so it is rounded up to
+# a multiple of ACTIVE_ROW_BUCKET by repeating an already-active row: ~35 shapes
+# in total, primed once at startup. A repeated row is computed twice with the
+# same inputs and scattered to the same place, so the result is unchanged.
+ACTIVE_ROW_BUCKET = 64
+
+
 class ActiveRows:
     """Rows of one mask span that a sparse_* call computes. Resolved once per
     step (see SparseMask): each sparse call used to run `mask.any()` +
     `nonzero()` itself — a GPU->CPU sync and a Dynamo graph break, ~140 times
     per denoising step with the GPU idle in between."""
 
-    def __init__(self, mask: torch.Tensor):  # mask: (1, span_len)
-        self.idx = mask.squeeze(0).nonzero(as_tuple=False).squeeze(-1)
+    def __init__(self, mask: torch.Tensor | None = None, bucket: int = ACTIVE_ROW_BUCKET, idx: torch.Tensor | None = None):
+        if idx is None:  # mask: (1, span_len)
+            idx = mask.squeeze(0).nonzero(as_tuple=False).squeeze(-1)
+            pad = (-idx.numel()) % bucket if bucket > 1 else 0
+            if pad and idx.numel() > 0:
+                idx = torch.cat([idx, idx[-1:].expand(pad)])
+        self.idx = idx
         self.any = self.idx.numel() > 0
         # The count changes every frame: compile it as a dynamic size from the
         # first call instead of specializing on it and recompiling later.
@@ -65,15 +80,17 @@ class SparseMask:
     """The spatial-cache mask (already through SpatialCache.preprocess_mask)
     plus its active rows over the joint sequence and its text / image spans."""
 
-    def __init__(self, mask: torch.Tensor, text_seq_len: int):
+    def __init__(self, mask: torch.Tensor, text_seq_len: int, bucket: int = ACTIVE_ROW_BUCKET):
         self.tensor = mask
         # Value 1 (execute, don't update the cache) only comes from manual masks;
         # blocks that write the KV cache in place need every executed row to be
         # an updated one.
         self.exec_only = bool((mask == 1).any())
-        self.full = ActiveRows(mask)
-        self.txt = ActiveRows(mask[:, :text_seq_len])
-        self.img = ActiveRows(mask[:, text_seq_len:])
+        self.txt = ActiveRows(mask[:, :text_seq_len], bucket)
+        self.img = ActiveRows(mask[:, text_seq_len:], bucket)
+        # Joint sequence = text rows then image rows, in exactly the order the
+        # double blocks concatenate their two streams.
+        self.full = ActiveRows(idx=torch.cat([self.txt.idx, self.img.idx + text_seq_len]))
 
 
 class SpatialCache:

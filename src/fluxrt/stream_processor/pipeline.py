@@ -1050,12 +1050,15 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                             )
                         spatial_cache = self.spatial_cache[timestep_key]
 
-                    # Active rows resolved here, eagerly, in 3 syncs — not
-                    # inside the compiled transformer on every sparse call.
+                    # Active rows resolved here, eagerly — not inside the
+                    # compiled transformer on every sparse call. Counts are
+                    # bucketed ("active_row_bucket", 1 = exact counts).
                     step_mask = None
                     if mask is not None:
                         step_mask = SparseMask(
-                            spatial_cache.preprocess_mask(mask), prompt_embeds.shape[1]
+                            spatial_cache.preprocess_mask(mask),
+                            prompt_embeds.shape[1],
+                            int(self.subprocess_config.get("active_row_bucket", 64)),
                         )
 
                     noise_pred = self.transformer(

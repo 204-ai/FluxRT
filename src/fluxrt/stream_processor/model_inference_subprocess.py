@@ -245,6 +245,7 @@ class ModelInferenceSubprocess:
             set_priority=True,
         )
         self._sdpa_priority.__enter__()
+        self._cudnn_attention = True
         # The kernel is chosen when a block is compiled and that choice is baked
         # into the cached artifact: a cache filled under the default order would
         # keep serving the memory-efficient kernel. Separate cache for this order.
@@ -252,6 +253,28 @@ class ModelInferenceSubprocess:
         if cache_dir and not cache_dir.endswith("-cudnn-attn"):
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir + "-cudnn-attn"
         print("attention backend: cuDNN first")
+
+    def _prime_attention_plans(self, sequences):
+        """cuDNN builds a plan per attention shape the first time it sees it
+        (~480 ms each on the RTX 5090 laptop). Query lengths are bucketed
+        (ACTIVE_ROW_BUCKET), so build every plan now instead of on live frames."""
+        from fluxrt.stream_processor.transformer_flux2 import ACTIVE_ROW_BUCKET
+
+        bucket = int(self.config.get("active_row_bucket", ACTIVE_ROW_BUCKET))
+        if bucket <= 1:
+            return  # exact counts: too many shapes to prime
+        cfg = self.transformer.config
+        heads, dim = cfg.num_attention_heads, cfg.attention_head_dim
+        start, plans = time.time(), 0
+        with torch.no_grad():
+            for keys in sequences:
+                kv = torch.zeros(1, heads, keys, dim, device=self.device, dtype=self.dtype)
+                for queries in range(bucket, keys + bucket + 1, bucket):
+                    q = torch.zeros(1, heads, queries, dim, device=self.device, dtype=self.dtype)
+                    torch.nn.functional.scaled_dot_product_attention(q, kv, kv)
+                    plans += 1
+        torch.cuda.synchronize()
+        print(f"attention: primed {plans} cuDNN plans in {time.time() - start:.1f} s")
 
     def load_models(self):
         self.interpolation_model = IFNet()
@@ -359,15 +382,22 @@ class ModelInferenceSubprocess:
         )
         self.pipe.to(self.device)
 
+        # Sequence lengths the blocks can see: text + latent + condition, and the
+        # same plus a reference image.
+        tokens = (self.height // 16) * (self.width // 16)
+        sequences = [512 + 2 * tokens]
+        if reference_image_seq_len:
+            sequences.append(sequences[0] + reference_image_seq_len)
+
         if self.config.get("int8_linear", False):
             from fluxrt.stream_processor.int8_linear import prime_row_buckets
 
-            # longest sequence a layer can see: text + latent + condition (+ reference)
-            tokens = (self.height // 16) * (self.width // 16)
-            longest = 512 + 2 * tokens + (reference_image_seq_len or 0)
             start = time.time()
-            n = prime_row_buckets(self.transformer, longest)
+            n = prime_row_buckets(self.transformer, sequences[-1])
             print(f"int8_linear: primed {n} matmul shapes in {time.time() - start:.1f} s")
+
+        if getattr(self, "_cudnn_attention", False):
+            self._prime_attention_plans(sequences)
 
         # "vae_decoder": "taef2" — full VAE encoder (the model's reading of the
         # input stays exact), TAEF2 decoder (~2 ms vs ~19 ms). Changes the output

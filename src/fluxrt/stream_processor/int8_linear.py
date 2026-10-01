@@ -16,10 +16,9 @@ import torch.nn as nn
 
 # cuBLAS picks an algorithm per matmul shape, and for int8 a never-seen row
 # count costs ~3 ms extra per layer on Windows (RTX 5090 Laptop: 3.27 ms vs
-# 0.40 ms repeated). The active-row count differs almost every frame, so across
-# 100 layers that was a 300-450 ms stall on every new count. Row counts are
-# therefore padded up to a multiple of ROW_BUCKET: ~40 shapes in total, primed
-# once at startup (prime_row_buckets).
+# 0.40 ms repeated), across 100 layers. Row counts are therefore multiples of
+# ROW_BUCKET (the sparse path already hands them over bucketed, see
+# transformer_flux2.ACTIVE_ROW_BUCKET), primed once at startup (prime_row_buckets).
 ROW_BUCKET = 64
 
 
@@ -41,9 +40,10 @@ class Int8Linear(nn.Module):
         rows = x2.shape[0]
         x_scale = x2.abs().amax(dim=1, keepdim=True).float().clamp(min=1e-8) / 127.0
         x_int8 = (x2.float() / x_scale).round().clamp(-127, 127).to(torch.int8)
-        # Pad to the next ROW_BUCKET multiple, at least 17 rows more (_int_mm needs
-        # more than 16 rows). No size branch: one compiled graph for every count.
-        pad = 17 + (-(rows + 17)) % ROW_BUCKET
+        # Pad to the next ROW_BUCKET multiple: at least 64 rows (_int_mm needs
+        # more than 16), nothing extra when the caller already bucketed the
+        # count. No size branch: one compiled graph for every count.
+        pad = (-rows) % ROW_BUCKET
         x_int8 = torch.cat([x_int8, x_int8.new_zeros(pad, self.in_features)])
         acc = torch._int_mm(x_int8, self.weight_int8.t())[:rows]
         out = (acc.float() * x_scale * self.weight_scale).to(x.dtype)
