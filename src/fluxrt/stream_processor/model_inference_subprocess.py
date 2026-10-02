@@ -59,6 +59,7 @@ from fluxrt.stream_processor.postprocessors import (
 
 from fluxrt.flow_upscaler.upscaler_unet import UpscalerUNet
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
+from fluxrt.stream_processor.cuda_graphs import RecordedModule
 from fluxrt.stream_processor.flux_tiny_vae import DiffusersTAEF2Wrapper
 
 
@@ -352,6 +353,17 @@ class ModelInferenceSubprocess:
                 mode="reduce-overhead" if self.rife_cudagraphs else "default",
             )
 
+        # The fixed-shape conv stages replayed as CUDA graphs: the same kernels
+        # as the (compiled) call, bit-identical, without its launches.
+        # stage_cudagraphs=false for A/B.
+        self.stage_cudagraphs = bool(self.config.get("stage_cudagraphs", True)) and str(self.device).startswith("cuda")
+        if self.stage_cudagraphs:
+            vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
+            vae_nets.encoder = RecordedModule(vae_nets.encoder)
+            vae_nets.decoder = RecordedModule(vae_nets.decoder)
+            if self.upscaler_pipe is not None:
+                self.upscaler_pipe.upscaler_unet = RecordedModule(self.upscaler_pipe.upscaler_unet)
+
         reference_image_seq_len = None
         if self.config.get("use_reference_image", False):
             reference_image_res = self.config["reference_image_resolution"]
@@ -392,6 +404,8 @@ class ModelInferenceSubprocess:
                 tiny.taesd.to(memory_format=torch.channels_last)
             if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
                 tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
+            if self.stage_cudagraphs:
+                tiny.taesd.decoder = RecordedModule(tiny.taesd.decoder)
             self.pipe.tiny_decoder = tiny
 
         if self.config.get("use_lora", False):
@@ -978,6 +992,9 @@ class ModelInferenceSubprocess:
         self.pipe.spatial_cache.clear()
         self.pipe._cond_latent_cache.clear()
         self.previous_frame = None
+        # The sweep (and the reference pass) leave blocks of every size in the
+        # allocator's cache: hand them back, the live frames need far less.
+        torch.cuda.empty_cache()
         print(f"warm-up: {time.time() - start:.1f} s")
         self._freeze_heap()
 

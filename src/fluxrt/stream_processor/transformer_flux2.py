@@ -44,6 +44,8 @@ from diffusers.models.embeddings import (
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNormContinuous
 
+from fluxrt.stream_processor import cuda_graphs
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -403,22 +405,16 @@ class StepGraphs:
     per-frame inputs are copied into the graph's fixed input tensors before a
     replay; the cache tensors are updated in place by the graph itself.
 
-    Nothing may wait for the GPU while a graph is recorded (a block compiling,
-    a Triton kernel autotuning, a cuDNN / cuBLAS plan being built). So a step
-    is recorded the second time its key shows up, and right after running it
-    normally on the very objects the recording uses: whatever that
-    combination still had to set up has then happened.
+    A step is recorded the second time its key shows up, and right after
+    running it normally on the very objects the recording uses (see
+    cuda_graphs): whatever that combination still had to set up has then
+    happened.
 
     The returned output tensor of a replay is the graph's own and is
     overwritten by the next replay of the same key (next frame at the
     earliest)."""
 
     INPUTS = ("hidden_states", "encoder_hidden_states", "timestep")
-    # A failed recording leaves its step on the normal path; after this many
-    # failures nothing more is recorded this session (recorded graphs keep
-    # replaying).
-    MAX_FAILURES = 3
-    failures = 0
 
     def __init__(self):
         # key -> "seen" | "normal" (recording failed) | (graph, output, static
@@ -443,7 +439,7 @@ class StepGraphs:
             id(kwargs["txt_ids"]),
         )
         entry = self.graphs.get(key)
-        recording = StepGraphs.failures < StepGraphs.MAX_FAILURES
+        recording = cuda_graphs.recording()
         if entry is None:
             if recording and len(self.graphs) < MAX_STEP_GRAPHS:
                 self.graphs[key] = "seen"
@@ -469,27 +465,15 @@ class StepGraphs:
         static["mask"] = kwargs["mask"].static_copy()
         result = transformer(spatial_cache=spatial_cache, **static)
 
-        stream = torch.cuda.current_stream()
-        graph = torch.cuda.CUDAGraph()
-        try:
-            with torch.cuda.graph(graph, pool=self.pool):
-                output = transformer(spatial_cache=spatial_cache, **static)[0]
-        except RuntimeError as error:
-            # torch.cuda.graph leaves its capture stream current when a
-            # recording fails, and CUDA reports the failure once more on the
-            # next kernel launch: switch back, and take that report here.
-            torch.cuda.set_stream(stream)
-            try:
-                torch.zeros(1, device=result[0].device).add_(1)
-            except RuntimeError:
-                pass
-            StepGraphs.failures += 1
+        recorded = cuda_graphs.record(
+            lambda: transformer(spatial_cache=spatial_cache, **static)[0],
+            pool=self.pool,
+            what="transformer step",
+        )
+        if recorded is None:
             self.graphs[key] = "normal"
-            print(
-                "transformer_cudagraphs: recording a step failed, it keeps running "
-                f"normally ({str(error).splitlines()[0]})"
-            )
             return result
+        graph, output = recorded
         if self.pool is None:
             self.pool = graph.pool()
         # `static` and the RoPE tables keep alive what the graph reads but
