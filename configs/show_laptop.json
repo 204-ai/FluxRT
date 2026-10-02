@@ -29,5 +29,5 @@
     "int8_linear": true,
     "rife_cudagraphs": true,
     "conv_backend": "tensorrt",
-    "gpu_wait": "spin"
+    "gpu_wait": "sleep"
 }

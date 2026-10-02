@@ -99,7 +99,7 @@ Opt-in, level 1, needs extra packages:
 | Key | Default | What it does |
 |---|---|---|
 | `conv_backend` | `"torch"` | `"tensorrt"`: TAEF2, upscaler UNet and RIFE as TensorRT fp16 engines. Needs `tensorrt-cu12` and `onnx` |
-| `gpu_wait` | `"spin"` | `"sleep"`: the frame loop sleeps in 0.5 ms steps while the GPU finishes a frame instead of spinning a CPU core in the output download. Same output. Not benchmarked yet |
+| `gpu_wait` | `"spin"` | `"sleep"`: the frame loop sleeps in 0.5 ms steps while the GPU finishes a frame instead of spinning a CPU core in the output download. Same output. On the show laptop, live: model process 100% → 11% of a core, enforced GPU limit 92 → 99 W (Dynamic Boost follows the freed CPU); on in `configs/show_laptop.json`. Not benchmarked in isolation |
 | `host_masks` | `true` | Resolve per-step masks on the host, one download per frame |
 | `area_downscale` | `true` | Area filter for input downscaling (the old call silently used bilinear) |
 
