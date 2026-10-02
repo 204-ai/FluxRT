@@ -264,28 +264,6 @@ class ModelInferenceSubprocess:
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir + "-cudnn-attn"
         print("attention backend: cuDNN first")
 
-    def _prime_attention_plans(self, sequences):
-        """cuDNN builds a plan per attention shape the first time it sees it
-        (~480 ms each on the RTX 5090 laptop). Query lengths are bucketed
-        (ACTIVE_ROW_BUCKET), so build every plan now instead of on live frames."""
-        from fluxrt.stream_processor.transformer_flux2 import ACTIVE_ROW_BUCKET
-
-        bucket = int(self.config.get("active_row_bucket", ACTIVE_ROW_BUCKET))
-        if bucket <= 1:
-            return  # exact counts: too many shapes to prime
-        cfg = self.transformer.config
-        heads, dim = cfg.num_attention_heads, cfg.attention_head_dim
-        start, plans = time.time(), 0
-        with torch.no_grad():
-            for keys in sequences:
-                kv = torch.zeros(1, heads, keys, dim, device=self.device, dtype=self.dtype)
-                for queries in range(bucket, keys + bucket + 1, bucket):
-                    q = torch.zeros(1, heads, queries, dim, device=self.device, dtype=self.dtype)
-                    torch.nn.functional.scaled_dot_product_attention(q, kv, kv)
-                    plans += 1
-        torch.cuda.synchronize()
-        print(f"attention: primed {plans} cuDNN plans in {time.time() - start:.1f} s")
-
     def load_models(self):
         self.interpolation_model = IFNet()
         self.interpolation_model.load_state_dict(
@@ -323,6 +301,13 @@ class ModelInferenceSubprocess:
                 f"{models_path}/vae", local_files_only=True, device=self.device
             ).to(self.dtype)
 
+        # TAEF2 in NHWC, the layout cuDNN's tensor-core kernels want: encode
+        # 3.1 -> 2.1 ms, decode to 576x320 3.7 -> 2.3 ms compiled on the RTX 5090
+        # laptop (no gain at 1152x640, none for the full VAE, the upscaler or
+        # RIFE). Rounds slightly differently; tiny_vae_channels_last=false for A/B.
+        if isinstance(self.vae, DiffusersTAEF2Wrapper) and self.config.get("tiny_vae_channels_last", True):
+            self.vae.taesd.to(memory_format=torch.channels_last)
+
         # cuDNN autotuning for the fixed-shape VAE/RIFE convs: -2.5 ms/frame on the
         # RTX 4090, output within the run-to-run noise floor (LPIPS 0.0165 vs
         # 0.0183). cudnn_benchmark=false for A/B.
@@ -353,6 +338,11 @@ class ModelInferenceSubprocess:
                 vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
                 vae_nets.encoder = torch.compile(vae_nets.encoder)
                 vae_nets.decoder = torch.compile(vae_nets.decoder)
+            # The flow upscaler's UNet ran eager (12.6 -> 10.3 ms on the RTX 5090
+            # laptop). compile_upscaler=false = the old behavior, for A/B —
+            # compiled convs round slightly differently.
+            if self.upscaler_pipe is not None and self.config.get("compile_upscaler", True):
+                self.upscaler_pipe.upscaler_unet = torch.compile(self.upscaler_unet)
             # RIFE as CUDA graphs (reduce-overhead). Opt-in: on the RTX 4090 at
             # 576x320, interpolation_exp 1, it measured 0.3 ms/frame (RIFE is
             # ~2.5 ms of GPU time there) — not worth the graph-pool memory by default.
@@ -392,29 +382,14 @@ class ModelInferenceSubprocess:
         )
         self.pipe.to(self.device)
 
-        # Sequence lengths the blocks can see: text + latent + condition, and the
-        # same plus a reference image.
-        tokens = (self.height // 16) * (self.width // 16)
-        sequences = [512 + 2 * tokens]
-        if reference_image_seq_len:
-            sequences.append(sequences[0] + reference_image_seq_len)
-
-        if self.config.get("int8_linear", False):
-            from fluxrt.stream_processor.int8_linear import prime_row_buckets
-
-            start = time.time()
-            n = prime_row_buckets(self.transformer, sequences[-1])
-            print(f"int8_linear: primed {n} matmul shapes in {time.time() - start:.1f} s")
-
-        if getattr(self, "_cudnn_attention", False):
-            self._prime_attention_plans(sequences)
-
         # "vae_decoder": "taef2" — full VAE encoder (the model's reading of the
         # input stays exact), TAEF2 decoder (~2 ms vs ~19 ms). Changes the output
         # look (softer fine detail): opt-in. enable_tiny_vae swaps both sides.
         self.pipe.tiny_decoder = None
         if self.config.get("vae_decoder", "full") == "taef2" and not self.config.get("enable_tiny_vae", False):
             tiny = DiffusersTAEF2Wrapper(path="taef2/taef2.safetensors").to(self.device, self.dtype)
+            if self.config.get("tiny_vae_channels_last", True):
+                tiny.taesd.to(memory_format=torch.channels_last)
             if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
                 tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
             self.pipe.tiny_decoder = tiny
@@ -938,8 +913,10 @@ class ModelInferenceSubprocess:
         """Compile the graph variants live input will hit before the first real
         frame: a full frame, nothing changed, part of the frame changed (three
         sizes, so the row count compiles dynamic), text tokens active (prompt
-        change / travel) with and without image changes, and all of it again with a reference image when
-        references are enabled. Leaves every cache as a fresh boot would."""
+        change / travel) with and without image changes, then every bucketed
+        count of changed tokens ("warmup_sweep"), and all of it again with a
+        reference image when references are enabled. Leaves every cache as a
+        fresh boot would."""
         rng = np.random.default_rng(0)
         base = rng.integers(0, 256, self.input_shared_tensor.shape, dtype=np.uint8)
 
@@ -955,6 +932,30 @@ class ModelInferenceSubprocess:
             yield base  # nothing changed
             self.update_controller.text_is_valid = False  # text tokens active, image still
             yield base
+            if self.config.get("warmup_sweep", True):
+                yield from sweep()
+
+        def sweep():
+            # Every bucketed count of changed tokens once, alone and with the
+            # text tokens active. The first step at a new count costs ~350 ms
+            # on the RTX 5090 laptop (per-shape setup below PyTorch); live
+            # frames used to pay it, one stalled frame per new count.
+            patch = 16
+            cols, rows = base.shape[1] // patch, base.shape[0] // patch
+            bucket = int(self.config.get("active_row_bucket", 64))
+            step = max(1, bucket // 4)  # patches; a patch is 2 rows (latent + condition)
+            for text in (False, True):
+                for n in range(step, cols * rows + 1, step * (2 if text else 1)):
+                    full, rest = divmod(n, cols)
+                    moved = base.copy()
+                    moved[: full * patch] = 255 - moved[: full * patch]
+                    moved[full * patch : (full + 1) * patch, : rest * patch] = (
+                        255 - moved[full * patch : (full + 1) * patch, : rest * patch]
+                    )
+                    if text:
+                        self.update_controller.text_is_valid = False
+                    yield moved
+                    yield base
 
         def run():
             for frame in frames():

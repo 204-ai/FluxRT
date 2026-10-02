@@ -10,6 +10,21 @@ class FlowUpscalerPipeline:
     ):
         self.upscaler_unet = upscaler_unet
         self.scheduler = scheduler
+        # (steps, device, dtype) -> [(timestep, dt)]. The schedule is the same
+        # on every frame; scheduler.set_timesteps + scheduler.step per frame
+        # cost CPU time and a GPU sync (the step looks its index up with .item()).
+        self._schedules = {}
+
+    def _schedule(self, num_inference_steps: int, device, dtype):
+        key = (num_inference_steps, device, dtype)
+        if key not in self._schedules:
+            self.scheduler.set_timesteps(num_inference_steps, mu=1.0)
+            sigmas = self.scheduler.sigmas
+            self._schedules[key] = [
+                (t.to(device, dtype).view(1), sigmas[i + 1] - sigmas[i])
+                for i, t in enumerate(self.scheduler.timesteps)
+            ]
+        return self._schedules[key]
 
     def __call__(
         self,
@@ -26,7 +41,9 @@ class FlowUpscalerPipeline:
         if target_latent_width is None:
             target_latent_width = latents_small.shape[3] * 2
 
-        self.scheduler.set_timesteps(num_inference_steps, mu=1.0)
+        schedule = self._schedule(
+            num_inference_steps, latents_small.device, latents_small.dtype
+        )
         latents = torch.normal(
             mean=0,
             std=1,
@@ -37,14 +54,16 @@ class FlowUpscalerPipeline:
         )
         self.upscaler_unet.eval()
 
-        for t in self.scheduler.timesteps:
-            latent_model_input = latents
-            t = t.to(latents_small.device, latents_small.dtype).view(1)
+        for t, dt in schedule:
             predicted_noise = self.upscaler_unet(
-                sample=latent_model_input,
+                sample=latents,
                 timestep=t,
                 latents_small=latents_small,
             )
-            latents = self.scheduler.step(predicted_noise, t, latents).prev_sample
+            # FlowMatchEulerDiscreteScheduler.step, same operations in the same
+            # order (bit-identical): upcast, Euler step, back to the model dtype.
+            latents = (latents.to(torch.float32) + dt * predicted_noise).to(
+                predicted_noise.dtype
+            )
 
         return latents

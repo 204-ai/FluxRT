@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+from functools import partial
 from typing import Any, Callable
 
 import numpy as np
@@ -1114,7 +1115,18 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                                 bucket,
                             )
 
-                    noise_pred = self.transformer(
+                    # "transformer_cudagraphs" (default on): replay the step from
+                    # a recorded CUDA graph (same result, one launch instead of
+                    # hundreds).
+                    transformer = self.transformer
+                    if (
+                        step_mask is not None
+                        and latents.is_cuda
+                        and self.subprocess_config.get("transformer_cudagraphs", True)
+                    ):
+                        transformer = partial(spatial_cache.step_graphs.run, self.transformer)
+
+                    noise_pred = transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)
                         timestep=timestep / 1000,
                         guidance=None,

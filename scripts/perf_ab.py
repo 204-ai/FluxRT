@@ -254,6 +254,10 @@ def cmd_run(args):
     try:
         t_load = time.perf_counter()
         sub.process_init()
+        if args.live_warmup:
+            # What the live server does at boot. Without it the timed frames
+            # also pay for the first use of every new active-row count.
+            sub.warm_up()
         load_s = time.perf_counter() - t_load
         step = sub.step_live if hasattr(sub, "step_live") else (lambda: _legacy_step(sub))
 
@@ -556,6 +560,8 @@ def main():
     r.add_argument("--frames", type=int, default=300)
     r.add_argument("--warmup", type=int, default=40,
                    help="untimed frames first (torch.compile + cache warm-up)")
+    r.add_argument("--live-warmup", action="store_true",
+                   help="run the server's boot warm-up (warm_up()) before the clip, like the live server")
     r.add_argument("--out", required=True)
     r.add_argument("--label", default=None)
     r.add_argument("--profile", type=int, default=0, metavar="K",

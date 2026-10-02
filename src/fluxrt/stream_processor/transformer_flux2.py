@@ -48,13 +48,13 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-# Shapes that depend on the active-row count are expensive the first time they
-# occur: cuDNN attention builds a plan per query length (~480 ms on the RTX 5090
-# laptop, 0.26 ms afterwards) and cuBLAS searches an int8 algorithm per row count
-# (~3 ms per layer). The count differs almost every frame, so it is rounded up to
-# a multiple of ACTIVE_ROW_BUCKET by repeating an already-active row: ~35 shapes
-# in total, primed once at startup. A repeated row is computed twice with the
-# same inputs and scattered to the same place, so the result is unchanged.
+# The first transformer step at a never-seen active-row count costs ~380 ms on
+# the RTX 5090 laptop (cuDNN plans its attention kernel per query length and
+# stride layout). The count differs almost every frame, so it is rounded up to
+# a multiple of ACTIVE_ROW_BUCKET by repeating an already-active row: ~25 counts
+# in total, each run once by the boot warm-up ("warmup_sweep"). A repeated row
+# is computed twice with the same inputs and scattered to the same place, so
+# the result is unchanged.
 ACTIVE_ROW_BUCKET = 64
 
 
@@ -122,6 +122,26 @@ class SparseMask:
         self.img = ActiveRows(idx=staging.send("img", img, device))
         self.full = ActiveRows(idx=staging.send("full", np.concatenate([txt, img + text_seq_len]), device))
         return self
+
+    def static_copy(self) -> "SparseMask":
+        """A copy with its own tensors: the fixed mask inputs of a recorded CUDA
+        graph (see StepGraphs). `load` then refills them for each replay."""
+        # Same class: compiled blocks guard on the mask's type, and a recompile
+        # must not happen while a graph is being recorded.
+        copy = type(self).__new__(type(self))
+        copy.exec_only = self.exec_only
+        copy.tensor = self.tensor.clone()
+        copy.txt = ActiveRows(idx=self.txt.idx.clone())
+        copy.img = ActiveRows(idx=self.img.idx.clone())
+        copy.full = ActiveRows(idx=self.full.idx.clone())
+        return copy
+
+    def load(self, other: "SparseMask"):
+        """Copy another mask with the same row counts into this one's tensors."""
+        self.tensor.copy_(other.tensor)
+        self.txt.idx.copy_(other.txt.idx)
+        self.img.idx.copy_(other.img.idx)
+        self.full.idx.copy_(other.full.idx)
 
 
 class MaskStaging:
@@ -195,6 +215,9 @@ class SpatialCache:
         self.valid = torch.zeros(1, self.full_seq_len, device=device, dtype=torch.bool)
         # Host mirror of `valid` for preprocess_mask_host (no GPU round trip).
         self.valid_host = np.zeros(self.full_seq_len, dtype=bool)
+        # Recorded CUDA graphs of the transformer step on this cache
+        # ("transformer_cudagraphs"); they go when the cache goes.
+        self.step_graphs = StepGraphs()
 
         def get_empty_cache_tensor():
             return torch.zeros(
@@ -359,6 +382,120 @@ class SpatialCache:
         keys.index_copy_(1, rows.idx, active_keys)
         values.index_copy_(1, rows.idx, active_values)
         return keys, values
+
+
+# Row counts are bucketed, so the number of distinct steps is bounded by the
+# bucket count; past this many, new shapes just run normally.
+MAX_STEP_GRAPHS = 128
+
+
+class StepGraphs:
+    """The transformer step replayed from recorded CUDA graphs
+    ("transformer_cudagraphs"), for one SpatialCache.
+
+    A normal step issues hundreds of kernel launches from Python. Where a
+    launch is expensive (Windows: each one goes through the OS GPU scheduler)
+    the CPU cannot issue them as fast as the GPU runs them. A recorded graph
+    replays the same kernels with one launch; the result is bit-identical.
+
+    A graph is tied to its tensors' memory and shapes, so there is one per
+    (active text rows, active image rows, input shapes, position ids). The
+    per-frame inputs are copied into the graph's fixed input tensors before a
+    replay; the cache tensors are updated in place by the graph itself.
+
+    Nothing may wait for the GPU while a graph is recorded (a block compiling,
+    a Triton kernel autotuning, a cuDNN / cuBLAS plan being built). So a step
+    is recorded the second time its key shows up, and right after running it
+    normally on the very objects the recording uses: whatever that
+    combination still had to set up has then happened.
+
+    The returned output tensor of a replay is the graph's own and is
+    overwritten by the next replay of the same key (next frame at the
+    earliest)."""
+
+    INPUTS = ("hidden_states", "encoder_hidden_states", "timestep")
+    # A failed recording leaves its step on the normal path; after this many
+    # failures nothing more is recorded this session (recorded graphs keep
+    # replaying).
+    MAX_FAILURES = 3
+    failures = 0
+
+    def __init__(self):
+        # key -> "seen" | "normal" (recording failed) | (graph, output, static
+        # kwargs, RoPE tables)
+        self.graphs = {}
+        # One memory pool for all graphs: they never run concurrently and each
+        # recomputes all of its intermediates.
+        self.pool = None
+
+    def run(self, transformer, *, spatial_cache, **kwargs):
+        """transformer(spatial_cache=..., **kwargs) with return_dict=False."""
+        mask = kwargs["mask"]
+        if mask.exec_only:
+            # sync_with_kv_cache rebinds the cache tensors: nothing to record.
+            return transformer(spatial_cache=spatial_cache, **kwargs)
+        key = (
+            mask.txt.idx.numel(),
+            mask.img.idx.numel(),
+            tuple(kwargs["hidden_states"].shape),
+            tuple(kwargs["encoder_hidden_states"].shape),
+            id(kwargs["img_ids"]),
+            id(kwargs["txt_ids"]),
+        )
+        entry = self.graphs.get(key)
+        recording = StepGraphs.failures < StepGraphs.MAX_FAILURES
+        if entry is None:
+            if recording and len(self.graphs) < MAX_STEP_GRAPHS:
+                self.graphs[key] = "seen"
+            return transformer(spatial_cache=spatial_cache, **kwargs)
+        if entry == "seen" and recording:
+            return self._record(transformer, spatial_cache, key, kwargs)
+        if isinstance(entry, str):
+            return transformer(spatial_cache=spatial_cache, **kwargs)
+        graph, output, static, _ = entry
+        for name in self.INPUTS:
+            static[name].copy_(kwargs[name])
+        static["mask"].load(mask)
+        graph.replay()
+        return (output,)
+
+    def _record(self, transformer, spatial_cache, key, kwargs):
+        """This frame's step, run normally on the graph's fixed inputs, then
+        recorded (recording executes nothing) for the following frames."""
+        # No reference to spatial_cache in the entry (it owns this object).
+        static = dict(kwargs)
+        for name in self.INPUTS:
+            static[name] = kwargs[name].clone()
+        static["mask"] = kwargs["mask"].static_copy()
+        result = transformer(spatial_cache=spatial_cache, **static)
+
+        stream = torch.cuda.current_stream()
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph, pool=self.pool):
+                output = transformer(spatial_cache=spatial_cache, **static)[0]
+        except RuntimeError as error:
+            # torch.cuda.graph leaves its capture stream current when a
+            # recording fails, and CUDA reports the failure once more on the
+            # next kernel launch: switch back, and take that report here.
+            torch.cuda.set_stream(stream)
+            try:
+                torch.zeros(1, device=result[0].device).add_(1)
+            except RuntimeError:
+                pass
+            StepGraphs.failures += 1
+            self.graphs[key] = "normal"
+            print(
+                "transformer_cudagraphs: recording a step failed, it keeps running "
+                f"normally ({str(error).splitlines()[0]})"
+            )
+            return result
+        if self.pool is None:
+            self.pool = graph.pool()
+        # `static` and the RoPE tables keep alive what the graph reads but
+        # does not own (position ids, their rotary embeddings).
+        self.graphs[key] = (graph, output, static, getattr(transformer, "_rope_cache", None))
+        return result
 
 
 def sparse_mlp_compute(
@@ -2090,7 +2227,11 @@ class Flux2Transformer2DModel(
                 torch.cat([text_rotary_emb[0], image_rotary_emb[0]], dim=0),
                 torch.cat([text_rotary_emb[1], image_rotary_emb[1]], dim=0),
             )
-            if not torch.compiler.is_compiling():
+            # (not while recording a CUDA graph either: the tables would be
+            # graph memory, filled only once that graph has been replayed)
+            if not torch.compiler.is_compiling() and not (
+                hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()
+            ):
                 self._rope_cache = (ids_in[0], ids_in[1], concat_rotary_emb)
 
         if joint_attention_kwargs is None:
