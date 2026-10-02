@@ -503,6 +503,18 @@ Worth keeping, because each looked convincing at the time:
 
 ## Boot commands
 
+Windows show machine (venv, flags and the show config in one script):
+
+```powershell
+scripts\start_show.ps1                      # production: flow upscaler, 1152x640 out
+scripts\start_show.ps1 -Fast                # + mask_dilation=1
+scripts\start_show.ps1 -Fast -NoUpscaler    # fastest, 576x320 out
+scripts\start_show.ps1 -Fast --set gpu_wait=sleep   # extra arguments go to run_webrtc.py
+```
+
+Settings for every start are in `configs/show_laptop.json` (`int8_linear`,
+`rife_cudagraphs`, `conv_backend`, `gpu_wait`, lip transfer off).
+
 ```bash
 # default, no quality cost
 python scripts/run_webrtc.py --config configs/config_with_reference.json --interp 1 --no-server-camera

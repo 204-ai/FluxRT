@@ -33,6 +33,11 @@ import numpy as np
 
 from fluxrt.webrtc.input_ownership import MediaStreamError
 
+try:  # present on the server; the numpy path below is 20x slower per frame
+    import cv2
+except Exception:  # pragma: no cover - exercised only without OpenCV
+    cv2 = None
+
 MAGIC = b"FRT1"
 HEADER = struct.Struct("<4sHHI")
 MAX_SIDE = 4096
@@ -55,6 +60,16 @@ def unpack_frame(data: bytes) -> np.ndarray:
     if len(data) != HEADER.size + width * height * 4:
         raise ValueError("frame message size does not match its header")
     return np.frombuffer(data, dtype=np.uint8, offset=HEADER.size).reshape(height, width, 4)
+
+
+def to_rgbx(rgb: np.ndarray) -> np.ndarray:
+    """(h, w, 3) RGB -> (h, w, 4) RGBX with X = 255."""
+    if cv2 is not None:
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2RGBA)
+    rgbx = np.empty((*rgb.shape[:2], 4), dtype=np.uint8)
+    rgbx[:, :, :3] = rgb
+    rgbx[:, :, 3] = 255
+    return rgbx
 
 
 class RawFrame:
@@ -170,10 +185,7 @@ async def serve(
                 await asyncio.sleep(poll)
                 continue
             sent = version
-            rgbx = np.empty((*rgb.shape[:2], 4), dtype=np.uint8)
-            rgbx[:, :, :3] = rgb
-            rgbx[:, :, 3] = 255
-            await websocket.send_bytes(pack_frame(rgbx, version))
+            await websocket.send_bytes(pack_frame(to_rgbx(rgb), version))
 
     sender = asyncio.ensure_future(send_loop())
     try:
