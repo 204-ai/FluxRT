@@ -59,7 +59,9 @@ from fluxrt.stream_processor.postprocessors import (
 
 from fluxrt.flow_upscaler.upscaler_unet import UpscalerUNet
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
+from fluxrt.stream_processor import trt_stage
 from fluxrt.stream_processor.cuda_graphs import RecordedModule
+from fluxrt.stream_processor.trt_stage import TrtStage
 from fluxrt.stream_processor.flux_tiny_vae import DiffusersTAEF2Wrapper
 
 
@@ -315,6 +317,16 @@ class ModelInferenceSubprocess:
         torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", True))
         self._select_attention_backend()
 
+        # "conv_backend": "tensorrt" — the tiny VAE, the flow upscaler's UNet and
+        # RIFE as TensorRT fp16 engines (see trt_stage). Opt-in: needs tensorrt +
+        # onnx, builds its engines on the first boot, rounds differently.
+        tiny_vae = isinstance(self.vae, DiffusersTAEF2Wrapper)
+        trt_stages = self.config.get("conv_backend", "torch") == "tensorrt"
+        if trt_stages and not trt_stage.available():
+            print("conv_backend=tensorrt: tensorrt / onnx not installed, using torch")
+            trt_stages = False
+        self.rife_cudagraphs = False
+
         if self.config.get("compile_models", False):
             # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
             # against cuBLAS per shape (longer warm-up; opt-in A/B knob).
@@ -335,33 +347,44 @@ class ModelInferenceSubprocess:
             # vae.encode / vae.decode, so the VAE always ran eager. Compile the
             # conv stacks those methods run. compile_vae=false = the old (eager)
             # behavior, for A/B — compiled convs round slightly differently.
-            if self.config.get("compile_vae", True):
-                vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
+            if self.config.get("compile_vae", True) and not (trt_stages and tiny_vae):
+                vae_nets = self.vae.taesd if tiny_vae else self.vae
                 vae_nets.encoder = torch.compile(vae_nets.encoder)
                 vae_nets.decoder = torch.compile(vae_nets.decoder)
             # The flow upscaler's UNet ran eager (12.6 -> 10.3 ms on the RTX 5090
             # laptop). compile_upscaler=false = the old behavior, for A/B —
             # compiled convs round slightly differently.
-            if self.upscaler_pipe is not None and self.config.get("compile_upscaler", True):
+            if self.upscaler_pipe is not None and self.config.get("compile_upscaler", True) and not trt_stages:
                 self.upscaler_pipe.upscaler_unet = torch.compile(self.upscaler_unet)
             # RIFE as CUDA graphs (reduce-overhead). Opt-in: on the RTX 4090 at
             # 576x320, interpolation_exp 1, it measured 0.3 ms/frame (RIFE is
             # ~2.5 ms of GPU time there) — not worth the graph-pool memory by default.
-            self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", False))
-            self.interpolation_model = torch.compile(
-                self.interpolation_model,
-                mode="reduce-overhead" if self.rife_cudagraphs else "default",
-            )
+            if not trt_stages:
+                self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", False))
+                self.interpolation_model = torch.compile(
+                    self.interpolation_model,
+                    mode="reduce-overhead" if self.rife_cudagraphs else "default",
+                )
 
-        # The fixed-shape conv stages replayed as CUDA graphs: the same kernels
-        # as the (compiled) call, bit-identical, without its launches.
+        if trt_stages:
+            self.interpolation_model = TrtStage(self.interpolation_model, "rife")
+            if tiny_vae:
+                self.vae.taesd.encoder = TrtStage(self.vae.taesd.encoder, "taef2-encoder")
+                self.vae.taesd.decoder = TrtStage(self.vae.taesd.decoder, "taef2-decoder")
+            if self.upscaler_pipe is not None:
+                self.upscaler_pipe.upscaler_unet = TrtStage(self.upscaler_unet, "upscaler-unet")
+
+        # The remaining fixed-shape conv stages replayed as CUDA graphs: the same
+        # kernels as the (compiled) call, bit-identical, without its launches.
         # stage_cudagraphs=false for A/B.
+        self.trt_stages = trt_stages
         self.stage_cudagraphs = bool(self.config.get("stage_cudagraphs", True)) and str(self.device).startswith("cuda")
         if self.stage_cudagraphs:
-            vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
-            vae_nets.encoder = RecordedModule(vae_nets.encoder)
-            vae_nets.decoder = RecordedModule(vae_nets.decoder)
-            if self.upscaler_pipe is not None:
+            vae_nets = self.vae.taesd if tiny_vae else self.vae
+            if not isinstance(vae_nets.encoder, TrtStage):
+                vae_nets.encoder = RecordedModule(vae_nets.encoder)
+                vae_nets.decoder = RecordedModule(vae_nets.decoder)
+            if self.upscaler_pipe is not None and not trt_stages:
                 self.upscaler_pipe.upscaler_unet = RecordedModule(self.upscaler_pipe.upscaler_unet)
 
         reference_image_seq_len = None
@@ -402,10 +425,13 @@ class ModelInferenceSubprocess:
             tiny = DiffusersTAEF2Wrapper(path="taef2/taef2.safetensors").to(self.device, self.dtype)
             if self.config.get("tiny_vae_channels_last", True):
                 tiny.taesd.to(memory_format=torch.channels_last)
-            if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
-                tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
-            if self.stage_cudagraphs:
-                tiny.taesd.decoder = RecordedModule(tiny.taesd.decoder)
+            if self.trt_stages:
+                tiny.taesd.decoder = TrtStage(tiny.taesd.decoder, "taef2-decoder")
+            else:
+                if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
+                    tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
+                if self.stage_cudagraphs:
+                    tiny.taesd.decoder = RecordedModule(tiny.taesd.decoder)
             self.pipe.tiny_decoder = tiny
 
         if self.config.get("use_lora", False):
