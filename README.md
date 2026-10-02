@@ -70,6 +70,20 @@ cd FluxRT
 
 GUI reqires [OBS](https://obsproject.com/download) to be installed to access virtual webcam. 
 
+Start the WebRTC server (PowerShell, from the checkout; the install script creates `.venv`):
+
+```powershell
+.\.venv\Scripts\activate.ps1
+python scripts\run_webrtc.py --no-server-camera --tiny-vae --flow-upscaler --interp 1 `
+  --config configs\config_with_reference.json `
+  --set int8_linear=true --set rife_cudagraphs=true
+```
+
+* The boot warm-up takes 1–2 minutes; the first boot after a code or model change compiles for several minutes more. `http://localhost:8765/healthz` answers `"ready": true` when it is up.
+* `configs\config_with_reference.json` enables lip transfer, which needs LivePortrait (see below). Without it, run from a copy of the config with `"lip_transfer": {"enable": false}`.
+* Faster conv stages with TensorRT (optional): `python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-cu12 onnx` (add pip first with `uv pip install pip` if the venv has none), then add `--set conv_backend=tensorrt`. The first boot builds the engines (about 2 minutes).
+* Presets, switches and measurements on Windows: [docs/perf-notes.md](docs/perf-notes.md).
+
 ## Linux
 
 ```bash

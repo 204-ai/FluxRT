@@ -16,6 +16,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,8 +44,20 @@ from diffusers.models.embeddings import (
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNormContinuous
 
+from fluxrt.stream_processor import cuda_graphs
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+# The first transformer step at a never-seen active-row count costs ~380 ms on
+# the RTX 5090 laptop (cuDNN plans its attention kernel per query length and
+# stride layout). The count differs almost every frame, so it is rounded up to
+# a multiple of ACTIVE_ROW_BUCKET by repeating an already-active row: ~25 counts
+# in total, each run once by the boot warm-up ("warmup_sweep"). A repeated row
+# is computed twice with the same inputs and scattered to the same place, so
+# the result is unchanged.
+ACTIVE_ROW_BUCKET = 64
 
 
 class ActiveRows:
@@ -53,8 +66,13 @@ class ActiveRows:
     `nonzero()` itself — a GPU->CPU sync and a Dynamo graph break, ~140 times
     per denoising step with the GPU idle in between."""
 
-    def __init__(self, mask: torch.Tensor):  # mask: (1, span_len)
-        self.idx = mask.squeeze(0).nonzero(as_tuple=False).squeeze(-1)
+    def __init__(self, mask: torch.Tensor | None = None, bucket: int = ACTIVE_ROW_BUCKET, idx: torch.Tensor | None = None):
+        if idx is None:  # mask: (1, span_len)
+            idx = mask.squeeze(0).nonzero(as_tuple=False).squeeze(-1)
+            pad = (-idx.numel()) % bucket if bucket > 1 else 0
+            if pad and idx.numel() > 0:
+                idx = torch.cat([idx, idx[-1:].expand(pad)])
+        self.idx = idx
         self.any = self.idx.numel() > 0
         # The count changes every frame: compile it as a dynamic size from the
         # first call instead of specializing on it and recompiling later.
@@ -65,15 +83,87 @@ class SparseMask:
     """The spatial-cache mask (already through SpatialCache.preprocess_mask)
     plus its active rows over the joint sequence and its text / image spans."""
 
-    def __init__(self, mask: torch.Tensor, text_seq_len: int):
+    def __init__(self, mask: torch.Tensor, text_seq_len: int, bucket: int = ACTIVE_ROW_BUCKET):
         self.tensor = mask
         # Value 1 (execute, don't update the cache) only comes from manual masks;
         # blocks that write the KV cache in place need every executed row to be
         # an updated one.
         self.exec_only = bool((mask == 1).any())
-        self.full = ActiveRows(mask)
-        self.txt = ActiveRows(mask[:, :text_seq_len])
-        self.img = ActiveRows(mask[:, text_seq_len:])
+        self.txt = ActiveRows(mask[:, :text_seq_len], bucket)
+        self.img = ActiveRows(mask[:, text_seq_len:], bucket)
+        # Joint sequence = text rows then image rows, in exactly the order the
+        # double blocks concatenate their two streams.
+        self.full = ActiveRows(idx=torch.cat([self.txt.idx, self.img.idx + text_seq_len]))
+
+    @classmethod
+    def from_host(cls, mask: np.ndarray, text_seq_len: int, bucket: int, device, staging: "MaskStaging"):
+        """Same result as SparseMask(mask_on_gpu, ...), built from a host copy of
+        the mask. The GPU version needs the mask's values on the host four times
+        per denoising step (any / nonzero), each a wait for everything queued on
+        the GPU, so the CPU could never prepare step 2 while step 1 was still
+        running. Here the indices are computed in numpy and sent over through
+        pinned buffers without waiting.
+        Args:
+            mask: (full_seq_len,) int32 host array, already through
+                SpatialCache.preprocess_mask_host.
+            staging: pinned buffers for this denoising step (see MaskStaging)."""
+        self = cls.__new__(cls)
+        self.exec_only = bool((mask == 1).any())
+
+        def rows(span):
+            idx = np.flatnonzero(span)
+            pad = (-idx.size) % bucket if bucket > 1 else 0
+            if pad and idx.size:
+                idx = np.concatenate([idx, np.full(pad, idx[-1])])
+            return idx
+
+        txt = rows(mask[:text_seq_len])
+        img = rows(mask[text_seq_len:])
+        self.tensor = staging.send("mask", mask.astype(np.int32, copy=False), device).unsqueeze(0)
+        self.txt = ActiveRows(idx=staging.send("txt", txt, device))
+        self.img = ActiveRows(idx=staging.send("img", img, device))
+        self.full = ActiveRows(idx=staging.send("full", np.concatenate([txt, img + text_seq_len]), device))
+        return self
+
+    def static_copy(self) -> "SparseMask":
+        """A copy with its own tensors: the fixed mask inputs of a recorded CUDA
+        graph (see StepGraphs). `load` then refills them for each replay."""
+        # Same class: compiled blocks guard on the mask's type, and a recompile
+        # must not happen while a graph is being recorded.
+        copy = type(self).__new__(type(self))
+        copy.exec_only = self.exec_only
+        copy.tensor = self.tensor.clone()
+        copy.txt = ActiveRows(idx=self.txt.idx.clone())
+        copy.img = ActiveRows(idx=self.img.idx.clone())
+        copy.full = ActiveRows(idx=self.full.idx.clone())
+        return copy
+
+    def load(self, other: "SparseMask"):
+        """Copy another mask with the same row counts into this one's tensors."""
+        self.tensor.copy_(other.tensor)
+        self.txt.idx.copy_(other.txt.idx)
+        self.img.idx.copy_(other.img.idx)
+        self.full.idx.copy_(other.full.idx)
+
+
+class MaskStaging:
+    """Pinned host buffers for one denoising step's mask and index uploads.
+    A non-blocking copy from pinned memory is queued without waiting for the
+    GPU; from pageable memory PyTorch waits for the stream first. Each buffer
+    is rewritten only after the frame's final download has synchronized."""
+
+    def __init__(self, capacity: int):
+        self.buffers = {
+            "mask": torch.empty(capacity, dtype=torch.int32).pin_memory(),
+            "txt": torch.empty(capacity, dtype=torch.int64).pin_memory(),
+            "img": torch.empty(capacity, dtype=torch.int64).pin_memory(),
+            "full": torch.empty(capacity, dtype=torch.int64).pin_memory(),
+        }
+
+    def send(self, name: str, values: np.ndarray, device) -> torch.Tensor:
+        buffer = self.buffers[name][: values.size]
+        buffer.numpy()[:] = values
+        return buffer.to(device, non_blocking=True)
 
 
 class SpatialCache:
@@ -125,6 +215,11 @@ class SpatialCache:
         )
 
         self.valid = torch.zeros(1, self.full_seq_len, device=device, dtype=torch.bool)
+        # Host mirror of `valid` for preprocess_mask_host (no GPU round trip).
+        self.valid_host = np.zeros(self.full_seq_len, dtype=bool)
+        # Recorded CUDA graphs of the transformer step on this cache
+        # ("transformer_cudagraphs"); they go when the cache goes.
+        self.step_graphs = StepGraphs()
 
         def get_empty_cache_tensor():
             return torch.zeros(
@@ -163,6 +258,14 @@ class SpatialCache:
             input_mask,
         )
 
+    def preprocess_mask_host(self, input_mask: np.ndarray) -> np.ndarray:
+        """preprocess_mask on a host copy of the mask ((full_seq_len,) int32),
+        plus the `valid` update sync_with_output_cache applies after the forward
+        (valid |= mask == 2), so the mirror stays in step with the GPU state."""
+        mask = np.where(self.valid_host, input_mask, 2).astype(np.int32)
+        self.valid_host |= mask == 2
+        return mask
+
     def sync_with_output_cache(
         self, mask: torch.Tensor, masked_prediction: torch.Tensor
     ) -> torch.Tensor:
@@ -187,10 +290,12 @@ class SpatialCache:
         filled_prediction = torch.where(
             execute_exp, masked_prediction, self.output_cache
         )
-        self.output_cache = torch.where(
-            update_exp, masked_prediction, self.output_cache
+        # In place: the cache tensors keep their memory, so a recorded CUDA graph
+        # (and anything else holding a reference) always sees the current state.
+        self.output_cache.copy_(
+            torch.where(update_exp, masked_prediction, self.output_cache)
         )
-        self.valid = torch.logical_or(self.valid, mask == 2)
+        self.valid.logical_or_(mask == 2)
 
         return filled_prediction
 
@@ -279,6 +384,116 @@ class SpatialCache:
         keys.index_copy_(1, rows.idx, active_keys)
         values.index_copy_(1, rows.idx, active_values)
         return keys, values
+
+
+# Row counts are bucketed, so the number of distinct steps is bounded by the
+# bucket count; past this many, new shapes just run normally.
+MAX_STEP_GRAPHS = 128
+
+
+class StepGraphs:
+    """The transformer step replayed from recorded CUDA graphs
+    ("transformer_cudagraphs"), for one SpatialCache.
+
+    A normal step issues hundreds of kernel launches from Python. Where a
+    launch is expensive (Windows: each one goes through the OS GPU scheduler)
+    the CPU cannot issue them as fast as the GPU runs them. A recorded graph
+    replays the same kernels with one launch; the result is bit-identical.
+
+    A graph is tied to its tensors' memory and shapes, so there is one per
+    (active text rows, active image rows, input shapes, position ids,
+    timestep tensor). The per-frame inputs are copied into the graph's fixed
+    input tensors before a replay; the cache tensors are updated in place by
+    the graph itself. The ids and the timestep have to be the same tensor
+    objects on every call (the pipeline memoizes them); what depends only on
+    them is constant in the graph.
+
+    A step is recorded the second time its key shows up, and right after
+    running it normally on the very objects the recording uses (see
+    cuda_graphs): whatever that combination still had to set up has then
+    happened.
+
+    The returned output tensor of a replay is the graph's own and is
+    overwritten by the next replay of the same key (next frame at the
+    earliest)."""
+
+    def __init__(self):
+        # key -> "seen" | "normal" (recording failed) | (graph, output, static
+        # kwargs, RoPE tables)
+        self.graphs = {}
+        # One memory pool for all graphs: they never run concurrently and each
+        # recomputes all of its intermediates.
+        self.pool = None
+
+    def run(self, transformer, *, spatial_cache, **kwargs):
+        """transformer(spatial_cache=..., **kwargs) with return_dict=False."""
+        mask = kwargs["mask"]
+        if mask.exec_only:
+            # sync_with_kv_cache rebinds the cache tensors: nothing to record.
+            return transformer(spatial_cache=spatial_cache, **kwargs)
+        key = (
+            mask.txt.idx.numel(),
+            mask.img.idx.numel(),
+            tuple(kwargs["hidden_states"].shape),
+            tuple(kwargs["encoder_hidden_states"].shape),
+            id(kwargs["img_ids"]),
+            id(kwargs["txt_ids"]),
+            id(kwargs["timestep"]),
+        )
+        entry = self.graphs.get(key)
+        recording = cuda_graphs.recording()
+        if entry is None:
+            if recording and len(self.graphs) < MAX_STEP_GRAPHS:
+                self.graphs[key] = "seen"
+            return transformer(spatial_cache=spatial_cache, **kwargs)
+        if entry == "seen" and recording:
+            return self._record(transformer, spatial_cache, key, kwargs)
+        if isinstance(entry, str):
+            return transformer(spatial_cache=spatial_cache, **kwargs)
+        graph, output, static, _ = entry
+        static["hidden_states"].copy_(kwargs["hidden_states"])
+        if mask.txt.any:  # otherwise the prompt embedding is not read (see forward)
+            static["encoder_hidden_states"].copy_(kwargs["encoder_hidden_states"])
+        static["mask"].load(mask)
+        graph.replay()
+        return (output,)
+
+    def _record(self, transformer, spatial_cache, key, kwargs):
+        """This frame's step, run normally on the graph's fixed inputs, then
+        recorded (recording executes nothing) for the following frames."""
+        # No reference to spatial_cache in the entry (it owns this object).
+        static = dict(kwargs)
+        static["hidden_states"] = kwargs["hidden_states"].clone()
+        if kwargs["mask"].txt.any:
+            static["encoder_hidden_states"] = kwargs["encoder_hidden_states"].clone()
+        static["mask"] = kwargs["mask"].static_copy()
+        result = transformer(spatial_cache=spatial_cache, **static)
+
+        recorded = cuda_graphs.record(
+            lambda: transformer(spatial_cache=spatial_cache, **static)[0],
+            pool=self.pool,
+            what="transformer step",
+        )
+        if recorded is None:
+            self.graphs[key] = "normal"
+            return result
+        graph, output = recorded
+        if self.pool is None:
+            self.pool = graph.pool()
+        # `static` and these caches keep alive what the graph reads but does
+        # not own: position ids and timestep, their rotary embeddings and
+        # modulation parameters, the placeholder of an unread text stream.
+        self.graphs[key] = (
+            graph,
+            output,
+            static,
+            (
+                getattr(transformer, "_rope_cache", None),
+                getattr(transformer, "_timestep_cache", {}).get(id(static["timestep"])),
+                getattr(transformer, "_text_zeros", None),
+            ),
+        )
+        return result
 
 
 def sparse_mlp_compute(
@@ -1888,6 +2103,27 @@ class Flux2Transformer2DModel(
     _skip_keys = ["kv_cache"]
 
     @apply_lora_scale("joint_attention_kwargs")
+    def _embed_text(self, encoder_hidden_states, hidden_states, mask, kv_cache_mode):
+        """context_embedder, skipped when no text row is active: the blocks then
+        never read the text stream (its keys / values come from the spatial
+        cache), so a fixed placeholder of the right shape stands in for the
+        embedding of all 512 text tokens (~0.6 ms per step on the RTX 5090
+        laptop)."""
+        if not (
+            isinstance(mask, SparseMask)
+            and not mask.txt.any
+            and not mask.exec_only
+            and kv_cache_mode is None
+            and not torch.compiler.is_compiling()
+        ):
+            return self.context_embedder(encoder_hidden_states)
+        shape = (*encoder_hidden_states.shape[:2], hidden_states.shape[-1])
+        zeros = self.__dict__.setdefault("_text_zeros", {})
+        key = (shape, hidden_states.dtype, hidden_states.device)
+        if key not in zeros:
+            zeros[key] = torch.zeros(shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        return zeros[key]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1948,17 +2184,37 @@ class Flux2Transformer2DModel(
             )
         num_txt_tokens = encoder_hidden_states.shape[1]
 
-        # 1. Calculate timestep embedding and modulation parameters
-        timestep = timestep.to(hidden_states.dtype) * 1000
+        # 1. Calculate timestep embedding and modulation parameters. They depend
+        # only on the timestep: when the caller hands in the same timestep
+        # tensor again (the pipeline memoizes it per schedule step), reuse the
+        # last results (same values; ~1 ms of GPU time per frame on the RTX
+        # 5090 laptop).
+        reuse = guidance is None and kv_cache_mode is None and not torch.compiler.is_compiling()
+        cached = getattr(self, "_timestep_cache", {}).get(id(timestep)) if reuse else None
+        if cached is not None and cached[0] is timestep:
+            _, temb, double_stream_mod_img, double_stream_mod_txt, single_stream_mod = cached
+        else:
+            timestep_in = timestep
+            timestep = timestep.to(hidden_states.dtype) * 1000
 
-        if guidance is not None:
-            guidance = guidance.to(hidden_states.dtype) * 1000
+            if guidance is not None:
+                guidance = guidance.to(hidden_states.dtype) * 1000
 
-        temb = self.time_guidance_embed(timestep, guidance)
+            temb = self.time_guidance_embed(timestep, guidance)
 
-        double_stream_mod_img = self.double_stream_modulation_img(temb)
-        double_stream_mod_txt = self.double_stream_modulation_txt(temb)
-        single_stream_mod = self.single_stream_modulation(temb)
+            double_stream_mod_img = self.double_stream_modulation_img(temb)
+            double_stream_mod_txt = self.double_stream_modulation_txt(temb)
+            single_stream_mod = self.single_stream_modulation(temb)
+
+            # (not while recording a CUDA graph: the results would be graph
+            # memory, filled only once that graph has been replayed)
+            if reuse and not (hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()):
+                cache = getattr(self, "_timestep_cache", None)
+                if cache is None or len(cache) >= 16:
+                    cache = self._timestep_cache = {}
+                cache[id(timestep_in)] = (
+                    timestep_in, temb, double_stream_mod_img, double_stream_mod_txt, single_stream_mod
+                )
 
         # KV extract mode: create cache and blend modulations for ref tokens
         if kv_cache_mode == "extract" and num_ref_tokens > 0:
@@ -1988,20 +2244,34 @@ class Flux2Transformer2DModel(
         # 2. Input projection for image (hidden_states) and conditioning text (encoder_hidden_states)
 
         hidden_states = self.x_embedder(hidden_states)
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        encoder_hidden_states = self._embed_text(encoder_hidden_states, hidden_states, mask, kv_cache_mode)
 
-        # 3. Calculate RoPE embeddings from image and text tokens
-        if img_ids.ndim == 3:
-            img_ids = img_ids[0]
-        if txt_ids.ndim == 3:
-            txt_ids = txt_ids[0]
+        # 3. Calculate RoPE embeddings from image and text tokens. They depend
+        # only on the ids: when the caller hands in the same id tensors again
+        # (the pipeline memoizes them by shape), reuse the last result instead
+        # of redoing the fp64 frequency math on every step.
+        rope_cache = None if torch.compiler.is_compiling() else getattr(self, "_rope_cache", None)
+        if rope_cache is not None and rope_cache[0] is img_ids and rope_cache[1] is txt_ids:
+            concat_rotary_emb = rope_cache[2]
+        else:
+            ids_in = (img_ids, txt_ids)
+            if img_ids.ndim == 3:
+                img_ids = img_ids[0]
+            if txt_ids.ndim == 3:
+                txt_ids = txt_ids[0]
 
-        image_rotary_emb = self.pos_embed(img_ids)
-        text_rotary_emb = self.pos_embed(txt_ids)
-        concat_rotary_emb = (
-            torch.cat([text_rotary_emb[0], image_rotary_emb[0]], dim=0),
-            torch.cat([text_rotary_emb[1], image_rotary_emb[1]], dim=0),
-        )
+            image_rotary_emb = self.pos_embed(img_ids)
+            text_rotary_emb = self.pos_embed(txt_ids)
+            concat_rotary_emb = (
+                torch.cat([text_rotary_emb[0], image_rotary_emb[0]], dim=0),
+                torch.cat([text_rotary_emb[1], image_rotary_emb[1]], dim=0),
+            )
+            # (not while recording a CUDA graph either: the tables would be
+            # graph memory, filled only once that graph has been replayed)
+            if not torch.compiler.is_compiling() and not (
+                hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()
+            ):
+                self._rope_cache = (ids_in[0], ids_in[1], concat_rotary_emb)
 
         if joint_attention_kwargs is None:
             joint_attention_kwargs = {}
