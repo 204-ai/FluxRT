@@ -855,19 +855,34 @@ class ModelInferenceSubprocess:
         # RGB -> BGR on the GPU (a negative-stride numpy view made the shm copy slow)
         if bgr:
             frames_out = frames_out.flip(1)
-        frames_cpu = (
+        frames_gpu = (
             frames_out
             .mul(255)
             .to(torch.uint8)
             .permute(0, 2, 3, 1)
             .contiguous()
-            .cpu()
-            .numpy()
         )
+        self._wait_for_gpu()
+        frames_cpu = frames_gpu.cpu().numpy()
 
         self.previous_frame = frame
 
         return frames_cpu
+
+    def _wait_for_gpu(self):
+        """The download above (`.cpu()`) is where a frame waits for the GPU, and
+        CUDA waits by spinning: one whole CPU core for the length of every
+        frame (89% of this process's profiler samples on the show laptop, where
+        a busy CPU also costs the GPU its power budget). With "gpu_wait":
+        "sleep" the thread sleeps in half-millisecond steps until the queued
+        work is done; the download then returns at once. Same output, up to
+        one step later per frame."""
+        if self.config.get("gpu_wait", "spin") != "sleep" or not torch.cuda.is_available():
+            return
+        done = torch.cuda.Event()
+        done.record()
+        while not done.query():
+            time.sleep(0.0005)
 
     def send_frames(self, frames):
         self.output_batch_shared_tensor.copy_from(frames)

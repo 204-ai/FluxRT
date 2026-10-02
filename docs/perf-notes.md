@@ -99,6 +99,7 @@ Opt-in, level 1, needs extra packages:
 | Key | Default | What it does |
 |---|---|---|
 | `conv_backend` | `"torch"` | `"tensorrt"`: TAEF2, upscaler UNet and RIFE as TensorRT fp16 engines. Needs `tensorrt-cu12` and `onnx` |
+| `gpu_wait` | `"spin"` | `"sleep"`: the frame loop sleeps in 0.5 ms steps while the GPU finishes a frame instead of spinning a CPU core in the output download. Same output. Not benchmarked yet |
 | `host_masks` | `true` | Resolve per-step masks on the host, one download per frame |
 | `area_downscale` | `true` | Area filter for input downscaling (the old call silently used bilinear) |
 
@@ -420,6 +421,33 @@ left out.
 Rolling removes the sawtooth at the same total time, but mid-travel
 neighbouring patches are computed under different prompt blends: a fine
 dither on flat areas and a flatter tone on big transitions. It stays opt-in.
+
+### Full stack on the laptop: where the time and the CPU go (2 Oct 2026)
+
+Live, with the kiosk connected (FluxRT alone on the GPU, 92 W):
+
+| Seconds after a prompt change | ms per frame |
+|---|---|
+| 0–12 | 213–235 |
+| 12–20 | 79–96 (the bench figure) |
+
+A morph costs about 2.7 frames' worth, and its length was counted in
+generated frames sized from `fps_pipeline` (one frame's 1 / time): a 4 s
+morph ran 12 s of every 20. Now `prompt-travel:<n>s:…` is timed on the clock
+and `/healthz` has `fps_pipeline_avg`. Re-measure after the next restart.
+
+py-spy on the live server (`record --nonblocking`, read-only):
+
+- Model process, one core at 100%: 89% of samples in the output download
+  (`.cpu()` in `interpolate_frames`), i.e. CUDA's spinning wait. `gpu_wait:
+  "sleep"` replaces it with a sleeping wait on a CUDA event.
+- Server process, 1.7 cores: VP8 encode of the output 34%, input decode +
+  BGR conversion + crop/resize 28% (30 input frames a second for an engine
+  that takes about 10; the kiosk now caps its uplink at 1.5 × the generated
+  fps), frame pumps 12%.
+
+The GPU's power limit sat at 92 W of 110 W: the 15 W Dynamic Boost goes to
+the GPU only while the CPU is idle, and about six cores were busy.
 
 ## Tried and dropped
 
