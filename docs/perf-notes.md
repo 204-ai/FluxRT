@@ -385,8 +385,10 @@ pip install --extra-index-url https://pypi.nvidia.com tensorrt-cu12 onnx
   torch encoder), which spends 33 ms decoding and 17 ms encoding.
 - TensorRT warns that it synchronizes when run on the default CUDA stream.
   Running the frame loop on a non-default stream might give a little more.
-- Measured in a second, complete venv (`fluxrt-setup\trt-venv`); the
-  production venv has no TensorRT yet.
+- First measured in a second, complete venv, then installed into the laptop's
+  production venv with the same versions (`tensorrt-cu12` 11.3.0.99, `onnx`
+  1.23.1, which also bring `protobuf` and `ml-dtypes`; nothing else changed)
+  and measured again: 83.2 ms production config, 55.8 ms all-in.
 
 ### Tried: output download overlapped with the next frame (not adopted)
 
@@ -462,8 +464,7 @@ Worth keeping, because each looked convincing at the time:
 ## Open
 
 - TensorRT for the full VAE; the frame loop on a non-default CUDA stream.
-- Decide whether TensorRT goes into the production venv (and whether
-  `conv_backend` should become `"auto"`).
+- Whether `conv_backend` should become `"auto"` (TensorRT when installed).
 - One benchmark from an interactive desktop session (all runs so far came
   from a non-interactive SSH session), and with hardware GPU scheduling on.
 - NVIDIA "Prefer No Sysmem Fallback" setting.
