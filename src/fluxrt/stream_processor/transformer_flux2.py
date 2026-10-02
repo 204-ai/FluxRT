@@ -401,9 +401,12 @@ class StepGraphs:
     replays the same kernels with one launch; the result is bit-identical.
 
     A graph is tied to its tensors' memory and shapes, so there is one per
-    (active text rows, active image rows, input shapes, position ids). The
-    per-frame inputs are copied into the graph's fixed input tensors before a
-    replay; the cache tensors are updated in place by the graph itself.
+    (active text rows, active image rows, input shapes, position ids,
+    timestep tensor). The per-frame inputs are copied into the graph's fixed
+    input tensors before a replay; the cache tensors are updated in place by
+    the graph itself. The ids and the timestep have to be the same tensor
+    objects on every call (the pipeline memoizes them); what depends only on
+    them is constant in the graph.
 
     A step is recorded the second time its key shows up, and right after
     running it normally on the very objects the recording uses (see
@@ -413,8 +416,6 @@ class StepGraphs:
     The returned output tensor of a replay is the graph's own and is
     overwritten by the next replay of the same key (next frame at the
     earliest)."""
-
-    INPUTS = ("hidden_states", "encoder_hidden_states", "timestep")
 
     def __init__(self):
         # key -> "seen" | "normal" (recording failed) | (graph, output, static
@@ -437,6 +438,7 @@ class StepGraphs:
             tuple(kwargs["encoder_hidden_states"].shape),
             id(kwargs["img_ids"]),
             id(kwargs["txt_ids"]),
+            id(kwargs["timestep"]),
         )
         entry = self.graphs.get(key)
         recording = cuda_graphs.recording()
@@ -449,8 +451,9 @@ class StepGraphs:
         if isinstance(entry, str):
             return transformer(spatial_cache=spatial_cache, **kwargs)
         graph, output, static, _ = entry
-        for name in self.INPUTS:
-            static[name].copy_(kwargs[name])
+        static["hidden_states"].copy_(kwargs["hidden_states"])
+        if mask.txt.any:  # otherwise the prompt embedding is not read (see forward)
+            static["encoder_hidden_states"].copy_(kwargs["encoder_hidden_states"])
         static["mask"].load(mask)
         graph.replay()
         return (output,)
@@ -460,8 +463,9 @@ class StepGraphs:
         recorded (recording executes nothing) for the following frames."""
         # No reference to spatial_cache in the entry (it owns this object).
         static = dict(kwargs)
-        for name in self.INPUTS:
-            static[name] = kwargs[name].clone()
+        static["hidden_states"] = kwargs["hidden_states"].clone()
+        if kwargs["mask"].txt.any:
+            static["encoder_hidden_states"] = kwargs["encoder_hidden_states"].clone()
         static["mask"] = kwargs["mask"].static_copy()
         result = transformer(spatial_cache=spatial_cache, **static)
 
@@ -476,9 +480,19 @@ class StepGraphs:
         graph, output = recorded
         if self.pool is None:
             self.pool = graph.pool()
-        # `static` and the RoPE tables keep alive what the graph reads but
-        # does not own (position ids, their rotary embeddings).
-        self.graphs[key] = (graph, output, static, getattr(transformer, "_rope_cache", None))
+        # `static` and these caches keep alive what the graph reads but does
+        # not own: position ids and timestep, their rotary embeddings and
+        # modulation parameters, the placeholder of an unread text stream.
+        self.graphs[key] = (
+            graph,
+            output,
+            static,
+            (
+                getattr(transformer, "_rope_cache", None),
+                getattr(transformer, "_timestep_cache", {}).get(id(static["timestep"])),
+                getattr(transformer, "_text_zeros", None),
+            ),
+        )
         return result
 
 
@@ -2089,6 +2103,27 @@ class Flux2Transformer2DModel(
     _skip_keys = ["kv_cache"]
 
     @apply_lora_scale("joint_attention_kwargs")
+    def _embed_text(self, encoder_hidden_states, hidden_states, mask, kv_cache_mode):
+        """context_embedder, skipped when no text row is active: the blocks then
+        never read the text stream (its keys / values come from the spatial
+        cache), so a fixed placeholder of the right shape stands in for the
+        embedding of all 512 text tokens (~0.6 ms per step on the RTX 5090
+        laptop)."""
+        if not (
+            isinstance(mask, SparseMask)
+            and not mask.txt.any
+            and not mask.exec_only
+            and kv_cache_mode is None
+            and not torch.compiler.is_compiling()
+        ):
+            return self.context_embedder(encoder_hidden_states)
+        shape = (*encoder_hidden_states.shape[:2], hidden_states.shape[-1])
+        zeros = self.__dict__.setdefault("_text_zeros", {})
+        key = (shape, hidden_states.dtype, hidden_states.device)
+        if key not in zeros:
+            zeros[key] = torch.zeros(shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        return zeros[key]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -2149,17 +2184,37 @@ class Flux2Transformer2DModel(
             )
         num_txt_tokens = encoder_hidden_states.shape[1]
 
-        # 1. Calculate timestep embedding and modulation parameters
-        timestep = timestep.to(hidden_states.dtype) * 1000
+        # 1. Calculate timestep embedding and modulation parameters. They depend
+        # only on the timestep: when the caller hands in the same timestep
+        # tensor again (the pipeline memoizes it per schedule step), reuse the
+        # last results (same values; ~1 ms of GPU time per frame on the RTX
+        # 5090 laptop).
+        reuse = guidance is None and kv_cache_mode is None and not torch.compiler.is_compiling()
+        cached = getattr(self, "_timestep_cache", {}).get(id(timestep)) if reuse else None
+        if cached is not None and cached[0] is timestep:
+            _, temb, double_stream_mod_img, double_stream_mod_txt, single_stream_mod = cached
+        else:
+            timestep_in = timestep
+            timestep = timestep.to(hidden_states.dtype) * 1000
 
-        if guidance is not None:
-            guidance = guidance.to(hidden_states.dtype) * 1000
+            if guidance is not None:
+                guidance = guidance.to(hidden_states.dtype) * 1000
 
-        temb = self.time_guidance_embed(timestep, guidance)
+            temb = self.time_guidance_embed(timestep, guidance)
 
-        double_stream_mod_img = self.double_stream_modulation_img(temb)
-        double_stream_mod_txt = self.double_stream_modulation_txt(temb)
-        single_stream_mod = self.single_stream_modulation(temb)
+            double_stream_mod_img = self.double_stream_modulation_img(temb)
+            double_stream_mod_txt = self.double_stream_modulation_txt(temb)
+            single_stream_mod = self.single_stream_modulation(temb)
+
+            # (not while recording a CUDA graph: the results would be graph
+            # memory, filled only once that graph has been replayed)
+            if reuse and not (hidden_states.is_cuda and torch.cuda.is_current_stream_capturing()):
+                cache = getattr(self, "_timestep_cache", None)
+                if cache is None or len(cache) >= 16:
+                    cache = self._timestep_cache = {}
+                cache[id(timestep_in)] = (
+                    timestep_in, temb, double_stream_mod_img, double_stream_mod_txt, single_stream_mod
+                )
 
         # KV extract mode: create cache and blend modulations for ref tokens
         if kv_cache_mode == "extract" and num_ref_tokens > 0:
@@ -2189,7 +2244,7 @@ class Flux2Transformer2DModel(
         # 2. Input projection for image (hidden_states) and conditioning text (encoder_hidden_states)
 
         hidden_states = self.x_embedder(hidden_states)
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        encoder_hidden_states = self._embed_text(encoder_hidden_states, hidden_states, mask, kv_cache_mode)
 
         # 3. Calculate RoPE embeddings from image and text tokens. They depend
         # only on the ids: when the caller hands in the same id tensors again

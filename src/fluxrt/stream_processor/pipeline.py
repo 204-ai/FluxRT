@@ -1128,7 +1128,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
                     noise_pred = transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)
-                        timestep=timestep / 1000,
+                        # the same tensor object for this schedule step on every
+                        # frame: the transformer reuses what depends only on it
+                        timestep=self._memo_ids(
+                            ("timestep", schedule, i, latents.shape[0], latents.dtype),
+                            lambda: timestep / 1000,
+                        ),
                         guidance=None,
                         encoder_hidden_states=prompt_embeds,
                         txt_ids=text_ids,  # B, text_seq_len, 4
