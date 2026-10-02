@@ -49,7 +49,7 @@ from accelerate import init_empty_weights
 from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
-from fluxrt.utils import crop_maximal_rectangle
+from fluxrt.utils import crop_maximal_rectangle, travel
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
 from fluxrt.stream_processor.postprocessors import (
@@ -107,6 +107,9 @@ class ModelInferenceSubprocess:
     ):
         self.running = Value("b", False)
         self.memory_reserved = Value("i", 0)
+        # generated (base) frames since boot: an average fps is a difference of
+        # this over time, where last_processing_time is one frame's worth
+        self.frames_generated = Value("L", 0)
         self.process = None
         self.config = config
         self.height = self.config["resolution"]["height"]
@@ -486,6 +489,9 @@ class ModelInferenceSubprocess:
             "i": 0,
             "mode": mode,
             "prompt": target_prompt,
+            # with `seconds` the morph ends on the clock (see utils/travel.py)
+            "seconds": float(payload["seconds"]) if payload.get("seconds") else None,
+            "t0": time.time(),
             "stride": stride,
             # "stride": full execute every stride-th frame; "rolling": a
             # different 1/stride of the image every frame
@@ -510,7 +516,9 @@ class ModelInferenceSubprocess:
         # them showing progress: the first frame is at t=1/n (not t=0, which
         # would be the unchanged source) and the last is at t=n/n=1.0 (target).
         tv["i"] += 1
-        t = tv["i"] / tv["n"]
+        t = travel.progress(
+            tv["i"], tv["n"], tv["seconds"], time.time() - tv["t0"], self.last_processing_time.value
+        )
         if tv["mode"] == "lerp":
             self.prompt_embeds = torch.lerp(tv["src"], tv["tgt"], t)
         else:
@@ -527,7 +535,7 @@ class ModelInferenceSubprocess:
         # conditioning. Stride it: the first frame, every `stride`th frame, and
         # the final frame (which must land the exact target everywhere). Caps the
         # dense-execute cost at ~1/stride of the per-frame version.
-        last = tv["i"] >= tv["n"]
+        last = t >= 1.0
         if last or tv["i"] == 1:
             self.update_controller.requires_reset = True
         elif tv["refresh"] == "rolling":
@@ -709,18 +717,28 @@ class ModelInferenceSubprocess:
         self.command_queue.put(("set_lip_transfer", enabled))
 
     def start_prompt_travel(
-        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+        self,
+        target_prompt: str,
+        frames: int = 48,
+        mode: str = "slerp",
+        seconds: float | None = None,
     ) -> None:
         """
         Smoothly interpolate the conditioning from the current prompt to
-        `target_prompt` over `frames` generated frames. `mode` is "slerp" or
-        "lerp". Enqueues onto the command queue; handled in the inference
-        subprocess by _begin_prompt_travel / _advance_prompt_travel.
+        `target_prompt` over `frames` generated frames, or over `seconds` of
+        wall-clock time when given. `mode` is "slerp" or "lerp". Enqueues onto
+        the command queue; handled in the inference subprocess by
+        _begin_prompt_travel / _advance_prompt_travel.
         """
         self.command_queue.put(
             (
                 "start_prompt_travel",
-                {"prompt": target_prompt, "frames": int(frames), "mode": mode},
+                {
+                    "prompt": target_prompt,
+                    "frames": int(frames),
+                    "mode": mode,
+                    "seconds": seconds,
+                },
             )
         )
 
@@ -866,6 +884,7 @@ class ModelInferenceSubprocess:
         processing_time = now - prev_time
 
         self.last_processing_time.value = processing_time
+        self.frames_generated.value += 1
         self.send_frames(frames)
         self.pack_is_ready.value = True
         self.memory_reserved.value = torch.cuda.memory_reserved() // (1024 * 1024)

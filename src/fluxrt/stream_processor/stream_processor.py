@@ -138,12 +138,17 @@ class StreamProcessor:
         self.model_inference_subprocess.set_param(name="prompt", value=prompt)
 
     def start_prompt_travel(
-        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+        self,
+        target_prompt: str,
+        frames: int = 48,
+        mode: str = "slerp",
+        seconds: float | None = None,
     ) -> None:
         """Smoothly morph from the current prompt to target_prompt over
-        `frames` generated frames (mode: "slerp" or "lerp")."""
+        `frames` generated frames, or over `seconds` of wall-clock time when
+        given (mode: "slerp" or "lerp")."""
         self.model_inference_subprocess.start_prompt_travel(
-            target_prompt, frames, mode
+            target_prompt, frames, mode, seconds
         )
 
     def set_steps(self, steps: int) -> None:
@@ -197,6 +202,10 @@ class StreamProcessor:
 
     def enable_quantization(self) -> None:
         self.model_inference_subprocess.enable_quantization()
+
+    def get_frames_generated(self) -> int:
+        """Generated (base) frames since boot."""
+        return self.model_inference_subprocess.frames_generated.value
 
     def get_reserved_memory(self) -> int:
         """Returns reserved GPU memory in MB."""
