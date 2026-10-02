@@ -265,10 +265,12 @@ class SpatialCache:
         filled_prediction = torch.where(
             execute_exp, masked_prediction, self.output_cache
         )
-        self.output_cache = torch.where(
-            update_exp, masked_prediction, self.output_cache
+        # In place: the cache tensors keep their memory, so a recorded CUDA graph
+        # (and anything else holding a reference) always sees the current state.
+        self.output_cache.copy_(
+            torch.where(update_exp, masked_prediction, self.output_cache)
         )
-        self.valid = torch.logical_or(self.valid, mask == 2)
+        self.valid.logical_or_(mask == 2)
 
         return filled_prediction
 
