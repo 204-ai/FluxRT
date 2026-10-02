@@ -134,6 +134,11 @@ class SocketPeer:
         self.connectionState = "connected"
         self._fluxrt_channels: set = set()
         self._fluxrt_consume_task = None
+        # Output frames this client got, and versions it missed because a send
+        # was still in flight when the next one was published (/healthz).
+        self.frames_sent = 0
+        self.frames_skipped = 0
+        self.frames_received = 0
 
     async def close(self) -> None:
         if self.connectionState == "closed":
@@ -184,8 +189,11 @@ async def serve(
             if rgb is None or version == sent:
                 await asyncio.sleep(poll)
                 continue
+            if sent >= 0 and version > sent + 1:
+                peer.frames_skipped += version - sent - 1
             sent = version
             await websocket.send_bytes(pack_frame(to_rgbx(rgb), version))
+            peer.frames_sent += 1
 
     sender = asyncio.ensure_future(send_loop())
     try:
@@ -198,6 +206,7 @@ async def serve(
             elif message.get("bytes") is not None:
                 try:
                     track.push(RawFrame(unpack_frame(message["bytes"])))
+                    peer.frames_received += 1
                 except ValueError as error:
                     log.warning("Local client: %s", error)
     except Exception as error:  # noqa: BLE001 — a dropped socket ends the session
@@ -212,3 +221,14 @@ async def serve(
         peers.discard(peer)
         await peer.close()
         log.info("Local client disconnected")
+
+
+def client_stats(peers) -> list:
+    """Counters of the local clients among `peers`, for /healthz: output frames
+    sent and skipped (a send still in flight when the next was published) and
+    input frames received, all since the client connected."""
+    return [
+        {"sent": p.frames_sent, "skipped": p.frames_skipped, "received": p.frames_received}
+        for p in list(peers)
+        if isinstance(p, SocketPeer)
+    ]

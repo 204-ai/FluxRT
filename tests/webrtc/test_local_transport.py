@@ -105,6 +105,12 @@ def test_a_local_client_steers_the_pipeline_and_gets_the_output():
         output.update(version=2, rgb=np.full((2, 2, 3), 7, np.uint8))
         await asyncio.sleep(0.03)
         assert len(socket.frames) == 2  # one message per version, none repeated
+        # what /healthz reports per client: a kiosk that shows fewer frames than
+        # the engine makes must be told apart from a server that sends fewer
+        assert lt.client_stats(peers) == [{"sent": 2, "skipped": 0, "received": 1}]
+        output.update(version=9, rgb=np.full((2, 2, 3), 5, np.uint8))  # versions 3..8 never offered to the socket
+        await asyncio.sleep(0.03)
+        assert lt.client_stats(peers) == [{"sent": 3, "skipped": 6, "received": 1}]
         frame = lt.unpack_frame(socket.frames[1])
         assert frame.shape == (2, 2, 4) and tuple(frame[0, 0]) == (7, 7, 7, 255)
         assert socket.texts[-1] == "state:prompt:x"

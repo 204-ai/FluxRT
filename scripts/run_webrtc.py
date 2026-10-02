@@ -1544,6 +1544,9 @@ async def _health():
         "prompt_travel_seconds": True,
         # ws://…/ws/local: raw frames for a client on the same machine
         "local_transport": True,
+        "local_clients": local_transport.client_stats(pcs),
+        # every published output frame (interpolated ones included)
+        "output_frames": output_version,
         **_perf_metrics(),
     }
 
