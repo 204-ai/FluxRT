@@ -142,18 +142,22 @@ IF EXIST "%RIFE_SENTINEL%" (
 :: ── FLUX.2-klein-4B base model ────────────────────────────────────────────────
 SET FLUX_DIR=FLUX.2-klein-4B
 SET FLUX_SENTINEL=FLUX.2-klein-4B\transformer\diffusion_pytorch_model.safetensors
+:: Single-file copy of the transformer (7.8 GB). The code loads the diffusers folders only,
+:: so this file stays an LFS pointer and is not downloaded.
+SET FLUX_UNUSED=flux-2-klein-4b.safetensors
 IF EXIST "%FLUX_SENTINEL%" (
     echo [+] FLUX.2-klein-4B base model: already downloaded.
 ) ELSE IF EXIST "%FLUX_DIR%\.git" (
     echo [!] FLUX.2-klein-4B: directory exists but looks incomplete — resuming LFS download...
     git -C "%FLUX_DIR%" pull --ff-only
+    git -C "%FLUX_DIR%" config lfs.fetchexclude %FLUX_UNUSED%
     git -C "%FLUX_DIR%" lfs pull
 ) ELSE IF EXIST "%FLUX_DIR%" (
     echo [!] FLUX.2-klein-4B: '%FLUX_DIR%' exists but is not a git repository.
     echo [!]                  Remove it and re-run to download the model.
 ) ELSE (
     echo [+] Downloading FLUX.2-klein-4B base model...
-    git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
+    git clone -c lfs.fetchexclude=%FLUX_UNUSED% https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
     IF ERRORLEVEL 1 (
         echo [ERROR] Failed to clone FLUX.2-klein-4B model.
         exit /b 1

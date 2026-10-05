@@ -94,7 +94,7 @@ sh scripts/install.sh
 
 GUI reqires **v4l2loopback** to be installed and loaded to access virtual webcam. 
 
-Both `install.bat` and `install.sh` set up the environment (Python 3.12 + CUDA 12.8 PyTorch) and download **all five models** automatically — RIFE, FLUX.2-klein-4B, the int8 quant, TAEF2 and Flow Upscaler. The per-model `git clone` commands under [Manual Installation](#manual-installation) and [Extensions](#extensions) are only needed if you set things up by hand. The scripts are idempotent, so re-running them only fetches what is missing.
+Both `install.bat` and `install.sh` set up the environment (Python 3.12 + CUDA 12.8 PyTorch) and download **all five models** automatically — RIFE, FLUX.2-klein-4B, the int8 quant, TAEF2 and Flow Upscaler. The per-model `git clone` commands under [Manual Installation](#manual-installation) and [Extensions](#extensions) are only needed if you set things up by hand. The scripts are idempotent, so re-running them only fetches what is missing. They skip one file of the FLUX.2-klein-4B repo, `flux-2-klein-4b.safetensors` (a 7.8 GB single-file copy of the transformer): FluxRT loads the diffusers folders only.
 
 # Manual Installation
 
@@ -182,7 +182,8 @@ Download from Hugging Face:
 
 ```bash
 cd FluxRT
-git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
+# lfs.fetchexclude skips the 7.8 GB single-file checkpoint, which FluxRT does not load
+git clone -c lfs.fetchexclude=flux-2-klein-4b.safetensors https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
 ```
 
 # Extensions
