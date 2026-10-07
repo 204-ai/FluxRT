@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+from functools import partial
 from typing import Any, Callable
 
 import numpy as np
@@ -30,7 +31,7 @@ from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
-from fluxrt.stream_processor.transformer_flux2 import SpatialCache, SparseMask
+from fluxrt.stream_processor.transformer_flux2 import SpatialCache, SparseMask, MaskStaging
 from fluxrt.stream_processor.update_controller import UpdateController
 
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
@@ -264,6 +265,15 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         # passes custom sigmas). int(timestep) on the CUDA tensor was a
         # GPU->CPU sync before every transformer step; now once per schedule.
         self._timestep_keys = {}
+        # Position ids depend only on tensor shapes, yet were rebuilt on the CPU
+        # and uploaded every frame; the transformer can only reuse its rotary
+        # embeddings when it is handed the same id tensors again. Keyed by shape.
+        self._ids_cache = {}
+        # Pinned upload buffers for the per-step masks, one set per step index.
+        self._mask_staging = {}
+        # diffusers resolves the device / module dtypes by walking every module
+        # (17k named_modules steps per frame); they never change after load.
+        self._fixed = {}
         # Condition images after the first (the reference) are static between
         # set_reference_image calls: keep their encoded latents keyed by the
         # source image OBJECT (identity), so the VAE encode + CPU preprocess run
@@ -554,9 +564,21 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             batch_size * num_images_per_prompt, seq_len, -1
         )
 
-        text_ids = self._prepare_text_ids(prompt_embeds)
-        text_ids = text_ids.to(device)
+        text_ids = self._memo_ids(
+            ("txt", tuple(prompt_embeds.shape[:2]), str(device)),
+            lambda: self._prepare_text_ids(prompt_embeds).to(device),
+        )
         return prompt_embeds, text_ids
+
+    def _memo_ids(self, key, build):
+        if key not in self._ids_cache:
+            self._ids_cache[key] = build()
+        return self._ids_cache[key]
+
+    def _fixed_attr(self, name, read):
+        if name not in self._fixed:
+            self._fixed[name] = read()
+        return self._fixed[name]
 
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._encode_vae_image
     def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
@@ -608,8 +630,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         else:
             latents = latents.to(device=device, dtype=dtype)
 
-        latent_ids = self._prepare_latent_ids(latents)
-        latent_ids = latent_ids.to(device)
+        latent_ids = self._memo_ids(
+            ("lat", tuple(latents.shape), str(device)),
+            lambda: self._prepare_latent_ids(latents).to(device),
+        )
 
         latents = self._pack_latents(latents)  # [B, C, H, W] -> [B, H*W, C]
         return latents, latent_ids
@@ -635,7 +659,11 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             if idx > 0 and sources is not None:
                 self._cond_latent_cache[idx] = (sources[idx], imagge_latent)
 
-        image_latent_ids = self._prepare_image_ids(image_latents)
+        image_shapes = tuple(tuple(latent.shape) for latent in image_latents)
+        image_latent_ids = self._memo_ids(
+            ("img", image_shapes, batch_size, str(device)),
+            lambda: self._prepare_image_ids(image_latents).repeat(batch_size, 1, 1).to(device),
+        )
 
         # Pack each latent and concatenate
         packed_latents = []
@@ -650,8 +678,6 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         image_latents = image_latents.unsqueeze(0)  # (1, N*1024, 128)
 
         image_latents = image_latents.repeat(batch_size, 1, 1)
-        image_latent_ids = image_latent_ids.repeat(batch_size, 1, 1)
-        image_latent_ids = image_latent_ids.to(device)
 
         return image_latents, image_latent_ids
 
@@ -852,7 +878,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = self._execution_device
+        device = self._fixed_attr("device", lambda: self._execution_device)
         profile("2")
 
         # 3. prepare text embeddings
@@ -943,7 +969,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 batch_size=batch_size * num_images_per_prompt,
                 generator=generator,
                 device=device,
-                dtype=self.vae.dtype,
+                dtype=self._fixed_attr("vae_dtype", lambda: self.vae.dtype),
                 sources=image,
             )
 
@@ -1016,6 +1042,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                     f"recomputing {(mask.float().sum() / mask.shape[1] * 100):.2f}% of tokens"
                 )
 
+        # One download of the frame's mask; everything derived from it per step is
+        # then computed on the host ("host_masks": false = resolve on the GPU).
+        mask_host = None
+        if mask is not None and self.subprocess_config.get("host_masks", True):
+            mask_host = mask[0].cpu().numpy()
+
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
         self.scheduler.set_begin_index(0)
@@ -1028,14 +1060,20 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-                latent_model_input = latents.to(self.transformer.dtype)
+                transformer_dtype = self._fixed_attr(
+                    "transformer_dtype", lambda: self.transformer.dtype
+                )
+                latent_model_input = latents.to(transformer_dtype)
                 latent_image_ids = latent_ids
 
                 if image_latents is not None:
                     latent_model_input = torch.cat([latents, image_latents], dim=1).to(
-                        self.transformer.dtype
+                        transformer_dtype
                     )
-                    latent_image_ids = torch.cat([latent_ids, image_latent_ids], dim=1)
+                    latent_image_ids = self._memo_ids(
+                        ("cat", id(latent_ids), id(image_latent_ids)),
+                        lambda: torch.cat([latent_ids, image_latent_ids], dim=1),
+                    )
 
                 with self.transformer.cache_context("cond"):
                     profile("reset")
@@ -1050,17 +1088,52 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                             )
                         spatial_cache = self.spatial_cache[timestep_key]
 
-                    # Active rows resolved here, eagerly, in 3 syncs — not
-                    # inside the compiled transformer on every sparse call.
+                    # Active rows resolved here, eagerly — not inside the
+                    # compiled transformer on every sparse call. Counts are
+                    # bucketed ("active_row_bucket", 1 = exact counts). With
+                    # "host_masks" (default) this needs no GPU round trip, so the
+                    # next step's launches overlap the previous step's GPU work.
                     step_mask = None
                     if mask is not None:
-                        step_mask = SparseMask(
-                            spatial_cache.preprocess_mask(mask), prompt_embeds.shape[1]
-                        )
+                        bucket = int(self.subprocess_config.get("active_row_bucket", 64))
+                        if mask_host is not None:
+                            if i not in self._mask_staging or (
+                                self._mask_staging[i].buffers["mask"].numel() < mask_host.size + bucket
+                            ):
+                                self._mask_staging[i] = MaskStaging(mask_host.size + 2 * bucket)
+                            step_mask = SparseMask.from_host(
+                                spatial_cache.preprocess_mask_host(mask_host),
+                                prompt_embeds.shape[1],
+                                bucket,
+                                device,
+                                self._mask_staging[i],
+                            )
+                        else:
+                            step_mask = SparseMask(
+                                spatial_cache.preprocess_mask(mask),
+                                prompt_embeds.shape[1],
+                                bucket,
+                            )
 
-                    noise_pred = self.transformer(
+                    # "transformer_cudagraphs" (default on): replay the step from
+                    # a recorded CUDA graph (same result, one launch instead of
+                    # hundreds).
+                    transformer = self.transformer
+                    if (
+                        step_mask is not None
+                        and latents.is_cuda
+                        and self.subprocess_config.get("transformer_cudagraphs", True)
+                    ):
+                        transformer = partial(spatial_cache.step_graphs.run, self.transformer)
+
+                    noise_pred = transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)
-                        timestep=timestep / 1000,
+                        # the same tensor object for this schedule step on every
+                        # frame: the transformer reuses what depends only on it
+                        timestep=self._memo_ids(
+                            ("timestep", schedule, i, latents.shape[0], latents.dtype),
+                            lambda: timestep / 1000,
+                        ),
                         guidance=None,
                         encoder_hidden_states=prompt_embeds,
                         txt_ids=text_ids,  # B, text_seq_len, 4

@@ -24,6 +24,16 @@ os.environ.setdefault(
     "TORCHINDUCTOR_CACHE_DIR", os.path.expanduser("~/.cache/fluxrt/torchinductor")
 )
 
+# Generated kernels re-check every input's size / stride / alignment on each call
+# (~2,000 Python-side asserts per frame). The shapes are guarded by Dynamo already.
+try:
+    import torch._inductor.config as _inductor_config
+
+    _inductor_config.size_asserts = False
+    _inductor_config.alignment_asserts = False
+except Exception:
+    pass
+
 try:
     torch._dynamo.config.recompile_limit = 64
     torch._dynamo.config.cache_size_limit = 256
@@ -39,7 +49,7 @@ from accelerate import init_empty_weights
 from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
-from fluxrt.utils import crop_maximal_rectangle
+from fluxrt.utils import crop_maximal_rectangle, travel
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
 from fluxrt.stream_processor.postprocessors import (
@@ -49,6 +59,9 @@ from fluxrt.stream_processor.postprocessors import (
 
 from fluxrt.flow_upscaler.upscaler_unet import UpscalerUNet
 from fluxrt.flow_upscaler.flow_upscaler_pipeline import FlowUpscalerPipeline
+from fluxrt.stream_processor import trt_stage
+from fluxrt.stream_processor.cuda_graphs import RecordedModule
+from fluxrt.stream_processor.trt_stage import TrtStage
 from fluxrt.stream_processor.flux_tiny_vae import DiffusersTAEF2Wrapper
 
 
@@ -94,6 +107,9 @@ class ModelInferenceSubprocess:
     ):
         self.running = Value("b", False)
         self.memory_reserved = Value("i", 0)
+        # generated (base) frames since boot: an average fps is a difference of
+        # this over time, where last_processing_time is one frame's worth
+        self.frames_generated = Value("L", 0)
         self.process = None
         self.config = config
         self.height = self.config["resolution"]["height"]
@@ -211,6 +227,49 @@ class ModelInferenceSubprocess:
             f"{int8_models_path}/tokenizer", local_files_only=True
         )
 
+    def _select_attention_backend(self):
+        """PyTorch's Windows builds ship no flash attention: scaled_dot_product_attention
+        silently falls back to the memory-efficient kernel, 2.3x slower than
+        cuDNN's at our shapes (RTX 5090 Laptop, 700 queries x 1952 keys, bf16:
+        0.63 vs 0.27 ms; max diff 1e-3). "attention_backend": "auto" puts cuDNN
+        first only where flash is missing (Linux keeps flash), "cudnn" always,
+        "default" leaves PyTorch's own order."""
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        choice = self.config.get("attention_backend", "auto")
+        if choice == "default":
+            return
+        if choice == "auto":
+            probe = torch.zeros(1, 1, 8, 16, device=self.device, dtype=torch.bfloat16)
+            try:
+                with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
+                    torch.nn.functional.scaled_dot_product_attention(probe, probe, probe)
+                return  # flash works here
+            except RuntimeError:
+                pass
+        # Priority order only: every kernel stays enabled, so calls cuDNN can't
+        # take (fp32, some masks) still fall back. Disabling flash + memory-
+        # efficient instead would select the math kernel (5x slower), which
+        # ranks above cuDNN by default. Entered once, for the process lifetime.
+        self._sdpa_priority = sdpa_kernel(
+            [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ],
+            set_priority=True,
+        )
+        self._sdpa_priority.__enter__()
+        self._cudnn_attention = True
+        # The kernel is chosen when a block is compiled and that choice is baked
+        # into the cached artifact: a cache filled under the default order would
+        # keep serving the memory-efficient kernel. Separate cache for this order.
+        cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR", "")
+        if cache_dir and not cache_dir.endswith("-cudnn-attn"):
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir + "-cudnn-attn"
+        print("attention backend: cuDNN first")
+
     def load_models(self):
         self.interpolation_model = IFNet()
         self.interpolation_model.load_state_dict(
@@ -248,10 +307,28 @@ class ModelInferenceSubprocess:
                 f"{models_path}/vae", local_files_only=True, device=self.device
             ).to(self.dtype)
 
+        # TAEF2 in NHWC, the layout cuDNN's tensor-core kernels want: encode
+        # 3.1 -> 2.1 ms, decode to 576x320 3.7 -> 2.3 ms compiled on the RTX 5090
+        # laptop (no gain at 1152x640, none for the full VAE, the upscaler or
+        # RIFE). Rounds slightly differently; tiny_vae_channels_last=false for A/B.
+        if isinstance(self.vae, DiffusersTAEF2Wrapper) and self.config.get("tiny_vae_channels_last", True):
+            self.vae.taesd.to(memory_format=torch.channels_last)
+
         # cuDNN autotuning for the fixed-shape VAE/RIFE convs: -2.5 ms/frame on the
         # RTX 4090, output within the run-to-run noise floor (LPIPS 0.0165 vs
         # 0.0183). cudnn_benchmark=false for A/B.
         torch.backends.cudnn.benchmark = bool(self.config.get("cudnn_benchmark", True))
+        self._select_attention_backend()
+
+        # "conv_backend": "tensorrt" — the tiny VAE, the flow upscaler's UNet and
+        # RIFE as TensorRT fp16 engines (see trt_stage). Opt-in: needs tensorrt +
+        # onnx, builds its engines on the first boot, rounds differently.
+        tiny_vae = isinstance(self.vae, DiffusersTAEF2Wrapper)
+        trt_stages = self.config.get("conv_backend", "torch") == "tensorrt"
+        if trt_stages and not trt_stage.available():
+            print("conv_backend=tensorrt: tensorrt / onnx not installed, using torch")
+            trt_stages = False
+        self.rife_cudagraphs = False
 
         if self.config.get("compile_models", False):
             # "max-autotune-no-cudagraphs" benchmarks Triton GEMM templates
@@ -273,18 +350,45 @@ class ModelInferenceSubprocess:
             # vae.encode / vae.decode, so the VAE always ran eager. Compile the
             # conv stacks those methods run. compile_vae=false = the old (eager)
             # behavior, for A/B — compiled convs round slightly differently.
-            if self.config.get("compile_vae", True):
-                vae_nets = self.vae.taesd if isinstance(self.vae, DiffusersTAEF2Wrapper) else self.vae
+            if self.config.get("compile_vae", True) and not (trt_stages and tiny_vae):
+                vae_nets = self.vae.taesd if tiny_vae else self.vae
                 vae_nets.encoder = torch.compile(vae_nets.encoder)
                 vae_nets.decoder = torch.compile(vae_nets.decoder)
+            # The flow upscaler's UNet ran eager (12.6 -> 10.3 ms on the RTX 5090
+            # laptop). compile_upscaler=false = the old behavior, for A/B —
+            # compiled convs round slightly differently.
+            if self.upscaler_pipe is not None and self.config.get("compile_upscaler", True) and not trt_stages:
+                self.upscaler_pipe.upscaler_unet = torch.compile(self.upscaler_unet)
             # RIFE as CUDA graphs (reduce-overhead). Opt-in: on the RTX 4090 at
             # 576x320, interpolation_exp 1, it measured 0.3 ms/frame (RIFE is
             # ~2.5 ms of GPU time there) — not worth the graph-pool memory by default.
-            self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", False))
-            self.interpolation_model = torch.compile(
-                self.interpolation_model,
-                mode="reduce-overhead" if self.rife_cudagraphs else "default",
-            )
+            if not trt_stages:
+                self.rife_cudagraphs = bool(self.config.get("rife_cudagraphs", False))
+                self.interpolation_model = torch.compile(
+                    self.interpolation_model,
+                    mode="reduce-overhead" if self.rife_cudagraphs else "default",
+                )
+
+        if trt_stages:
+            self.interpolation_model = TrtStage(self.interpolation_model, "rife")
+            if tiny_vae:
+                self.vae.taesd.encoder = TrtStage(self.vae.taesd.encoder, "taef2-encoder")
+                self.vae.taesd.decoder = TrtStage(self.vae.taesd.decoder, "taef2-decoder")
+            if self.upscaler_pipe is not None:
+                self.upscaler_pipe.upscaler_unet = TrtStage(self.upscaler_unet, "upscaler-unet")
+
+        # The remaining fixed-shape conv stages replayed as CUDA graphs: the same
+        # kernels as the (compiled) call, bit-identical, without its launches.
+        # stage_cudagraphs=false for A/B.
+        self.trt_stages = trt_stages
+        self.stage_cudagraphs = bool(self.config.get("stage_cudagraphs", True)) and str(self.device).startswith("cuda")
+        if self.stage_cudagraphs:
+            vae_nets = self.vae.taesd if tiny_vae else self.vae
+            if not isinstance(vae_nets.encoder, TrtStage):
+                vae_nets.encoder = RecordedModule(vae_nets.encoder)
+                vae_nets.decoder = RecordedModule(vae_nets.decoder)
+            if self.upscaler_pipe is not None and not trt_stages:
+                self.upscaler_pipe.upscaler_unet = RecordedModule(self.upscaler_pipe.upscaler_unet)
 
         reference_image_seq_len = None
         if self.config.get("use_reference_image", False):
@@ -322,8 +426,15 @@ class ModelInferenceSubprocess:
         self.pipe.tiny_decoder = None
         if self.config.get("vae_decoder", "full") == "taef2" and not self.config.get("enable_tiny_vae", False):
             tiny = DiffusersTAEF2Wrapper(path="taef2/taef2.safetensors").to(self.device, self.dtype)
-            if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
-                tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
+            if self.config.get("tiny_vae_channels_last", True):
+                tiny.taesd.to(memory_format=torch.channels_last)
+            if self.trt_stages:
+                tiny.taesd.decoder = TrtStage(tiny.taesd.decoder, "taef2-decoder")
+            else:
+                if self.config.get("compile_models", False) and self.config.get("compile_vae", True):
+                    tiny.taesd.decoder = torch.compile(tiny.taesd.decoder)
+                if self.stage_cudagraphs:
+                    tiny.taesd.decoder = RecordedModule(tiny.taesd.decoder)
             self.pipe.tiny_decoder = tiny
 
         if self.config.get("use_lora", False):
@@ -378,6 +489,9 @@ class ModelInferenceSubprocess:
             "i": 0,
             "mode": mode,
             "prompt": target_prompt,
+            # with `seconds` the morph ends on the clock (see utils/travel.py)
+            "seconds": float(payload["seconds"]) if payload.get("seconds") else None,
+            "t0": time.time(),
             "stride": stride,
             # "stride": full execute every stride-th frame; "rolling": a
             # different 1/stride of the image every frame
@@ -402,7 +516,9 @@ class ModelInferenceSubprocess:
         # them showing progress: the first frame is at t=1/n (not t=0, which
         # would be the unchanged source) and the last is at t=n/n=1.0 (target).
         tv["i"] += 1
-        t = tv["i"] / tv["n"]
+        t = travel.progress(
+            tv["i"], tv["n"], tv["seconds"], time.time() - tv["t0"], self.last_processing_time.value
+        )
         if tv["mode"] == "lerp":
             self.prompt_embeds = torch.lerp(tv["src"], tv["tgt"], t)
         else:
@@ -419,7 +535,7 @@ class ModelInferenceSubprocess:
         # conditioning. Stride it: the first frame, every `stride`th frame, and
         # the final frame (which must land the exact target everywhere). Caps the
         # dense-execute cost at ~1/stride of the per-frame version.
-        last = tv["i"] >= tv["n"]
+        last = t >= 1.0
         if last or tv["i"] == 1:
             self.update_controller.requires_reset = True
         elif tv["refresh"] == "rolling":
@@ -601,18 +717,28 @@ class ModelInferenceSubprocess:
         self.command_queue.put(("set_lip_transfer", enabled))
 
     def start_prompt_travel(
-        self, target_prompt: str, frames: int = 48, mode: str = "slerp"
+        self,
+        target_prompt: str,
+        frames: int = 48,
+        mode: str = "slerp",
+        seconds: float | None = None,
     ) -> None:
         """
         Smoothly interpolate the conditioning from the current prompt to
-        `target_prompt` over `frames` generated frames. `mode` is "slerp" or
-        "lerp". Enqueues onto the command queue; handled in the inference
-        subprocess by _begin_prompt_travel / _advance_prompt_travel.
+        `target_prompt` over `frames` generated frames, or over `seconds` of
+        wall-clock time when given. `mode` is "slerp" or "lerp". Enqueues onto
+        the command queue; handled in the inference subprocess by
+        _begin_prompt_travel / _advance_prompt_travel.
         """
         self.command_queue.put(
             (
                 "start_prompt_travel",
-                {"prompt": target_prompt, "frames": int(frames), "mode": mode},
+                {
+                    "prompt": target_prompt,
+                    "frames": int(frames),
+                    "mode": mode,
+                    "seconds": seconds,
+                },
             )
         )
 
@@ -729,19 +855,34 @@ class ModelInferenceSubprocess:
         # RGB -> BGR on the GPU (a negative-stride numpy view made the shm copy slow)
         if bgr:
             frames_out = frames_out.flip(1)
-        frames_cpu = (
+        frames_gpu = (
             frames_out
             .mul(255)
             .to(torch.uint8)
             .permute(0, 2, 3, 1)
             .contiguous()
-            .cpu()
-            .numpy()
         )
+        self._wait_for_gpu()
+        frames_cpu = frames_gpu.cpu().numpy()
 
         self.previous_frame = frame
 
         return frames_cpu
+
+    def _wait_for_gpu(self):
+        """The download above (`.cpu()`) is where a frame waits for the GPU, and
+        CUDA waits by spinning: one whole CPU core for the length of every
+        frame (89% of this process's profiler samples on the show laptop, where
+        a busy CPU also costs the GPU its power budget). With "gpu_wait":
+        "sleep" the thread sleeps in half-millisecond steps until the queued
+        work is done; the download then returns at once. Same output, up to
+        one step later per frame."""
+        if self.config.get("gpu_wait", "spin") != "sleep" or not torch.cuda.is_available():
+            return
+        done = torch.cuda.Event()
+        done.record()
+        while not done.query():
+            time.sleep(0.0005)
 
     def send_frames(self, frames):
         self.output_batch_shared_tensor.copy_from(frames)
@@ -758,6 +899,7 @@ class ModelInferenceSubprocess:
         processing_time = now - prev_time
 
         self.last_processing_time.value = processing_time
+        self.frames_generated.value += 1
         self.send_frames(frames)
         self.pack_is_ready.value = True
         self.memory_reserved.value = torch.cuda.memory_reserved() // (1024 * 1024)
@@ -845,8 +987,10 @@ class ModelInferenceSubprocess:
         """Compile the graph variants live input will hit before the first real
         frame: a full frame, nothing changed, part of the frame changed (three
         sizes, so the row count compiles dynamic), text tokens active (prompt
-        change / travel) with and without image changes, and all of it again with a reference image when
-        references are enabled. Leaves every cache as a fresh boot would."""
+        change / travel) with and without image changes, then every bucketed
+        count of changed tokens ("warmup_sweep"), and all of it again with a
+        reference image when references are enabled. Leaves every cache as a
+        fresh boot would."""
         rng = np.random.default_rng(0)
         base = rng.integers(0, 256, self.input_shared_tensor.shape, dtype=np.uint8)
 
@@ -862,6 +1006,30 @@ class ModelInferenceSubprocess:
             yield base  # nothing changed
             self.update_controller.text_is_valid = False  # text tokens active, image still
             yield base
+            if self.config.get("warmup_sweep", True):
+                yield from sweep()
+
+        def sweep():
+            # Every bucketed count of changed tokens once, alone and with the
+            # text tokens active. The first step at a new count costs ~350 ms
+            # on the RTX 5090 laptop (per-shape setup below PyTorch); live
+            # frames used to pay it, one stalled frame per new count.
+            patch = 16
+            cols, rows = base.shape[1] // patch, base.shape[0] // patch
+            bucket = int(self.config.get("active_row_bucket", 64))
+            step = max(1, bucket // 4)  # patches; a patch is 2 rows (latent + condition)
+            for text in (False, True):
+                for n in range(step, cols * rows + 1, step * (2 if text else 1)):
+                    full, rest = divmod(n, cols)
+                    moved = base.copy()
+                    moved[: full * patch] = 255 - moved[: full * patch]
+                    moved[full * patch : (full + 1) * patch, : rest * patch] = (
+                        255 - moved[full * patch : (full + 1) * patch, : rest * patch]
+                    )
+                    if text:
+                        self.update_controller.text_is_valid = False
+                    yield moved
+                    yield base
 
         def run():
             for frame in frames():
@@ -884,6 +1052,9 @@ class ModelInferenceSubprocess:
         self.pipe.spatial_cache.clear()
         self.pipe._cond_latent_cache.clear()
         self.previous_frame = None
+        # The sweep (and the reference pass) leave blocks of every size in the
+        # allocator's cache: hand them back, the live frames need far less.
+        torch.cuda.empty_cache()
         print(f"warm-up: {time.time() - start:.1f} s")
         self._freeze_heap()
 

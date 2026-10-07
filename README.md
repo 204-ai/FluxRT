@@ -70,6 +70,20 @@ cd FluxRT
 
 GUI reqires [OBS](https://obsproject.com/download) to be installed to access virtual webcam. 
 
+Start the WebRTC server (PowerShell, from the checkout; the install script creates `.venv`):
+
+```powershell
+.\.venv\Scripts\activate.ps1
+python scripts\run_webrtc.py --no-server-camera --tiny-vae --flow-upscaler --interp 1 `
+  --config configs\config_with_reference.json `
+  --set int8_linear=true --set rife_cudagraphs=true
+```
+
+* The boot warm-up takes 1–2 minutes; the first boot after a code or model change compiles for several minutes more. `http://localhost:8765/healthz` answers `"ready": true` when it is up.
+* `configs\config_with_reference.json` enables lip transfer, which needs LivePortrait (see below). Without it, run from a copy of the config with `"lip_transfer": {"enable": false}`.
+* Faster conv stages with TensorRT (optional): `python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-cu12 onnx` (add pip first with `uv pip install pip` if the venv has none), then add `--set conv_backend=tensorrt`. The first boot builds the engines (about 2 minutes).
+* Presets, switches and measurements on Windows: [docs/perf-notes.md](docs/perf-notes.md).
+
 ## Linux
 
 ```bash
@@ -80,7 +94,7 @@ sh scripts/install.sh
 
 GUI reqires **v4l2loopback** to be installed and loaded to access virtual webcam. 
 
-Both `install.bat` and `install.sh` set up the environment (Python 3.12 + CUDA 12.8 PyTorch) and download **all five models** automatically — RIFE, FLUX.2-klein-4B, the int8 quant, TAEF2 and Flow Upscaler. The per-model `git clone` commands under [Manual Installation](#manual-installation) and [Extensions](#extensions) are only needed if you set things up by hand. The scripts are idempotent, so re-running them only fetches what is missing.
+Both `install.bat` and `install.sh` set up the environment (Python 3.12 + CUDA 12.8 PyTorch) and download **all five models** automatically — RIFE, FLUX.2-klein-4B, the int8 quant, TAEF2 and Flow Upscaler. The per-model `git clone` commands under [Manual Installation](#manual-installation) and [Extensions](#extensions) are only needed if you set things up by hand. The scripts are idempotent, so re-running them only fetches what is missing. They skip one file of the FLUX.2-klein-4B repo, `flux-2-klein-4b.safetensors` (a 7.8 GB single-file copy of the transformer): FluxRT loads the diffusers folders only.
 
 # Manual Installation
 
@@ -168,7 +182,8 @@ Download from Hugging Face:
 
 ```bash
 cd FluxRT
-git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
+# lfs.fetchexclude skips the 7.8 GB single-file checkpoint, which FluxRT does not load
+git clone -c lfs.fetchexclude=flux-2-klein-4b.safetensors https://huggingface.co/black-forest-labs/FLUX.2-klein-4B
 ```
 
 # Extensions

@@ -73,15 +73,17 @@ fi
 # Register LFS hooks for the current user (idempotent).
 git lfs install
 
-# clone_or_resume <dir> <url> <sentinel-file> <label>
+# clone_or_resume <dir> <url> <sentinel-file> <label> [lfs-exclude]
 #   sentinel-file — a large LFS asset that only exists after a complete download.
 #   If the directory is present but the sentinel is missing we assume the clone
 #   was interrupted and attempt to resume via `git lfs pull`.
+#   lfs-exclude — an LFS file the code never loads; it stays a pointer file.
 clone_or_resume() {
     local dir="$1"
     local url="$2"
     local sentinel="$3"
     local label="$4"
+    local exclude="${5:-}"
 
     if [ -f "$sentinel" ]; then
         log "${label}: already downloaded."
@@ -91,6 +93,7 @@ clone_or_resume() {
     if [ -d "${dir}/.git" ]; then
         warn "${label}: directory exists but looks incomplete — resuming LFS download..."
         git -C "$dir" pull --ff-only
+        if [ -n "$exclude" ]; then git -C "$dir" config lfs.fetchexclude "$exclude"; fi
         git -C "$dir" lfs pull
     elif [ -d "$dir" ]; then
         warn "${label}: directory '${dir}' exists but is not a git repository." \
@@ -98,7 +101,11 @@ clone_or_resume() {
         return
     else
         log "Downloading ${label}..."
-        git clone "$url" "$dir"
+        if [ -n "$exclude" ]; then
+            git clone -c "lfs.fetchexclude=$exclude" "$url" "$dir"
+        else
+            git clone "$url" "$dir"
+        fi
     fi
 }
 
@@ -112,7 +119,8 @@ clone_or_resume \
     "FLUX.2-klein-4B" \
     "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B" \
     "FLUX.2-klein-4B/transformer/diffusion_pytorch_model.safetensors" \
-    "FLUX.2-klein-4B base model"
+    "FLUX.2-klein-4B base model" \
+    "flux-2-klein-4b.safetensors"   # single-file copy of the transformer, 7.8 GB, never loaded
 
 clone_or_resume \
     "FLUX.2-klein-4B-int8" \

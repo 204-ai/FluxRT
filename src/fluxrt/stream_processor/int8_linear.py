@@ -14,6 +14,13 @@ import torch
 import torch.nn as nn
 
 
+# torch._int_mm needs more than 16 rows, so inputs are padded to a multiple of
+# this. The sparse path hands over row counts that are already multiples of
+# transformer_flux2.ACTIVE_ROW_BUCKET, so nothing is added there as long as
+# that is a multiple of 32.
+ROW_BUCKET = 32
+
+
 class Int8Linear(nn.Module):
     def __init__(self, linear: nn.Linear):
         super().__init__()
@@ -32,9 +39,10 @@ class Int8Linear(nn.Module):
         rows = x2.shape[0]
         x_scale = x2.abs().amax(dim=1, keepdim=True).float().clamp(min=1e-8) / 127.0
         x_int8 = (x2.float() / x_scale).round().clamp(-127, 127).to(torch.int8)
-        # _int_mm needs more than 16 rows; always pad (no size branch, so the
-        # compiled graph doesn't split into small / large row-count variants)
-        x_int8 = torch.nn.functional.pad(x_int8, (0, 0, 0, 17))
+        # Pad to the next ROW_BUCKET multiple (always more than 16 rows). No
+        # size branch: one compiled graph for every count.
+        pad = (-rows) % ROW_BUCKET
+        x_int8 = torch.cat([x_int8, x_int8.new_zeros(pad, self.in_features)])
         acc = torch._int_mm(x_int8, self.weight_int8.t())[:rows]
         out = (acc.float() * x_scale * self.weight_scale).to(x.dtype)
         if self.bias is not None:
