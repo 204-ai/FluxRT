@@ -60,6 +60,7 @@ QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle, gpu_stats, travel
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
+from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
 from fluxrt.webrtc.stats import AverageFps, connection_pool_stats
 from fluxrt.webrtc import local_transport
 
@@ -400,7 +401,7 @@ class FluxRTTrack(VideoStreamTrack):
 
     def __init__(self, fps: int = 30, width: Optional[int] = None):
         super().__init__()
-        self.fps = fps                # CAP: never send faster than this
+        self.fps = fps                # CAP: never send faster than this; 0 = no cap
         self._t0 = time.time()
         self._last_v = -1
         self._last_send = 0.0
@@ -420,7 +421,7 @@ class FluxRTTrack(VideoStreamTrack):
         # with re-encoded duplicates. `fps` only caps the rate; when no new frame
         # arrives, a 1 Hz keepalive repeats the last one so the stream and the
         # receiver's decoder stay alive.
-        wait = self._last_send + 1.0 / self.fps - time.time()
+        wait = send_wait(self._last_send, time.time(), self.fps)
         if wait > 0:
             await asyncio.sleep(wait)
         deadline = time.time() + 1.0
@@ -654,6 +655,9 @@ async def offer(request: Request):
     # Also reachable via the pc for targeted role messages (send_to_pc).
     pc_channels: set = set()
     pc._fluxrt_channels = pc_channels
+    # 30 unless this peer asks otherwise on its ctrl channel (`out-fps:<n>`,
+    # 0 = every published frame).
+    out_track = FluxRTTrack(fps=30)
 
     @pc.on("connectionstatechange")
     async def _on_state():
@@ -709,9 +713,18 @@ async def offer(request: Request):
 
         @channel.on("message")
         def _on_msg(msg):
+            if isinstance(msg, str) and msg.startswith("out-fps:"):
+                # This peer's own output track only: no broadcast.
+                try:
+                    out_track.fps = parse_out_fps(msg[len("out-fps:"):])
+                    log.info("Output fps limit: %s", out_track.fps or "none")
+                    safe_send(channel, f"ack:out-fps:{out_track.fps}")
+                except ValueError:
+                    safe_send(channel, "err:out-fps")
+                return
             handle_ctrl(msg, channel)
 
-    _prefer_codec(pc, pc.addTrack(FluxRTTrack(fps=30)))
+    _prefer_codec(pc, pc.addTrack(out_track))
 
     await pc.setRemoteDescription(offer_sdp)
     answer = await pc.createAnswer()
