@@ -34,6 +34,8 @@ batch: `--batch-only` render gets live-path speedups — GPU-side in/out, encode
 - api: `POST /whep` (Content-Type `application/sdp`, body=offer) → 201 + `Location: /whep/<uuid>` + answer SDP; 415 wrong ct; 400 empty/bad sdp
 - api: `DELETE /whep/<uuid>` → 200 | 404; `PATCH /whep/<uuid>` → 405 (full ICE in answer, no trickle)
 - api: `POST /whep?w=<px>&fps=<n>` — per-session output width (aspect kept, even-rounded, clamp [64, native]) & frame rate (clamp [1, 60], default 30)
+- api: `/offer` ctrl `out-fps:<n>` — output frame-rate limit of this peer's own track, live; `0` = no limit (every published frame); whole number 0..240 → `ack:out-fps:<n>` | `err:out-fps`; never sent → 30; ⊥ broadcast
+- api: `/healthz` `output_frames` — published output frames since boot (interpolated incl.)
 - env: reuse `FLUXRT_STUN` / `FLUXRT_TURN_URL(+_USER/_PASS)` via `_rtc_config()`
 - api: `POST /whip` (Content-Type `application/sdp`, offer w/ video) → 201 + `Location: /whip/<uuid>` + answer SDP; 415/400 same as WHEP; 503 when `sp is None` (like `/offer`)
 - api: `DELETE /whip/<uuid>` → 200 (cancels consume task → ownership released via existing finally) | 404; `PATCH` → 405
@@ -93,6 +95,7 @@ V29: warm reuse ⊥ observable carry-over: job on reused proc (after `reset`) vs
 V30: reuse iff new job `interp` == proc build `interp`; else teardown + rebuild; reset/submit error → teardown (⊥ reuse suspect proc); shutdown | idle > `batch_keep_warm_idle_s` (>0) → teardown
 V31: job `done` observable ⇒ `_active` cleared (teardown, if any, already finished) ∴ submit after polling `done` ⊥ 409; submit while non-terminal still 409 (existing tests)
 V32: `FLUXRT_PROFILE` unset → batch path adds ⊥ CUDA events, ⊥ syncs, ⊥ per-frame log
+V33: `/offer` output limit = viewer's choice — `out-fps:0` → `send_wait` 0 ∴ ∀ published frame sent (⊥ replaced by newer one while waiting); `out-fps:n` → sends ≥ 1/n s apart; peer that never sends it → 30 (old clients unchanged, V18); limit ⊥ pads a slower pipeline (V19 holds)
 
 ## §T TASKS
 id|status|task|cites
@@ -125,6 +128,7 @@ T26|.|P5 GPU check: 2 back-to-back jobs — 2nd first frame seconds; warm vs fre
 T27|x|P6 set `done` after teardown & `_active` clear (finally ordering); test: submit immediately after poll sees `done` → 201|V31
 T28|~|P7 exitcode in death errors; repro restart w/ `--set 'resolution={"width":1280,"height":720}'` → first job, capture child stderr; root cause → `/spec bug:`|I.error,V28
 T29|.|report: per change load / first frame / steady fps (fr 2..N) / job total 72 & 255 fr / out count / LPIPS+PSNR vs baseline / noise floor / peak VRAM|C16,V24
+T30|x|`output_rate.py` pure `parse_out_fps` + `send_wait`; `FluxRTTrack.recv` uses it; `/offer` ctrl `out-fps:`; `/healthz` `output_frames`; tests `test_output_rate.py`|V33,V19
 
 ## §B BUGS
 id|date|cause|fix
