@@ -254,6 +254,10 @@ def cmd_run(args):
     try:
         t_load = time.perf_counter()
         sub.process_init()
+        if args.live_warmup:
+            # What the live server does at boot. Without it the timed frames
+            # also pay for the first use of every new active-row count.
+            sub.warm_up()
         load_s = time.perf_counter() - t_load
         step = sub.step_live if hasattr(sub, "step_live") else (lambda: _legacy_step(sub))
 
@@ -266,8 +270,8 @@ def cmd_run(args):
             base_mask = pipeline_mod.SparseMask
 
             class _Recording(base_mask):
-                def __init__(self, mask, text_seq_len):
-                    super().__init__(mask, text_seq_len)
+                def __init__(self, mask, text_seq_len, *args):
+                    super().__init__(mask, text_seq_len, *args)
                     active.append(self.img.idx.numel() / (mask.shape[1] - text_seq_len))
 
             pipeline_mod.SparseMask = _Recording
@@ -283,6 +287,11 @@ def cmd_run(args):
             dt = (time.perf_counter() - t0) * 1000.0
             if i < args.warmup:
                 warmup_ms.append(dt)
+                if i == args.warmup - 1 and hasattr(sub, "_freeze_heap"):
+                    # Same as the live server after its warm-up: without it, full
+                    # garbage collections over the objects compilation leaves
+                    # behind stall measured frames (0.45 s each on the laptop).
+                    sub._freeze_heap()
                 continue
             ms.append(dt)
             outputs[i - args.warmup] = pack[-1]  # the generated frame (last in the pack)
@@ -551,6 +560,8 @@ def main():
     r.add_argument("--frames", type=int, default=300)
     r.add_argument("--warmup", type=int, default=40,
                    help="untimed frames first (torch.compile + cache warm-up)")
+    r.add_argument("--live-warmup", action="store_true",
+                   help="run the server's boot warm-up (warm_up()) before the clip, like the live server")
     r.add_argument("--out", required=True)
     r.add_argument("--label", default=None)
     r.add_argument("--profile", type=int, default=0, metavar="K",

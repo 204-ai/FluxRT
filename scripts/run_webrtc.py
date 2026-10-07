@@ -48,7 +48,7 @@ from aiortc import (
 import aiortc.codecs.h264 as _aiortc_h264
 import aiortc.codecs.vpx as _aiortc_vpx
 from aiortc.mediastreams import MediaStreamError
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from PIL import Image
@@ -58,10 +58,11 @@ WORKFLOWS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_
 QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 
 from fluxrt import StreamProcessor
-from fluxrt.utils import crop_maximal_rectangle
+from fluxrt.utils import crop_maximal_rectangle, gpu_stats, travel
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
-from fluxrt.webrtc.stats import connection_pool_stats
+from fluxrt.webrtc.stats import AverageFps, connection_pool_stats
+from fluxrt.webrtc import local_transport
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -252,10 +253,11 @@ def _drive_prompt(prompt: str) -> None:
         _batch_manager.set_prompt(prompt)
 
 
-def _drive_prompt_travel(prompt: str, frames: int, mode: str) -> None:
-    """Like _drive_prompt but a slerp/lerp morph over `frames` generated frames."""
+def _drive_prompt_travel(prompt: str, frames: int, mode: str, seconds: float | None = None) -> None:
+    """Like _drive_prompt but a slerp/lerp morph over `frames` generated frames,
+    or over `seconds` on the live pipeline when given."""
     if sp is not None:
-        sp.start_prompt_travel(prompt, frames=frames, mode=mode)
+        sp.start_prompt_travel(prompt, frames=frames, mode=mode, seconds=seconds)
     if _batch_manager is not None:
         _batch_manager.start_prompt_travel(prompt, frames=frames, mode=mode)
 
@@ -544,6 +546,97 @@ def _rtc_config() -> RTCConfiguration:
     return RTCConfiguration(iceServers=servers)
 
 
+def send_ctrl_snapshot(channel, pc) -> None:
+    """What a client needs to know on connect: reference, lip state, pipeline
+    parameters, and who drives the input."""
+    # Send the current reference version to a fresh peer so it can
+    # decide whether to refresh its preview.
+    if latest_reference_png is not None:
+        safe_send(channel, f"ref:set:{ref_version}")
+
+    # Sync lip transfer state on connect.
+    if _lip_enabled():
+        safe_send(channel, "lip:on" if lip_active else "lip:off")
+
+    # Send current pipeline parameter snapshot to a fresh peer.
+    if current_prompt:
+        safe_send(channel, f"state:prompt:{current_prompt}")
+    safe_send(channel, f"state:seed:{current_seed}")
+    safe_send(channel, f"state:steps:{current_steps}")
+
+    # Input-source role sync. The DataChannel usually opens after the
+    # video track was claimed, so the targeted input:you from the claim
+    # can be missed — resend it here.
+    if ownership.is_active():
+        safe_send(channel, "input:peer")
+        if ownership.owner_is(pc):
+            safe_send(channel, "input:you")
+
+
+def handle_ctrl(msg, channel) -> None:
+    """One control message from a client (the `ctrl` DataChannel, or a text
+    message of the local WebSocket transport). `channel` gets the reply."""
+    if not isinstance(msg, str):
+        return
+    global current_prompt, current_seed, current_steps
+    if msg.startswith("prompt-travel:"):
+        # Wire format (ctrlProtocol.ts): "prompt-travel:<length>:<mode>:<text>",
+        # length = generated frames ("48") or seconds ("4s").
+        # text may contain colons, so peel off exactly the two leading
+        # fields with maxsplit=2. Reject anything that doesn't match the
+        # contract (same length / mode checks as POST /prompt-travel)
+        # rather than silently treating the prefix as prompt text.
+        parts = msg[len("prompt-travel:"):].split(":", 2)
+        length = travel.parse_length(parts[0]) if len(parts) == 3 else None
+        if (
+            length is not None
+            and parts[1] in ("slerp", "lerp")
+            and parts[2].strip()
+        ):
+            (frames, seconds), mode = length, parts[1]
+            new_prompt = parts[2].strip()
+            log.info(
+                "Prompt travel: %r (%s, mode=%s)",
+                new_prompt,
+                f"{seconds:g} s" if seconds else f"frames={frames}",
+                mode,
+            )
+            current_prompt = new_prompt
+            _drive_prompt_travel(new_prompt, frames, mode, seconds)
+            safe_send(channel, "ack:prompt")
+            broadcast_ctrl(f"state:prompt:{new_prompt}")
+        else:
+            safe_send(channel, "err:prompt-travel")
+    elif msg.startswith("prompt:"):
+        new_prompt = msg[len("prompt:"):].strip()
+        if new_prompt:
+            log.info("Prompt update: %r", new_prompt)
+            current_prompt = new_prompt
+            _drive_prompt(new_prompt)
+            safe_send(channel, "ack:prompt")
+            broadcast_ctrl(f"state:prompt:{new_prompt}")
+    elif msg.startswith("seed:"):
+        try:
+            seed = int(msg[len("seed:"):])
+            current_seed = seed
+            sp.set_seed(seed)
+            safe_send(channel, f"ack:seed:{seed}")
+            broadcast_ctrl(f"state:seed:{seed}")
+        except ValueError:
+            safe_send(channel, "err:seed")
+    elif msg.startswith("steps:"):
+        try:
+            steps = int(msg[len("steps:"):])
+            if steps < 1 or steps > 8:
+                raise ValueError("steps out of range")
+            current_steps = steps
+            sp.set_steps(steps)
+            safe_send(channel, f"ack:steps:{steps}")
+            broadcast_ctrl(f"state:steps:{steps}")
+        except ValueError:
+            safe_send(channel, "err:steps")
+
+
 @app.post("/offer")
 async def offer(request: Request):
     if sp is None:
@@ -611,28 +704,7 @@ async def offer(request: Request):
         ctrl_channels.add(channel)
         pc_channels.add(channel)
 
-        # Send the current reference version to a fresh peer so it can
-        # decide whether to refresh its preview.
-        if latest_reference_png is not None:
-            safe_send(channel, f"ref:set:{ref_version}")
-
-        # Sync lip transfer state on connect.
-        if _lip_enabled():
-            safe_send(channel, "lip:on" if lip_active else "lip:off")
-
-        # Send current pipeline parameter snapshot to a fresh peer.
-        if current_prompt:
-            safe_send(channel, f"state:prompt:{current_prompt}")
-        safe_send(channel, f"state:seed:{current_seed}")
-        safe_send(channel, f"state:steps:{current_steps}")
-
-        # Input-source role sync. The DataChannel usually opens after the
-        # video track was claimed, so the targeted input:you from the claim
-        # can be missed — resend it here.
-        if ownership.is_active():
-            safe_send(channel, "input:peer")
-            if ownership.owner_is(pc):
-                safe_send(channel, "input:you")
+        send_ctrl_snapshot(channel, pc)
 
         @channel.on("close")
         def _on_close():
@@ -641,66 +713,7 @@ async def offer(request: Request):
 
         @channel.on("message")
         def _on_msg(msg):
-            if not isinstance(msg, str):
-                return
-            global current_prompt, current_seed, current_steps
-            if msg.startswith("prompt-travel:"):
-                # Wire format (ctrlProtocol.ts): "prompt-travel:<frames>:<mode>:<text>".
-                # text may contain colons, so peel off exactly the two leading
-                # fields with maxsplit=2. Reject anything that doesn't match the
-                # contract (same frames>=1 / mode checks as POST /prompt-travel)
-                # rather than silently treating the prefix as prompt text.
-                parts = msg[len("prompt-travel:"):].split(":", 2)
-                if (
-                    len(parts) == 3
-                    and parts[0].isdigit()
-                    and int(parts[0]) >= 1
-                    and parts[1] in ("slerp", "lerp")
-                    and parts[2].strip()
-                ):
-                    frames, mode = int(parts[0]), parts[1]
-                    new_prompt = parts[2].strip()
-                    log.info(
-                        "Prompt travel: %r (frames=%d, mode=%s)",
-                        new_prompt,
-                        frames,
-                        mode,
-                    )
-                    current_prompt = new_prompt
-                    _drive_prompt_travel(new_prompt, frames, mode)
-                    safe_send(channel, "ack:prompt")
-                    broadcast_ctrl(f"state:prompt:{new_prompt}")
-                else:
-                    safe_send(channel, "err:prompt-travel")
-            elif msg.startswith("prompt:"):
-                new_prompt = msg[len("prompt:"):].strip()
-                if new_prompt:
-                    log.info("Prompt update: %r", new_prompt)
-                    current_prompt = new_prompt
-                    _drive_prompt(new_prompt)
-                    safe_send(channel, "ack:prompt")
-                    broadcast_ctrl(f"state:prompt:{new_prompt}")
-            elif msg.startswith("seed:"):
-                try:
-                    seed = int(msg[len("seed:"):])
-                    current_seed = seed
-                    sp.set_seed(seed)
-                    safe_send(channel, f"ack:seed:{seed}")
-                    broadcast_ctrl(f"state:seed:{seed}")
-                except ValueError:
-                    safe_send(channel, "err:seed")
-            elif msg.startswith("steps:"):
-                try:
-                    steps = int(msg[len("steps:"):])
-                    if steps < 1 or steps > 8:
-                        raise ValueError("steps out of range")
-                    current_steps = steps
-                    sp.set_steps(steps)
-                    safe_send(channel, f"ack:steps:{steps}")
-                    broadcast_ctrl(f"state:steps:{steps}")
-                except ValueError:
-                    safe_send(channel, "err:steps")
-            elif msg.startswith("out-fps:"):
+            if isinstance(msg, str) and msg.startswith("out-fps:"):
                 # This peer's own output track only: no broadcast.
                 try:
                     out_track.fps = parse_out_fps(msg[len("out-fps:"):])
@@ -708,6 +721,8 @@ async def offer(request: Request):
                     safe_send(channel, f"ack:out-fps:{out_track.fps}")
                 except ValueError:
                     safe_send(channel, "err:out-fps")
+                return
+            handle_ctrl(msg, channel)
 
     _prefer_codec(pc, pc.addTrack(out_track))
 
@@ -717,6 +732,36 @@ async def offer(request: Request):
 
     return JSONResponse(
         {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Local transport: raw frames and the control messages over one WebSocket, for
+# a client on the same machine (fluxrt/webrtc/local_transport.py). The socket
+# stands in for a peer connection: input ownership, control broadcasts and the
+# peer count treat it like any other client.
+# ──────────────────────────────────────────────────────────────────────────────
+def _latest_output():
+    with latest_lock:
+        return output_version, latest_rgb
+
+
+@app.websocket("/ws/local")
+async def ws_local(websocket: WebSocket):
+    if sp is None:
+        await websocket.close(code=1013)  # batch-only server: no live pipeline
+        return
+    await local_transport.serve(
+        websocket,
+        get_output=_latest_output,
+        consume_input=lambda track, peer: consume_peer_input(
+            track, peer, ownership, _frame_sink, notify=_input_notify, log=log
+        ),
+        on_ctrl=handle_ctrl,
+        on_open=send_ctrl_snapshot,
+        peers=pcs,
+        channels=ctrl_channels,
+        log=log,
     )
 
 
@@ -963,7 +1008,8 @@ async def post_prompt(request: Request):
 async def post_prompt_travel(request: Request):
     """Smoothly morph from the current prompt to a target prompt.
     Body: JSON {"prompt": "...", "frames": 48, "mode": "slerp"} OR raw
-    text/plain (the target prompt, with default frames/mode).
+    text/plain (the target prompt, with default frames/mode). "frames" may be
+    a duration instead: "4s" morphs over four seconds of wall-clock time.
     Query: ?prompt=...&frames=...&mode=... as an alternative.
     Works against the live pipeline AND/OR a running batch render (live steering)."""
     if sp is None and (_batch_manager is None or _batch_manager.active_job_id() is None):
@@ -995,20 +1041,18 @@ async def post_prompt_travel(request: Request):
 
     if not prompt or not prompt.strip():
         raise HTTPException(status_code=400, detail="Empty prompt")
-    try:
-        frames = int(frames_raw)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="frames must be an integer")
-    if frames < 1:
-        raise HTTPException(status_code=400, detail="frames must be >= 1")
+    length = travel.parse_length(frames_raw)
+    if length is None:
+        raise HTTPException(status_code=400, detail="frames must be an integer >= 1 or seconds like \"4s\"")
+    frames, seconds = length
     if mode not in ("slerp", "lerp"):
         raise HTTPException(status_code=400, detail="mode must be 'slerp' or 'lerp'")
 
     prompt = prompt.strip()
     global current_prompt
     current_prompt = prompt
-    _drive_prompt_travel(prompt, frames, mode)
-    log.info("Prompt travel via API: %r (frames=%d, mode=%s)", prompt, frames, mode)
+    _drive_prompt_travel(prompt, frames, mode, seconds)
+    log.info("Prompt travel via API: %r (frames=%d, seconds=%s, mode=%s)", prompt, frames, seconds, mode)
     broadcast_ctrl(f"state:prompt:{prompt}")
     return JSONResponse(
         {"ok": True, "prompt": prompt, "frames": frames, "mode": mode}
@@ -1509,20 +1553,31 @@ async def _health():
         "prompt": current_prompt,
         "seed": current_seed,
         "steps": current_steps,
+        # "prompt-travel:<n>s:..." (a morph timed on the clock) is understood
+        "prompt_travel_seconds": True,
+        # ws://…/ws/local: raw frames for a client on the same machine
+        "local_transport": True,
+        "local_clients": local_transport.client_stats(pcs),
         # every published output frame (interpolated ones included)
         "output_frames": output_version,
         **_perf_metrics(),
     }
 
 
+_average_fps = AverageFps()
+
+
 def _perf_metrics() -> dict:
-    """Pipeline FPS + VRAM snapshot for /healthz polling."""
+    """Pipeline FPS + VRAM snapshot for /healthz polling, plus the GPU's power
+    limit, clock and throttle state ("gpu": null without NVML): on a laptop
+    those move with the platform and set the frame time as much as the model."""
     if not sp:
         return {
             "fps_pipeline": 0.0,
             "fps_interpolated": 0.0,
             "proc_time_ms": 0.0,
             "vram_mb": 0,
+            "gpu": gpu_stats.read(),
         }
     pt = sp.get_last_processing_time() or 0.0
     base = (1.0 / pt) if pt > 0 else 0.0
@@ -1533,9 +1588,11 @@ def _perf_metrics() -> dict:
         vram_mb = 0
     return {
         "fps_pipeline": round(base, 2),
+        "fps_pipeline_avg": _average_fps(sp.get_frames_generated()),
         "fps_interpolated": round(base * (2 ** exp), 2),
         "proc_time_ms": round(pt * 1000.0, 2),
         "vram_mb": vram_mb,
+        "gpu": gpu_stats.read(),
     }
 
 
@@ -1659,6 +1716,10 @@ def _run_server(args) -> None:
         # then appears to hang with WHEP/WHIP sessions alive. 3s is plenty for
         # any in-flight signaling request.
         timeout_graceful_shutdown=3,
+        # /ws/local carries uncompressed frames: deflating 70 MB/s would cost
+        # more than the video codec it replaces
+        ws_per_message_deflate=False,
+        ws_max_size=64 * 1024 * 1024,
     )
 
 
