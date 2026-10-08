@@ -1,0 +1,729 @@
+[
+  {
+    "prompt": "everything in frame as a instant foto look soft slightly washed pastel color with a faint warm-green cast, gentle focus and a subtle chemical bloom, dreamy faded tones over the recognizable scene",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as vintage Kodachrome, rich saturated warm color with deep reds, fine tight grain and crisp midcentury contrast, a nostalgic sunlit slide-film glow, the scene vivid and intact",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as an early autochrome, soft muted pastel color built from a fine pointillist grain of red-green-blue starch dots, dreamy painterly diffusion and gentle vignetting, the scene glowing through the speckled color screen",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as an albumen print, warm sepia and chocolate-brown monochrome with a faint glossy sheen, fine Victorian detail, gentle fading toward the corners, the scene delicate and aged",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a cyanotype, rendered entirely in deep Prussian blue and white with no other color, soft contact-print softness and brushed coating edges, the shapes reading as glowing white against the blue and faint red offset",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a wet-plate tintype, silvery-grey tones on a dark metallic base with luminous highlights and deep shadows, shallow antique focus, swirling collodion streaks, dust specks and scratches around the edges, scene clearly held",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a daguerreotype, fine sharp detail, cool silvery tones with delicate hand-tinted blush and edges of tarnish, the scene grain",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as an extreme macro, a paper-thin plane of focus rendering tiny textures sharp while everything just beyond dissolves into creamy bokeh, glowing soft light circles, the subject magnified and intact",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as false-color infrared, foliage and organic surfaces glowing in surreal pinks and reds, skies turned deep and dark, dreamlike tonal inversion over the recognizable scene",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame through an extreme fisheye, wide warped vantage, shapes recognizable through the distortion",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a zoom-burst exposure, sharp at the center and exploding outward into radial motion streaks that rush from the middle to the edges, the subject anchored in the still core",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a long exposure with intentional camera movement, forms dragged into smooth flowing painterly streaks following the direction of motion, blurred light trails, the underlying shapes still suggested in the smear",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame with a tilt-shift look, a narrow band of razor focus with the areas above and below melting into soft blur, exaggerated so the scene reads like a tiny tabletop model, gentle light leaks at the edges",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame with a Petzval-lens look, the center crisp and sharp while the surroundings swirl into curving spiraled bokeh that rotates around the subject, dreamy vintage falloff, scene clearly held in the sharp core",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame with an anamorphic cinematic look, slight horizontal squeeze, oval stretched bokeh and long streaking blue lens flares cutting across the scene, shallow widescreen depth, the subject sharp and intact",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame draped in rippling water caustics, shifting nets of bright refracted light and wavering shadow flowing over every surface and contour, the scene visible beneath the dancing liquid light",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame rendered as if under polarized light, transparent surfaces blooming with vivid psychedelic interference colors and stress-fringe rainbows following every contour, shapes defined by shifting iridescent bands",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame outlined by glowing electric corona discharge, every edge and contour rimmed with a crackling violet-blue aura of ionized light against a dark field, the scene readable inside the luminous halos",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame overlaid with fine repeating line-grids that interfere into shimmering moiré bands, wavering concentric ripples and beat patterns drifting across the surfaces, the scene visible through the vibrating interference",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame shattered into a diffused voronoi of  repeated views and angular shapes, shifted copies, soft blur between them, smooth alpha overlays the scene readable through the swarm of fragments",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as two independently aimed overlapping views drifting apart, doubled wide-angle framing with soft seams, the underlying scene visible through both",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame in saturated color extending into faint infrared and ultraviolet warmth, gentle fisheye wrap at the margins, scene bright and recognizable",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame with a crisp sharply-magnified central patch fading into a wider soft surround, layered overlapping fields of view, heightened depth, scene intact",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame in full color but under dim moonlight conditions, rich hues preserved in near-darkness with soft low-light grain, gentle blur on fine detail, scene clearly visible",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame in near-monochrome blue-grey murk, heightened contrast and motion, faint electric shimmer around edges, scene dim but readable",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as an ultra-wide panoramic view, sharp sides with a soft blurred far periphery, muted blue-yellow tones, scene stretched but recognizable",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame in near-monochrome low-light with soft luminous grain, bright dark-adapted glow, gentle vignette, shapes clearly present",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame overlaid as a dithered infrared thermal map, warm forms blooming red-orange against cool blue surroundings, contours traced in heat gradients",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame wrapped in a near-panoramic mosaic of tiny repeating facets, heightened motion and shimmering iridescence, soft facet edges, image still visible",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a fine mosaic of hexagonal facets in blue-green and glowing ultraviolet with reds absent, faint UV guide patterns, scene readable through the soft pixelated grid",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame with colors reduced to blues and yellows and reds muted to grey, slightly soft focus, heightened along moving edges, underlying shapes intact",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame seen through insect compound eyes, the scene clearly visible and intact but gently broken into a fine honeycomb of small hexagonal facets, very thin soft facet edges with light scattering and blurring the outlines so the grid is subtle, faint iridescent shimmer,  everything in frame seen through a bee's eyes, a fine mosaic of hexagonal facets in blue-green and glowing ultraviolet with no reds, faint UV nectar-guide patterns, the scene still readable through the soft pixelated grid the underlying image still dominant through delicate refraction",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through a dog's eyes, colors reduced to blues and yellows with reds muted to grey, slightly soft focus with heightened sensitivity to movement, low wide vantage, underlying shapes intact",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through a pov, the scene in muted blue-grey and yellow dichromatic tones, low-light glow with a faint tapetum shimmer, sharpened motion and soft detail at the edges, vertical-slit highlights, scene still clearly visible",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through shimmering heat haze, the scene rippling with soft vertical distortion following every contour, wavering refracted light and faint blur, the underlying shapes intact through the warm shimmer",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame seen closeup through a glass sphere, the scene slightly curving and bulging with fisheye refraction toward the center, the image inverted and concentrated but still recognizable",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through frosted glass, the scene softly diffused and translucent with a fine matte grain, gentle light bloom scattering across the surface, contours blurred but the underlying shapes still clearly present",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through a thin transparent soap-bubble film, the scene clearly visible and sharp beneath delicate iridescent oil-slick sheens, subtle shifting bands of color drifting along every contour, faint light scattering with crisp underlying detail",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through cut crystal glass, the scene gently split into broad angular facets whose edges align with and follow the outlines and contours of everything in frame, facets tracing the shapes so the structure stays readable, prismatic light scattering along every bevel edge so the seams glow and soften, faint rainbow dispersion over the underlying shapes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "Thought processeverything in frame seen through cut crystal glass, the scene gently split into broad angular facets whose edges align with and follow the outlines and contours of everything in frame, facets tracing the shapes so the structure stays readable, prismatic light scattering along every bevel edge so the seams glow and soften, faint rainbow dispersion over the underlying shapes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0
+  },
+  {
+    "prompt": "everything in frame seen through a glass prism, the scene intact but its edges fanning into soft red-to-violet spectral fringes following every contour, gentle light refraction and scattered rainbow bands, the original image still dominant",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through cut crystal glass, the scene gently split into broad angular facets that stay readable, prismatic light scattering along every bevel edge so the seams glow and soften, faint rainbow dispersion over the underlying shapes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame seen through a rain-soaked window, the scene clearly visible but refracted through scattered water droplets each acting as a tiny lens, soft trickling streaks following every contour, glints of scattered light blurring the droplet edges",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through insect compound eyes, the scene clearly visible and intact but gently broken into a fine honeycomb of small hexagonal facets, very thin soft facet edges with light scattering and blurring the outlines so the grid is subtle, faint iridescent shimmer, the underlying image still dominant through delicate refraction",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame seen through a pane of damp foggy glass, soft condensation haze blurring the scene with trickling water droplets and streaks tracing every contour, diffused muted light, smeared reflections and cool misted tones over the underlying shapes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame rebuilt as Portuguese azulejos while keeping the exact shapes, pose and composition of the scene, hand-painted cobalt-blue contours on glossy white tin-glazed ceramic tiles, fine grout lines following every contour and edge in frame, crackled glaze texture",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as stained glass, bold black lead lines tracing contours of input, rich jewel-toned panes of crimson, cobalt, emerald and gold balanced with paler amber and clear glass, bright sunlight streaming through and scattering colored light across the panes,  bright sunlight shining through and scattering across the panes, light catching and refracting through the glassluminous and ornate, transparency and reflections",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as chunky knitted yarn, thick wool stitches and visible fiber texture following every form",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as molten gold pouring and pooling, liquid metal sheen, glowing warm reflections",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "skip"
+  },
+  {
+    "prompt": "everything in frame as stained glass, bold black lead lines and glowing crimson cobalt and gold glass panes following every contour, warm light glowing through the panes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame rendered as dense bright green ASCII characters on black, monospace glyphs shading the light and dark regions",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame stitched as dense embroidery, raised satin-stitch threads in saturated wool colors following every contour, visible linen weave texture",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the whole frame rendered in glowing green phosphor pixels, 1-bit monochrome, visible scanlines sweeping across every form, deep black background, electron beam glow",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame rebuilt as an ancient Roman mosaic, small tesserae tiles in ochre terracotta and gold, fine grout lines following every contour, weathered stone texture",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the main subject unchanged and photorealistic, the background replaced with a sunny tropical beach, same composition",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a thermal infrared heat map, glowing hot oranges fading to cold blue, false color",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as stop-motion felt and fabric craft, soft fuzzy textures, hand-made imperfections",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame sculpted from fine sand, soft grain texture, warm light and gentle cast shadows",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a glowing Tron lightgrid, electric blue circuit lines on black, neon edge glow",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as ink and smoke swirling in water, drifting tendrils, soft diffusion, dark backdrop",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "skip"
+  },
+  {
+    "prompt": "everything in frame overgrown with lichen and moss, soft green organic texture, damp earthy patina",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "skip"
+  },
+  {
+    "prompt": "everything in frame as layered papercraft cardstock, stacked cut-paper shapes, soft drop shadows between layers",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as holographic foil, shifting rainbow diffraction, prismatic shimmer, metallic sheen",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as rusted corroded metal, flaking orange patina, pitted iron texture, industrial grime",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as translucent blown glass, swirling colored streaks, glossy highlights, soft refraction",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as shattered mirror shards, fractured reflective facets, splintered reflections, dark seams",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a glowing cosmic nebula, luminous gas clouds and scattered stars, deep space black",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "skip"
+  },
+  {
+    "prompt": "everything in frame as a topographic map, layered contour lines following elevation, soft tonal banding",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "skip"
+  },
+  {
+    "prompt": "everything in frame as loose watercolor bleeding on wet paper, soft feathered edges, pale washes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as thick impasto oil paint, heavy palette-knife strokes, rich saturated pigment",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as glowing neon outlines on pure black, synthwave magenta and cyan, soft bloom",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as folded origami paper, sharp creases, flat planes, soft paper shadows",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame encased in frosted ice and crystal, refracting light, cold blue glow, sharp facets",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "skip"
+  },
+  {
+    "prompt": "everything in frame as cracked dry desert clay, parched earth tiles, fine dust, warm sunlit tone",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as claymation plasticine, soft rounded forms, visible fingerprint and tool marks",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame cast in polished bronze, warm specular highlights, dark patina in the recesses",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame carved from white marble, polished stone surface, soft subsurface glow, fine chisel marks",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a low-poly faceted 3D render, flat triangular facets, soft studio shading",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a pen-and-ink cross-hatching drawing, dense black linework, white paper",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a technical blueprint, crisp white lines on deep cyanotype blue, annotation marks",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a soft charcoal drawing on gray paper, smudged shading, white chalk highlights",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a glowing cyan wireframe mesh on a black void, thin polygon edges, sparkling vertices",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "bioluminescent glowing edges tracing every contour, deep darkness all around, soft underwater glow",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a ukiyo-e woodblock print, flat color blocks, bold outlines, visible woodgrain and registration offset",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as iridescent chrome liquid metal, mirror-bright reflections, fluid molten surface rippling over every form",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a soft monochrome graphite pencil drawing on gray paper, blended shading, white chalk highlights, visible paper texture, dark vignette",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as an optical flow visualization, smooth vivid hue gradients encoding the direction of every movement, dark background",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the main subject photorealistic and unchanged, everything around it rendered as a loose white pencil sketch on gray paper",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the main subject completely unchanged and photorealistic, the background transformed into swirling Van Gogh starry night brushstrokes",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "the main subject unchanged and in sharp focus, the background replaced with flat chroma key green",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame built from chunky glowing voxel cubes, blocky 3D pixels following every shape, dark background",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  },
+  {
+    "prompt": "everything in frame as a dense 3D point cloud, thousands of tiny glowing cyan dots sampling every surface, deep black background",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a semantic segmentation mask, flat saturated color regions with hard edges, each distinct element its own vivid flat color, deep blue background",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a 3D normal map, smooth surfaces in pastel pink purple and cyan encoding the surface angles, flat neutral gray background",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a depth map, smooth grayscale gradient glowing white on the nearest surfaces and fading to black in the distance, soft continuous depth shading",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a Canny edge detection output, thin crisp white edges outlining every contour, pure black background, clean algorithmic linework",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as glowing 2-bit black and white dithering, bright pixelated forms on pure black, coarse pixel grid, retro computer graphics",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame printed as coarse halftone newspaper dots, black ink on yellowed newsprint paper, high contrast, slightly misaligned printing",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the whole frame as a low resolution 2-bit black and white image, coarse Bayer dithering, chunky square pixels, pure black and pure white only, 1980s Macintosh screen aesthetic",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a thermal infrared scan, glowing orange and yellow heat signatures fading into deep purple cold zones, false-color scientific gradient, imaging interface overlay",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the whole frame as a neon x-ray under ultraviolet blacklight, glowing electric magenta structure outlined in cyan, dark void background, slight chromatic aberration, glowing haze",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a Canny edge detection drawing in crisp white lines, the background as a smooth grayscale depth map fading to black",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "the whole frame as corrupted digital glitch art, RGB channels split and shifted, blocky compression artifacts and scanline tearing following the motion, vivid neon colors",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "love"
+  },
+  {
+    "prompt": "everything in frame as a glowing 3D wireframe mesh, thin cyan polygon edges and sparkling vertex points mapping every surface, deep black void background",
+    "style": 0,
+    "tracking": 0,
+    "stability": 0,
+    "verdict": "like"
+  }
+]

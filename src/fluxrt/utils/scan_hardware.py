@@ -17,7 +17,17 @@ def get_cpu_name():
     system = platform.system()
 
     if system == "Windows":
-        return _run(["wmic", "cpu", "get", "name"]).splitlines()[1].strip()
+        # wmic is gone from current Windows 11 builds; the registry always has the name.
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                return winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+        except OSError:
+            pass
 
     if system == "Darwin":
         return _run(["sysctl", "-n", "machdep.cpu.brand_string"])

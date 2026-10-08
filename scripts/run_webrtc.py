@@ -11,6 +11,10 @@ Usage:
 
 Then open `http://<linux-lan-ip>:8765/` on any LAN client.
 
+TouchDesigner on the same machine (Windows, Spout):
+    python scripts/run_webrtc.py --spout-in TDOut --spout-out FluxRT
+    (Syphon Spout Out TOP named TDOut -> pipeline -> Syphon Spout In TOP on FluxRT)
+
 Control:
     - Prompt / seed / steps updates: sent over a DataChannel.
     - Reference image upload: HTTP POST /reference with raw image bytes.
@@ -63,6 +67,12 @@ from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
 from fluxrt.webrtc.stats import AverageFps, connection_pool_stats
 from fluxrt.webrtc import local_transport
+
+try:  # Windows only; --spout-in / --spout-out need it
+    import SpoutGL
+except ImportError:
+    SpoutGL = None
+GL_RGB = 0x1907
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -131,6 +141,10 @@ output_version = 0   # bumped per processed frame (under latest_lock) — output
 latest_input_bgr: Optional[np.ndarray] = None
 latest_lock = threading.Lock()
 producer_stop = threading.Event()
+
+# --spout-in / --spout-out: sender names, and the size of the Spout input once a
+# sender is connected (None while waiting for it). Reported by /healthz.
+spout_state: dict = {"in": None, "in_size": None, "out": None}
 
 # Serializes the actual pipeline drive (shared-tensor write + read). Both the
 # local producer thread and per-peer executor calls go through push_input_frame;
@@ -356,6 +370,97 @@ def producer_loop(camera_index: int) -> None:
 
     cap.release()
     log.info("Producer stopped.")
+
+
+SPOUT_IN_MAX_FPS = 60   # cap for senders without Spout frame counting (isFrameNew always true)
+
+
+def spout_producer_loop(sender_name: str) -> None:
+    """--spout-in: the server's own input is a Spout sender (TouchDesigner's
+    Syphon Spout Out TOP, ...) instead of the OpenCV camera. Same rules as the
+    camera: pauses while a peer owns the input, and any size is center-cropped
+    to the pipeline's input resolution by push_input_frame."""
+    receiver = SpoutGL.SpoutReceiver()
+    receiver.setReceiverName(sender_name)
+    frame = np.empty((1, 1, 3), dtype=np.uint8)
+
+    log.info("Waiting for StreamProcessor to be ready...")
+    while not sp.is_ready():
+        if producer_stop.is_set():
+            receiver.releaseReceiver()
+            return
+        time.sleep(0.1)
+    log.info("StreamProcessor ready, waiting for Spout sender %r.", sender_name)
+
+    last_push = 0.0
+    try:
+        while not producer_stop.is_set():
+            if ownership.is_active():
+                # A peer is driving input — skip Spout frames.
+                time.sleep(0.05)
+                continue
+            try:
+                ok = receiver.receiveImage(frame, GL_RGB, False, 0)
+            except BufferError:   # the sender changed size before isUpdated caught it
+                frame = np.empty(
+                    (receiver.getSenderHeight(), receiver.getSenderWidth(), 3), dtype=np.uint8
+                )
+                continue
+            if not ok:
+                if spout_state["in_size"] is not None:
+                    log.info("Spout sender %r gone — waiting for it.", sender_name)
+                    spout_state["in_size"] = None
+                time.sleep(0.05)
+                continue
+            if receiver.isUpdated():   # connected, or the sender changed size
+                w, h = receiver.getSenderWidth(), receiver.getSenderHeight()
+                frame = np.empty((h, w, 3), dtype=np.uint8)
+                spout_state["in_size"] = [w, h]
+                log.info("Spout input: %r %dx%d", sender_name, w, h)
+                continue
+            now = time.monotonic()
+            if not receiver.isFrameNew() or now - last_push < 1.0 / SPOUT_IN_MAX_FPS:
+                time.sleep(0.002)
+                continue
+            last_push = now
+            push_input_frame(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    finally:
+        receiver.releaseReceiver()
+        log.info("Spout producer stopped.")
+
+
+def spout_output_loop(sender_name: str) -> None:
+    """--spout-out: every published output frame (interpolated ones included)
+    also goes out as a Spout sender, for TouchDesigner's Syphon Spout In TOP."""
+    sender = SpoutGL.SpoutSender()
+    sender.setSenderName(sender_name)
+    log.info("Spout output: sender %r", sender_name)
+    # Receivers find senders through Spout's sender list. Once (TouchDesigner
+    # 2025.33230, not reproduced since) the name dropped out of it while frames
+    # still went out, and TD showed nothing; re-register when that happens.
+    lister = SpoutGL.SpoutReceiver()
+    next_check = 0.0
+    last = -1
+    try:
+        while not output_pump_stop.is_set():
+            with latest_lock:
+                version, rgb = output_version, latest_rgb
+            if version == last or rgb is None:
+                time.sleep(0.002)
+                continue
+            last = version
+            sender.sendImage(rgb, rgb.shape[1], rgb.shape[0], GL_RGB, False, 0)
+            now = time.monotonic()
+            if now >= next_check:
+                next_check = now + 2.0
+                if sender_name not in lister.getSenderList():
+                    log.warning("Spout sender %r fell out of the sender list — re-registering.", sender_name)
+                    sender.releaseSender()
+                    sender = SpoutGL.SpoutSender()
+                    sender.setSenderName(sender_name)
+    finally:
+        sender.releaseSender()
+        log.info("Spout output stopped.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1537,6 +1642,9 @@ async def _health():
             [getattr(pc, "connectionState", "unknown") for pc in list(pcs)]
         ),
         "resolution": resolution,
+        # what the output adds: flow-upscaler size, RIFE frames per generated frame
+        "out_resolution": out_resolution,
+        "interpolation": 2 ** int(sp.config.get("interpolation_exp", 0)),
         "reference_enabled": _reference_enabled(),
         "reference_set": latest_reference_png is not None,
         "reference_version": ref_version,
@@ -1558,6 +1666,8 @@ async def _health():
         # ws://…/ws/local: raw frames for a client on the same machine
         "local_transport": True,
         "local_clients": local_transport.client_stats(pcs),
+        # --spout-in / --spout-out sender names; in_size is None until the input sender is up
+        "spout": spout_state,
         # every published output frame (interpolated ones included)
         "output_frames": output_version,
         **_perf_metrics(),
@@ -1778,6 +1888,28 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--spout-in",
+        default=None,
+        metavar="SENDER",
+        help=(
+            "Windows: take the server's input from this Spout sender (e.g. a "
+            "TouchDesigner Syphon Spout Out TOP) instead of the OpenCV camera; "
+            "overrides --no-server-camera. A peer that sends video still takes "
+            "over while it is connected."
+        ),
+    )
+    parser.add_argument(
+        "--spout-out",
+        nargs="?",
+        const="FluxRT",
+        default=None,
+        metavar="SENDER",
+        help=(
+            "Windows: also publish every output frame as a Spout sender "
+            "(default name FluxRT), e.g. for a TouchDesigner Syphon Spout In TOP."
+        ),
+    )
+    parser.add_argument(
         "--ssl-certfile",
         default=None,
         help="Path to TLS cert (enables HTTPS, required by browsers for "
@@ -1800,6 +1932,8 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    if (args.spout_in or args.spout_out) and SpoutGL is None:
+        parser.error("--spout-in / --spout-out need SpoutGL (Windows: pip install SpoutGL)")
 
     # Populate comfy_servers dict. Servers come from --comfy-server flags, or
     # fall back to the FLUXRT_COMFY_SERVERS env var (comma-separated NAME=URL
@@ -1926,7 +2060,16 @@ def main() -> None:
         _output_pump_on = True
         threading.Thread(target=output_pump, daemon=True).start()
 
-    if args.no_server_camera:
+    if args.spout_out:
+        spout_state["out"] = args.spout_out
+        threading.Thread(target=spout_output_loop, args=(args.spout_out,), daemon=True).start()
+
+    if args.spout_in:
+        if args.no_server_camera:
+            log.info("--spout-in replaces the server camera; --no-server-camera ignored.")
+        spout_state["in"] = args.spout_in
+        threading.Thread(target=spout_producer_loop, args=(args.spout_in,), daemon=True).start()
+    elif args.no_server_camera:
         log.info("--no-server-camera: skipping local camera; waiting for peer input.")
         # No local producer exists — /healthz reports 'none' until a peer claims,
         # and the ownership object will not pretend a server camera resumes.
