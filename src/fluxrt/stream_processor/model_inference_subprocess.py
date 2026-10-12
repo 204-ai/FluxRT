@@ -50,6 +50,7 @@ from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
 from fluxrt.utils import crop_maximal_rectangle, travel
+from fluxrt.utils.reference_image import load_reference_image
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
 from fluxrt.stream_processor.postprocessors import (
@@ -595,18 +596,16 @@ class ModelInferenceSubprocess:
         self.reference_active = True  # flipped off below unless a real image loads
         self._last_log = 0.0
         if self.config.get("use_reference_image", False):
-            path = self.config.get("reference_image_path", "")
-            image = cv2.imread(path) if path else None
             resolution = self.config.get("reference_image_resolution")
+            image, message = load_reference_image(
+                self.config.get("reference_image_path", ""),
+                resolution["width"],
+                resolution["height"],
+            )
             if image is not None:
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                image = cv2.resize(image, (resolution["width"], resolution["height"]))
                 self.reference_image = Image.fromarray(image)
             else:
-                print(
-                    "use_reference_image: no reference_image_path loaded — reference "
-                    "tokens stay off until one is set (POST /reference)."
-                )
+                print(message)
         self._set_reference_active(self.reference_image is not None)
 
         target_fps = self.config.get("target_fps", None)

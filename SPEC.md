@@ -185,7 +185,7 @@ T34|.|`/reference` → active batch job under `--batch-only` (manager.set_refere
 T35|.|ref travel engine (live; T32 = GO, default mode lerp): child `ref_travel` — encode src/tgt once, per-step lerp into `_cond_latent_cache[1]`, `reference_image_is_valid=False`, prompt-travel stride/refresh, `reference_travel_refresh_every`, cancel rules; GPU-free unit tests on fake latents|V35,V37,V42,V46,C17,C19,C24,C25,R22
 T36|.|ref travel A/B on 4090: mean fps over morph vs steady & vs prompt travel same preset; peak VRAM; quality sheet vs noise floor|C21,C14,T32
 T37|x|`/comfy/edit`: restore template or 501 + msg; test|R15
-T38|.|docs: `--set reference_image_path=<abs>` in perf-notes boot cmds + README; ship tiny sample or drop default path; strong ref wording "in the visual style of the reference image" (R17)|R16,R17
+T38|x|docs: `--set reference_image_path=<abs>` in perf-notes boot cmds + README; ship tiny sample or drop default path; strong ref wording "in the visual style of the reference image" (R17)|R16,R17
 T39|.|`POST /reference-travel` route + `StreamProcessor.start_reference_travel` (live); 400 disabled; one `ref:set` bump at start, preview = target|V37,V40,V43,C20
 T40|.|batch ref travel: `BatchJobManager.start_reference_travel` → in-order `request_queue`; fake-proc tests|V36,V41,V37
 T41|~|perf budget harness (live cases done 2026-10-12 → R23/R24; batch-job-ref case waits for T33): `perf_ab` runs on 4090 for C21 cases (ref off, ref static, hard swap, travel, batch job ref) vs current main; record today's ref-cfg VRAM baseline & enabled-idle boot time; peak VRAM via torch `max_memory_reserved` in-process, ⊥ `/healthz` (R21)|C21,C22,C27,R21,R23,R24
