@@ -5,6 +5,7 @@ input: ∀ time ≤1 peer drives pipeline input; owner death/leave → oldest wa
 egress: WHEP endpoint — standard players (GStreamer whepsrc, browser WHEP libs, studio-world) watch FluxRT output; per-session resolution/fps knobs for bandwidth. `/offer` + ownership behavior identical.
 ingress: WHIP endpoint — standard publishers (OBS WHIP, GStreamer whipsink, browser) feed pipeline input as ordinary ownership claimants; realtime-client protocol & contention semantics untouched.
 batch: `--batch-only` render gets live-path speedups — GPU-side in/out, encode overlapped w/ render, small IPC, warm-up + heap freeze @ load, processor kept warm across jobs → 2nd back-to-back job first frame in seconds (not ~35s), steady fps ↑ vs baseline (1280×720→2560×1440 4 steps: ~1.0 fps, 72 fr job 107s). Baseline `perf/hot-path` @ 24ced69.
+reference: ref image steerable on every path — per-batch-job ref, mid-render swap (live + batch), smooth ref travel; `--batch-only` /reference ⊥ dead end; ref feature off at boot ⇒ zero cost, on ⇒ cost within measured budget (C21).
 
 ## §C CONSTRAINTS
 - C1: InputOwnership sole mutator of owner/waiter/active state; policy fns pure, unit-testable w/o aiortc/GPU (existing module ethos).
@@ -23,6 +24,17 @@ batch: `--batch-only` render gets live-path speedups — GPU-side in/out, encode
 - C14: GPU kernels ⊥ bit-deterministic (`scripts/perf_ab.py` docstring) ∴ ∀ quality gate = LPIPS/PSNR vs noise floor (`perf_ab compare --noise`), ⊥ byte equality.
 - C15: out of scope: multi-frame pipelining in child (submit n+1 before n returns), live-path changes, WebRTC egress.
 - C16: ∀ batch change measured on RTX 5090, same server cfg, 72-fr 1080p clip (seed 52, steps 4, interp 0, flow upscaler on) before & after.
+- C17: `reference_image_resolution` boot-only (sets ref token count → compiled shapes) ∴ ∀ swapped/travelled ref resized to it; ⊥ runtime ref-res change.
+- C18: no ref op issued → live & batch output behavior identical to pre-change (C10 spirit).
+- C19: ref travel quality unproven (latent lerp may ghost) → T31/T32 experiments gate T35; ⊥ ship endpoint before go.
+- C20: ctrl wire protocol frozen (C4) ∴ ref ops HTTP-only; `/healthz` fields untouched (V18) — reuse existing `reference_version`.
+- C21: perf budget — `perf_ab` on RTX 4090 vs current main, same preset: ref off at boot → fps & peak VRAM ≡ baseline within run noise, output within LPIPS noise; ref set & static → ≡ today's ref cfg within noise; hard swap → ≤1 slow frame (1 full execute), ⊥ ~1s compile stall after warm-up; ref travel → mean fps over morph ≥75% steady & ≥ prompt travel same preset; batch job ref → job fps/VRAM ≡ same job w/ boot ref within noise, keep-warm reuse kept; ref feature in use → peak VRAM ≤ today's ref cfg +64 MiB.
+- C22: zero-cost scope = boot `use_reference_image:false` (per-frame, boot time, VRAM unchanged); enabled+idle may add boot time & VRAM (≤ +64 MiB), ⊥ per-frame fps.
+- C23: out of scope: runtime ref-res change (C17), >1 ref slot, travel across ref sizes, ctrl-channel ref ops (C20), MCP.
+- C24: ref travel reuses prompt-travel machinery — `travel.progress` clock, `prompt_travel_full_execute_every`, `prompt_travel_refresh`; src/tgt VAE-encoded once at start, per step tensor blend only.
+- C25: budget miss fallback = `reference_travel_refresh_every` (def 1; 2 → ref tokens refreshed every 2nd frame, blend held); ⊥ auto ref-res drop, ⊥ skip final full execute, ⊥ VRAM > +64 MiB.
+- C26: swap storm: ≤1 ref change applied per rendered frame, newest wins (live queue drain + batch in-order); ⊥ server rate limit on /reference; `ref:set` broadcast + preview PNG coalesced ≤4/s, ending on latest version; docs: smooth change = /reference-travel.
+- C27: ? ref-token cost on 4090 (0.058 ms/row = laptop-5090 figure) → measure in T32/T36 · ? latent-lerp visual quality (C19) · ? boot-time increase when ref enabled+idle (no cap set) → measure, then decide · ? today's ref-cfg VRAM baseline on 4090 → measure before T33. · resolved 2026-10-12 (R23/R24): ref-cfg VRAM baseline 20302 MB peak (static) / 20260 (idle); enabled-idle boot +15.3 s; static ref steady cost +2.1 ms/frame
 
 ## §I INTERFACES
 - fn: `owner_gap_should_release(gap_s: float, other_waiters: int) -> bool`  // pure, input_ownership.py; True iff gap_s ≥ OWNER_GAP_WITH_WAITER & other_waiters ≥ 1
@@ -50,6 +62,13 @@ batch: `--batch-only` render gets live-path speedups — GPU-side in/out, encode
 - env: `FLUXRT_PROFILE=1` → batch per-N-frame span log: decode, parent crop, ipc out, render (CUDA events), quant+download, ipc back, encode
 - error: `batch inference subprocess died during render (exitcode=<n>)` & same suffix on load-death msg
 - api: `POST /batch/jobs` 409 iff prior job non-terminal | preflight fail; job `done` ⇒ slot free
+- api: `POST /batch/jobs` + opt multipart `reference` (PNG/JPEG/WebP ≤10 MB) → applied in job reset before frame 1; absent → boot ref (current)
+- api: `POST /reference` w/ active batch job → hard-swap that job's ref on next frame; live + batch both steered (mirror `/prompt`, run_webrtc.py:249-259); `--batch-only` w/o job → 503 (was 400); ref disabled at boot → 400 (V40)
+- api: `POST /reference-travel?frames=<n|Ns>&mode=lerp|slerp` body=image → morph current ref → target over n rendered frames; live + running batch job; direct `/reference` mid-morph cancels
+- ipc: child cmd `ref_travel(image, frames, mode)` (live: `command_queue`; batch: in-order `request_queue`, V41) → encode src & tgt latents once; per step `_cond_latent_cache[1]` = (current ref obj, lerp(src,tgt,t)) + `update_controller.reference_image_is_valid=False` (V42); full execute per prompt-travel stride/refresh (C24); t=1 → tgt set as ref
+- config: `reference_travel_refresh_every: int`  // def 1; ref tokens refreshed every n-th morph frame, blend held between (C25)
+- method: `StreamProcessor.start_reference_travel(...)`, `BatchJobManager.set_reference(rgb)` / `start_reference_travel(...)`
+- route: `/comfy/edit` → template restored | 501 w/ msg (⊥ 500)
 
 ## §R RESEARCH
 id|topic|finding|src
@@ -61,6 +80,22 @@ R5|per-session encode|aiortc encoder is per-RTCRtpSender (`self.__encoder` rtcrt
 R6|encoder follows frame|encoder reconfigures when incoming frame dims change (vpx.py:198-213 codec.width/height ← frame) ∴ track emitting resized frames suffices — no encoder API needed|aiortc 1.14 codecs/vpx.py
 R7|no SDP res knob|`imageattr` (RFC 6236) zero hits in aiortc → client ⊥ request resolution via SDP; WHEP draft has no media-param mechanism → custom query param on endpoint URL = legit server-local extension|aiortc 1.14 grep; draft-ietf-wish-whep
 R8|bitrate auto-adapts|REMB feedback → `encoder.target_bitrate` (rtcrtpsender.py:284-290) → congestion already degrades bitrate, but resolution fixed → blockiness; resolution param = quality-preserving lever on top|aiortc 1.14 rtcrtpsender.py
+R9|ref load|ref = boot cfg `use_reference_image` + `reference_image_path` (cv2.imread, cwd-relative) → resize `reference_image_resolution` → PIL; unreadable → ref tokens off until POST /reference|model_inference_subprocess.py:594-610
+R10|ref in model|ref → VAE latents cached `pipe._cond_latent_cache[idx]` by source → extra image tokens after input (`reference_list=[input, ref]`); `_set_reference_active` clears cache|model_inference_subprocess.py:790-804,957-963 · pipeline.py:654-660,927
+R11|live swap|`POST /reference` → worker resize+set+`update_controller.reset_cache()` → hard cut, full recompute next frame, ⊥ blend; first activation ≈1s compile variant|run_webrtc.py:1246-1301 · model_inference_subprocess.py:757-769 · docs/perf-notes.md:146
+R12|batch ref|batch proc cfg = deepcopy boot cfg → boot ref loaded per proc; keep-warm reset keeps `reference_image`, clears cond latent cache; `POST /batch/jobs` ⊥ ref field; manager steering = set_prompt + start_prompt_travel only|batch_render.py:415-440,476-489 · model_inference_subprocess.py:1195-1205
+R13|batch-only ref API|`_reference_enabled()` needs live `sp` → `--batch-only` POST /reference → 400 "disabled"; ∄ way to change ref of running/parked batch proc except file swap + new proc (`batch_keep_warm=false`)|run_webrtc.py:1065-1066,1281-1290
+R14|travel scope|prompt travel lerps/slerps `prompt_embeds` only; ref untouched|model_inference_subprocess.py `_advance_prompt_travel`
+R15|comfy→ref|`/comfy/pull` installs newest ComfyUI output as ref (ok); `/comfy/edit` → 500, `scripts/comfy_workflows/qwen_edit_2509.api.json` ∉ checkout|run_webrtc.py:61-62,1316-1488
+R16|sample path|`config_with_reference.json` → `local_samples/reference.png` ∉ repo → boot warn, ref off (rnatwoofour boot 2026-10-12)|configs/config_with_reference.json:19 · boot log
+R17|ref prompt wording|static input, A-vs-B mean abs Δ 0-255: "everything in frame in the visual style of the reference image" 52.7 · "the person and the shelves rendered exactly like image 2, keep the layout of image 1" 36.0 · "restyle image 1 in the art style of image 2, same composition as image 1" 21.8 · "everything in frame repainted with the colors, materials and textures of image 2" 12.0; same ref twice → 0.0 ∴ wording sets ref strength ~4×|T31 2026-10-12 · live 576×320 steps 2 int8_linear tiny-vae 256² ref · RTX 4090 rnatwoofour · t31b.py
+R18|ref set/swap cost|first set after boot ⊥ compile stall (max frame gap 104–131 ms; warm-up covers ref variant); hard swap → max gap 105–143 ms vs steady 85–87 ms = 1 slow frame, clean 1-frame cut|T31 run1+run2 · t31.py
+R19|pixel cross-fade|repeated POST /reference: 4 steps/s → out fps 14→10 (−28%), proc 75→80 ms; 8–10 steps/s → out ≈8 fps (−40–45%), proc 75→118–125 ms (full recompute + VAE encode per step); frame Δ first-after-post ≈ fade mean (40.9/41.4 · 31.7/30.5 · 41.7/39.2) ∴ ⊥ visible per-step spikes over motion; looks gradual → misses C21 travel budget ∴ stopgap only|T31 run2 · steps.py
+R20|ref clear stall|first `DELETE /reference` after boot → 1.6 s output gap once; later DELETE in same process ≤136 ms ∴ ref-removed variant ⊥ covered by warm-up (? exact variant)|T31 run1 vs run2, same server process
+R21|VRAM probe|`/healthz` vram_mb swings ±400 MB under moving input (13.5 GB idle → 14.2–15.0 GB) w/ & w/o ref; ⊥ ref-attributable delta visible ∴ C21 +64 MiB check needs torch peak counters|T31 run1 health.csv
+R22|latent ref travel|in-process, static input, A→B 9 pts: neighbor Δ evenness (max/mean) lerp 1.28 · slerp 1.42 · pixel blend 2.06 (back-loaded, last step 21.8 = 3× first); path/endpoints ≈1.85 all three ∴ ⊥ detour/ghost states; inject `_cond_latent_cache[1]` + `reference_image_is_valid=False` + full execute renders exact state, same state twice → 0.0 ∴ T35 design (V35/V42) works; lerp = default mode|T32 2026-10-12 · RTX 4090 · 576×320 steps 2 int8_linear tiny-vae 256² ref, compile off · t32.py
+R23|ref baseline (main f284910)|perf_ab 300 fr moving clip, live preset (576×320 steps 2 int8_linear tiny-vae rife_cudagraphs interp 0, live warm-up): ref off 70.9 ms (14.11 fps) · enabled-idle 71.0 ms · static 256² ref 73.0 ms (+2.1 ms, +3%); boot (load+warm-up) off 31.5 s · idle 46.8 s (+15.3 s) · static 43.4 s; peak reserved (incl warm-up) off 20172 · idle 20260 (+88) · static 20302 MB (+130); steady serving ≈15.4 GB|T41 2026-10-12 · RTX 4090 · /tmp/t41/{ref_off,ref_idle,ref_static}/run.json
+R24|ref event cost (main)|in-process, compiled+warmed, moving clip: steady w/ ref median 76.3 ms; hard swap frame 118.5–121 ms (1st 148.9) = +42–47 ms, next frame back ≈71 ms ∴ exactly 1 slow frame; prompt travel 48 fr mean 98–99 ms = 77–78% steady fps (∴ C21 ref-travel bar ≈78%); 1st ref clear after boot 1485 ms + 659 ms next frame (~2.1 s stall, R20 confirmed in-process), 2nd clear 105 ms; ref re-set 123 ms|T41 events.json · t41_events.py
 
 ## §V INVARIANTS
 V1: ∀ time ≤1 owner (existing machine + tests)
@@ -96,6 +131,20 @@ V30: reuse iff new job `interp` == proc build `interp`; else teardown + rebuild;
 V31: job `done` observable ⇒ `_active` cleared (teardown, if any, already finished) ∴ submit after polling `done` ⊥ 409; submit while non-terminal still 409 (existing tests)
 V32: `FLUXRT_PROFILE` unset → batch path adds ⊥ CUDA events, ⊥ syncs, ⊥ per-frame log
 V33: `/offer` output limit = viewer's choice — `out-fps:0` → `send_wait` 0 ∴ ∀ published frame sent (⊥ replaced by newer one while waiting); `out-fps:n` → sends ≥ 1/n s apart; peer that never sends it → 30 (old clients unchanged, V18); limit ⊥ pads a slower pipeline (V19 holds)
+V34: per-job ref ⊥ leaks: next job w/o ref renders w/ boot ref (or none); reused proc (reset) vs fresh proc within noise floor (extends V29)
+V35: ∀ ref change ⇒ next frame uses current ref state — set/job: fresh encode; travel: `_cond_latent_cache[1]` = (current ref obj, lerp(src,tgt,t)) — AND `reference_image_is_valid=False` ∴ ref tokens recomputed; ⊥ stale latent | stale ref K/V
+V36: ref ops ⊥ change batch frame count/order (V22 holds); mid-job swap lands on next submitted frame
+V37: ref travel t monotonic 0→1 over requested frames (Ns → same clock rule as prompt travel); new `/reference` | `/reference-travel` mid-morph → cancel, restart from current blended latent
+V38: no ref op → output identical to pre-change (C18)
+V39: `--batch-only` POST /reference w/o active job → 503 (like `/prompt`), ⊥ 500; w/ job → that job only
+V40: boot `use_reference_image` false → ∀ ref op (`/reference`, `/reference-travel`, job `reference`) → 400 "reference disabled" at request ∴ ⊥ reaches worker (`reference_image_resolution` absent → KeyError, model_inference_subprocess.py:759)
+V41: batch ref ops (job ref, mid-job swap, travel start) ride `request_queue` in order (`("ref", seq, …)`), ⊥ `command_queue` ∴ applied before exactly the next frame submitted after the call returns; worker logs applied frame index
+V42: ref travel step ⇒ `reference_image_is_valid=False` every `reference_travel_refresh_every`-th frame + full execute on frame 1, every `prompt_travel_full_execute_every`-th frame & final (same stride/refresh as prompt travel) ∴ static regions reach target at t=1
+V43: travel start → one `ref:set:v` broadcast, `GET /reference` = target from start; ⊥ per-step version bumps
+V44: job `reference` > `MAX_REFERENCE_BYTES` → 413, undecodable → 400, both before job is queued
+V45: ≤1 ref change applied per rendered frame, newest wins; `ref:set` broadcast + preview PNG ≤4/s, last emitted = latest version (C26)
+V46: ref travel encodes src & tgt exactly once (VAE) per morph; ⊥ VAE work on morph steps (C24)
+V47: first `DELETE /reference` after boot ⊥ compile stall — output gap ≤1 slow frame (warm-up covers ref set → clear → set)
 
 ## §T TASKS
 id|status|task|cites
@@ -129,9 +178,24 @@ T27|x|P6 set `done` after teardown & `_active` clear (finally ordering); test: s
 T28|~|P7 exitcode in death errors; repro restart w/ `--set 'resolution={"width":1280,"height":720}'` → first job, capture child stderr; root cause → `/spec bug:`|I.error,V28
 T29|.|report: per change load / first frame / steady fps (fr 2..N) / job total 72 & 255 fr / out count / LPIPS+PSNR vs baseline / noise floor / peak VRAM|C16,V24
 T30|x|`output_rate.py` pure `parse_out_fps` + `send_wait`; `FluxRTTrack.recv` uses it; `/offer` ctrl `out-fps:`; `/healthz` `output_frames`; tests `test_output_rate.py`|V33,V19
+T31|x|exp A (no code): live pixel cross-fade A→B, 8/16 steps via repeated POST /reference @100–250 ms — done 2026-10-12: gradual look, ⊥ per-step spikes; out fps −28% @4 steps/s, −40–45% @8–10 → misses C21 travel budget ∴ stopgap; ref wording ×4 (R17); clear stall once (R20)|R11,C19,R17,R18,R19,R20
+T32|x|exp B: offline latent-lerp — encode 2 refs, fixed input, t∈{0,.25,.5,.75,1}; contact sheet vs exp A; neighbor LPIPS → go/no-go T35 → GO 2026-10-12: lerp most even (1.28 vs pixel 2.06), ⊥ ghosting; LPIPS ⊥ on box → pixel Δ used|R10,C19,R22
+T33|.|batch per-job `reference` field: route → manager → child `("ref", seq, rgb or None)` before frames; reset restores boot ref; 413/400 before queue; disabled → 400; fake-proc tests|I.api,V34,V35,V40,V41,V44,C11
+T34|.|`/reference` → active batch job under `--batch-only` (manager.set_reference, in-order IPC); live+batch both steered; 503 w/o job; test|V39,V40,V41,R13
+T35|.|ref travel engine (live; T32 = GO, default mode lerp): child `ref_travel` — encode src/tgt once, per-step lerp into `_cond_latent_cache[1]`, `reference_image_is_valid=False`, prompt-travel stride/refresh, `reference_travel_refresh_every`, cancel rules; GPU-free unit tests on fake latents|V35,V37,V42,V46,C17,C19,C24,C25,R22
+T36|.|ref travel A/B on 4090: mean fps over morph vs steady & vs prompt travel same preset; peak VRAM; quality sheet vs noise floor|C21,C14,T32
+T37|.|`/comfy/edit`: restore template or 501 + msg; test|R15
+T38|.|docs: `--set reference_image_path=<abs>` in perf-notes boot cmds + README; ship tiny sample or drop default path; strong ref wording "in the visual style of the reference image" (R17)|R16,R17
+T39|.|`POST /reference-travel` route + `StreamProcessor.start_reference_travel` (live); 400 disabled; one `ref:set` bump at start, preview = target|V37,V40,V43,C20
+T40|.|batch ref travel: `BatchJobManager.start_reference_travel` → in-order `request_queue`; fake-proc tests|V36,V41,V37
+T41|~|perf budget harness (live cases done 2026-10-12 → R23/R24; batch-job-ref case waits for T33): `perf_ab` runs on 4090 for C21 cases (ref off, ref static, hard swap, travel, batch job ref) vs current main; record today's ref-cfg VRAM baseline & enabled-idle boot time; peak VRAM via torch `max_memory_reserved` in-process, ⊥ `/healthz` (R21)|C21,C22,C27,R21,R23,R24
+T42|.|swap coalescing: ≤1 ref apply/frame (batch request_queue drains to newest ref), `ref:set` broadcast + preview PNG coalesce ≤4/s; test burst of 20 posts → 1 apply/frame, ≤4 broadcasts/s, last = latest|V45,C26
+T43|.|warm-up covers ref set → clear → set (incl. text-active variants) ∴ first DELETE /reference after boot ⊥ stall; verify on 4090: first clear gap ≤1 slow frame|V47,R20
 
 ## §B BUGS
 id|date|cause|fix
 B1|2026-07-06|gap-yield `return`ed w/ pc alive → nobody drains track; aiortc decodes regardless → queue grows ~12MB/s if paused cam resumes (caught in review, pre-merge)|V9
 B2|2026-07-08|webrtc sampled output tensor once per INPUT frame → interpolated frames dropped, out fps pinned ≈ input fps (~30) ≠ fps_interpolated ∴ scheduler `frame_counter` + `output_pump` publishes per scheduled frame|V20
 B3|2026-07-08|Ctrl+C hang w/ live WHEP/WHIP ? uvicorn default graceful shutdown waits unbounded on open connections (keep-alive /healthz polls) before lifespan runs; in-process repro exits 0.1s ∴ bounded `timeout_graceful_shutdown=3` + upfront consume-task cancel — verify on GPU box|V21
+B4|2026-10-12|`/comfy/edit` template `qwen_edit_2509.api.json` missing → every call 500|T37
+B5|2026-10-12|first `DELETE /reference` after boot stalled output 1.6 s — ref-removed variant ⊥ warmed (T31)|V47
