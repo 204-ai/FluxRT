@@ -190,7 +190,7 @@ T39|.|`POST /reference-travel` route + `StreamProcessor.start_reference_travel` 
 T40|.|batch ref travel: `BatchJobManager.start_reference_travel` → in-order `request_queue`; fake-proc tests|V36,V41,V37
 T41|~|perf budget harness (live cases done 2026-10-12 → R23/R24; batch-job-ref case waits for T33): `perf_ab` runs on 4090 for C21 cases (ref off, ref static, hard swap, travel, batch job ref) vs current main; record today's ref-cfg VRAM baseline & enabled-idle boot time; peak VRAM via torch `max_memory_reserved` in-process, ⊥ `/healthz` (R21)|C21,C22,C27,R21,R23,R24
 T42|.|swap coalescing: ≤1 ref apply/frame (batch request_queue drains to newest ref), `ref:set` broadcast + preview PNG coalesce ≤4/s; test burst of 20 posts → 1 apply/frame, ≤4 broadcasts/s, last = latest|V45,C26
-T43|.|warm-up covers ref set → clear → set (incl. text-active variants) ∴ first DELETE /reference after boot ⊥ stall; verify on 4090: first clear gap ≤1 slow frame|V47,R20
+T43|x|warm-up covers ref set → clear → set (incl. text-active variants) ∴ first DELETE /reference after boot ⊥ stall; verify on 4090: first clear gap ≤1 slow frame|V47,R20
 
 ## §B BUGS
 id|date|cause|fix
