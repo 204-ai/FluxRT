@@ -184,7 +184,7 @@ T33|.|batch per-job `reference` field: route → manager → child `("ref", seq,
 T34|.|`/reference` → active batch job under `--batch-only` (manager.set_reference, in-order IPC); live+batch both steered; 503 w/o job; test|V39,V40,V41,R13
 T35|.|ref travel engine (live; T32 = GO, default mode lerp): child `ref_travel` — encode src/tgt once, per-step lerp into `_cond_latent_cache[1]`, `reference_image_is_valid=False`, prompt-travel stride/refresh, `reference_travel_refresh_every`, cancel rules; GPU-free unit tests on fake latents|V35,V37,V42,V46,C17,C19,C24,C25,R22
 T36|.|ref travel A/B on 4090: mean fps over morph vs steady & vs prompt travel same preset; peak VRAM; quality sheet vs noise floor|C21,C14,T32
-T37|.|`/comfy/edit`: restore template or 501 + msg; test|R15
+T37|x|`/comfy/edit`: restore template or 501 + msg; test|R15
 T38|.|docs: `--set reference_image_path=<abs>` in perf-notes boot cmds + README; ship tiny sample or drop default path; strong ref wording "in the visual style of the reference image" (R17)|R16,R17
 T39|.|`POST /reference-travel` route + `StreamProcessor.start_reference_travel` (live); 400 disabled; one `ref:set` bump at start, preview = target|V37,V40,V43,C20
 T40|.|batch ref travel: `BatchJobManager.start_reference_travel` → in-order `request_queue`; fake-proc tests|V36,V41,V37

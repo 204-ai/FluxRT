@@ -63,6 +63,7 @@ QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle, gpu_stats, travel
+from fluxrt.webrtc.comfy_template import TemplateInvalid, TemplateMissing, load_edit_template
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
 from fluxrt.webrtc.stats import AverageFps, connection_pool_stats
@@ -1385,6 +1386,16 @@ async def comfy_edit(request: Request):
     if not _reference_enabled():
         raise HTTPException(status_code=400, detail="Reference image disabled")
 
+    # The template is exported per machine (gitignored). Missing → 501: the
+    # feature is not set up here. Unusable (bad JSON, renumbered nodes) → 500.
+    # Checked before the snap is uploaded to the comfy server.
+    try:
+        wf = load_edit_template(QWEN_EDIT_TEMPLATE)
+    except TemplateMissing as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except TemplateInvalid as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
     name = request.query_params.get("server", "")
     if not name or name not in comfy_servers:
         raise HTTPException(
@@ -1400,22 +1411,6 @@ async def comfy_edit(request: Request):
         raise HTTPException(status_code=400, detail="Empty body")
     if len(body) > MAX_REFERENCE_BYTES:
         raise HTTPException(status_code=413, detail="Image too large")
-
-    try:
-        with open(QWEN_EDIT_TEMPLATE, "r") as f:
-            wf = json.load(f)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Workflow template error: {exc}")
-
-    # The patch targets specific node ids from the exported graph — fail clearly
-    # if the template was re-exported/renumbered rather than KeyError-ing mid-run
-    # (after the snap was already uploaded to the comfy server).
-    for node_id in ("78", "111", "3"):
-        if node_id not in wf or "inputs" not in wf[node_id]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Workflow template missing node {node_id} — re-export qwen_edit_2509.api.json",
-            )
 
     seed = int.from_bytes(os.urandom(4), "big")
 
