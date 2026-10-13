@@ -66,7 +66,7 @@ from fluxrt.utils import crop_maximal_rectangle, gpu_stats, travel
 from fluxrt.webrtc.comfy_template import TemplateInvalid, TemplateMissing, load_edit_template
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
-from fluxrt.webrtc.stats import AverageFps, connection_pool_stats
+from fluxrt.webrtc.stats import AverageFps, NetStats, connection_pool_stats
 from fluxrt.webrtc import local_transport
 
 try:  # Windows only; --spout-in / --spout-out need it
@@ -1636,6 +1636,9 @@ async def _health():
         "connections": connection_pool_stats(
             [getattr(pc, "connectionState", "unknown") for pc in list(pcs)]
         ),
+        # bytes on the wire across every peer (in = from clients, out = to them),
+        # Mbps over the last few seconds, and RTT / loss / jitter from RTCP
+        "net": await _net_stats.read(pcs),
         "resolution": resolution,
         # what the output adds: flow-upscaler size, RIFE frames per generated frame
         "out_resolution": out_resolution,
@@ -1670,6 +1673,7 @@ async def _health():
 
 
 _average_fps = AverageFps()
+_net_stats = NetStats()
 
 
 def _perf_metrics() -> dict:
