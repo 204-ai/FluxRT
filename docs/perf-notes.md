@@ -531,4 +531,8 @@ python scripts/run_webrtc.py --config configs/config_with_reference.json --inter
 # Linux production config
 python scripts/run_webrtc.py --no-server-camera --tiny-vae --flow-upscaler --interp 1 \
   --config configs/config_with_reference.json --set int8_linear=true --set rife_cudagraphs=true
+
+# same, with your own reference image at boot (absolute path; relative paths resolve
+# from the repo root, and the config's default local_samples/reference.png is not in the repo)
+... --set reference_image_path=/abs/path/to/ref.png
 ```

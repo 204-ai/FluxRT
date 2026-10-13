@@ -42,6 +42,23 @@ Example 2: interactive paint-style app with iterative image updates.
 
 ![Interacive paint demo](https://raw.githubusercontent.com/tensorforger/tensorforger/main/assets/paint_demo.gif)
 
+### Using your own reference image
+
+Start from `configs/config_with_reference.json`. It points at `local_samples/reference.png`; `local_samples/` is gitignored, so put your own image there or pass a path at boot:
+
+```bash
+python scripts/run_webrtc.py --config configs/config_with_reference.json --set reference_image_path=/abs/path/to/ref.png
+```
+
+Relative paths resolve from the repo root. Without a readable image the server boots with the reference off and says so; set or swap one while it runs, and remove it again:
+
+```bash
+curl -X POST --data-binary @ref.png http://<server>:8765/reference
+curl -X DELETE http://<server>:8765/reference
+```
+
+Say in the prompt what to take from the reference. In a still-frame test (RTX 4090, 576×320, 2 steps), *"everything in frame in the visual style of the reference image"* moved the output about 4× more than *"everything in frame repainted with the colors, materials and textures of image 2"* (SPEC.md R17).
+
 
 ### System Requirements
 

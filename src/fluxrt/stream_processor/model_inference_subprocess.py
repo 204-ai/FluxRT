@@ -50,6 +50,7 @@ from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
 from fluxrt.utils import crop_maximal_rectangle, travel
+from fluxrt.utils.reference_image import load_reference_image
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
 from fluxrt.stream_processor.postprocessors import (
@@ -595,18 +596,16 @@ class ModelInferenceSubprocess:
         self.reference_active = True  # flipped off below unless a real image loads
         self._last_log = 0.0
         if self.config.get("use_reference_image", False):
-            path = self.config.get("reference_image_path", "")
-            image = cv2.imread(path) if path else None
             resolution = self.config.get("reference_image_resolution")
+            image, message = load_reference_image(
+                self.config.get("reference_image_path", ""),
+                resolution["width"],
+                resolution["height"],
+            )
             if image is not None:
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                image = cv2.resize(image, (resolution["width"], resolution["height"]))
                 self.reference_image = Image.fromarray(image)
             else:
-                print(
-                    "use_reference_image: no reference_image_path loaded — reference "
-                    "tokens stay off until one is set (POST /reference)."
-                )
+                print(message)
         self._set_reference_active(self.reference_image is not None)
 
         target_fps = self.config.get("target_fps", None)
@@ -988,8 +987,9 @@ class ModelInferenceSubprocess:
         frame: a full frame, nothing changed, part of the frame changed (three
         sizes, so the row count compiles dynamic), text tokens active (prompt
         change / travel) with and without image changes, then every bucketed
-        count of changed tokens ("warmup_sweep"), and all of it again with a
-        reference image when references are enabled. Leaves every cache as a
+        count of changed tokens ("warmup_sweep"), and, when references are
+        enabled, all of it again in the other reference state (with one if the
+        boot had none, without it if the boot had one). Leaves every cache as a
         fresh boot would."""
         rng = np.random.default_rng(0)
         base = rng.integers(0, 256, self.input_shared_tensor.shape, dtype=np.uint8)
@@ -1039,12 +1039,22 @@ class ModelInferenceSubprocess:
         start = time.time()
         run()
         if self.config.get("use_reference_image", False):
+            # The first pass ran in the boot state; run the other one too, so both
+            # sequence lengths are compiled before the first live frame. Booted
+            # without a reference → a pass with one (the first POST /reference is
+            # free). Booted with one → a pass without it: the first DELETE
+            # /reference used to recompile the transformer mid-session, ~2 s
+            # (B5, V47), because both passes had a reference.
             size = self.config["reference_image_resolution"]
             saved = self.reference_image
-            self.reference_image = Image.fromarray(
-                rng.integers(0, 256, (size["height"], size["width"], 3), dtype=np.uint8)
-            )
-            self._set_reference_active(True)
+            if saved is None:
+                self.reference_image = Image.fromarray(
+                    rng.integers(0, 256, (size["height"], size["width"], 3), dtype=np.uint8)
+                )
+                self._set_reference_active(True)
+            else:
+                self.reference_image = None
+                self._set_reference_active(False)
             run()
             self.reference_image = saved
             self._set_reference_active(saved is not None)
