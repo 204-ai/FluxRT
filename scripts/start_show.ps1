@@ -25,7 +25,13 @@ foreach ($a in $Rest) {
 }
 Set-Location (Split-Path $PSScriptRoot -Parent)
 . .\.venv\Scripts\activate.ps1
-$flags = @("--no-server-camera", "--tiny-vae", "--interp", "1", "--config", $Config)
+# The show machine has no internet: no STUN (the kiosk is on this machine; a STUN
+# lookup without internet delays every answer by up to 5 s), and no Hugging Face
+# requests (every model is local). FLUXRT_STUN set by hand wins.
+if (-not $env:FLUXRT_STUN) { $env:FLUXRT_STUN = 'none' }
+$env:HF_HUB_OFFLINE = '1'
+$env:HF_HUB_DISABLE_TELEMETRY = '1'
+$flags =@("--no-server-camera", "--tiny-vae", "--interp", "1", "--config", $Config)
 if ($Fast) { $flags += @("--set", "mask_dilation=1") }
 if (-not $NoUpscaler) { $flags += "--flow-upscaler" }
 "{0} preset: {1} | config {2}{3}" -f $(if ($Fast) { "FAST" } else { "PRODUCTION" }), $(if ($NoUpscaler) { "no upscaler, 576x320 out" } else { "flow upscaler, 1152x640 out" }), $Config, $(if ($extra) { " | " + ($extra -join ' ') } else { "" })

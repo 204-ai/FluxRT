@@ -64,6 +64,7 @@ QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 from fluxrt import StreamProcessor
 from fluxrt.utils import crop_maximal_rectangle, gpu_stats, travel
 from fluxrt.webrtc.comfy_template import TemplateInvalid, TemplateMissing, load_edit_template
+from fluxrt.webrtc.ice_config import stun_urls
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
 from fluxrt.webrtc.stats import AverageFps, NetStats, connection_pool_stats
@@ -638,8 +639,9 @@ app.add_middleware(
 def _rtc_config() -> RTCConfiguration:
     """ICE servers for NAT traversal so a remote client can reach this backend.
     STUN by default; add TURN via FLUXRT_TURN_URL (+ _USER/_PASS) when the backend
-    is behind NAT — host candidates alone aren't reachable across networks."""
-    servers = [RTCIceServer(urls=os.environ.get("FLUXRT_STUN", "stun:stun.l.google.com:19302"))]
+    is behind NAT — host candidates alone aren't reachable across networks.
+    FLUXRT_STUN=none: no STUN (an offline show machine, see ice_config.py)."""
+    servers = [RTCIceServer(urls=u) for u in stun_urls(os.environ.get("FLUXRT_STUN"))]
     turn = os.environ.get("FLUXRT_TURN_URL")
     if turn:
         servers.append(

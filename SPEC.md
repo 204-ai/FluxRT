@@ -48,7 +48,7 @@ reference: ref image steerable on every path — per-batch-job ref, mid-render s
 - api: `POST /whep?w=<px>&fps=<n>` — per-session output width (aspect kept, even-rounded, clamp [64, native]) & frame rate (clamp [1, 60], default 30)
 - api: `/offer` ctrl `out-fps:<n>` — output frame-rate limit of this peer's own track, live; `0` = no limit (every published frame); whole number 0..240 → `ack:out-fps:<n>` | `err:out-fps`; never sent → 30; ⊥ broadcast
 - api: `/healthz` `output_frames` — published output frames since boot (interpolated incl.)
-- env: reuse `FLUXRT_STUN` / `FLUXRT_TURN_URL(+_USER/_PASS)` via `_rtc_config()`
+- env: reuse `FLUXRT_STUN` / `FLUXRT_TURN_URL(+_USER/_PASS)` via `_rtc_config()`; `FLUXRT_STUN=none|off|""` → ⊥ STUN (`ice_config.stun_urls`); `start_show.ps1` sets `none` + `HF_HUB_OFFLINE=1` (show machine ⊥ internet)
 - api: `POST /whip` (Content-Type `application/sdp`, offer w/ video) → 201 + `Location: /whip/<uuid>` + answer SDP; 415/400 same as WHEP; 503 when `sp is None` (like `/offer`)
 - api: `DELETE /whip/<uuid>` → 200 (cancels consume task → ownership released via existing finally) | 404; `PATCH` → 405
 - page: `GET /webrtc-test` → `scripts/webrtc-test.html` — unified test page, URL standard w/ sd-webrtc: mode whip+whep (2 PCs) | sendrecv `/offer` (1 PC, realtime-client style); view side|split|blend + mix; prompt bar → `POST /prompt`; capture @ healthz `resolution`; legacy `/test` stays (C7)
