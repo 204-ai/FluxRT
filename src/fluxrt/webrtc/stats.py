@@ -109,7 +109,11 @@ class NetStats:
         self.samples: list[tuple[float, int, int]] = []
 
     async def read(self, pcs) -> dict:
-        conns = list(pcs)
+        # Local-transport clients (SocketPeer) share the pool but have no
+        # getStats(): their traffic is in /healthz `local_clients`. Calling it
+        # anyway raised before gather and answered every /healthz with a 500
+        # while the show kiosk was connected.
+        conns = [pc for pc in pcs if hasattr(pc, "getStats")]
         reports = await asyncio.gather(*(pc.getStats() for pc in conns), return_exceptions=True)
         per: dict[int, dict] = {}
         for pc, report in zip(conns, reports):
