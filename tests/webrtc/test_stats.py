@@ -149,3 +149,14 @@ def test_read_gathers_every_peer_and_keeps_a_failing_one():
     assert s["bytes_in"] == 1_500
     b.fail, b.report = False, _report(600, 600)
     assert asyncio.run(n.read({a, b}))["bytes_in"] == 1_600
+
+
+def test_read_skips_local_transport_peers():
+    # The show kiosk joins the pool as a SocketPeer (ws /ws/local), which has no
+    # getStats(): /healthz must still answer, and count only the WebRTC peers.
+    from fluxrt.webrtc.local_transport import SocketPeer
+
+    n = NetStats(window=0.0)
+    s = asyncio.run(n.read({_Pc(_report(1_000, 400)), SocketPeer(websocket=None)}))
+    assert (s["bytes_in"], s["bytes_out"]) == (1_000, 400)
+    assert asyncio.run(n.read({SocketPeer(websocket=None)}))["bytes_in"] == 1_000
