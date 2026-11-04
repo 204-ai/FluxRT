@@ -4,9 +4,10 @@ aiortc's Vp8Encoder hard-codes options chosen for camera video. One of them
 costs time and quality on FluxRT's output: `noise-sensitivity: 4`, libvpx's
 temporal denoiser. It filters sensor noise out of the source before encoding;
 a generated frame has none, so it only smears detail. Measured on photographic
-content with camera motion at equal bitrate (scripts/perf_webrtc.py encoder):
-1152x640 / 8 Mbps 17.2 -> 15.4 ms per frame and 44.4 -> 45.6 dB PSNR;
-576x320 / 8 Mbps 6.3 -> 5.6 ms and 41.5 -> 43.2 dB.
+content with camera motion at equal bitrate (scripts/perf_webrtc.py stages
+--only encoder): +0.8 to +2.5 dB PSNR, and faster in every run (one run:
+1152x640 / 8 Mbps 17.2 -> 15.4 ms per frame, 44.4 -> 45.6 dB; timings on the
+test VM move ~15% between runs). docs/perf-notes.md has the table.
 
 Environment (read once at install):
   FLUXRT_VP8_DENOISE   libvpx noise-sensitivity, 0 (default here) .. 6; aiortc used 4
