@@ -930,7 +930,9 @@ class ModelInferenceSubprocess:
         the CPU float math and with one pinned upload instead of two pageable
         ones. The pinned buffer is free again once the previous frame's output
         download (a sync) has returned."""
-        np.copyto(self.input_pinned.numpy(), self.input_shared_tensor.array)
+        # seqlock read: never half of one input frame and half of the next
+        # (the server writes the input while this process reads it)
+        self.input_shared_tensor.read_into(self.input_pinned.numpy())
         frame = self.input_pinned.to(self.device, non_blocking=True)
         rgb = frame.flip(-1).permute(2, 0, 1).unsqueeze(0)  # BGR HWC -> RGB CHW
         return self.input_lut[rgb.long()]
@@ -1033,7 +1035,7 @@ class ModelInferenceSubprocess:
 
         def run():
             for frame in frames():
-                np.copyto(self.input_shared_tensor.array, frame)
+                self.input_shared_tensor.copy_from(frame)
                 self.step_live()
 
         start = time.time()
