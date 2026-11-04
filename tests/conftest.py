@@ -16,3 +16,11 @@ if "fluxrt" not in sys.modules:
     _pkg = types.ModuleType("fluxrt")
     _pkg.__path__ = [os.path.join(_SRC, "fluxrt")]
     sys.modules["fluxrt"] = _pkg
+
+# Same for fluxrt.stream_processor, whose __init__ imports the torch-side
+# StreamProcessor: its torch-free modules (the output scheduler) load from
+# their real files.
+if "fluxrt.stream_processor" not in sys.modules:
+    _sp = types.ModuleType("fluxrt.stream_processor")
+    _sp.__path__ = [os.path.join(_SRC, "fluxrt", "stream_processor")]
+    sys.modules["fluxrt.stream_processor"] = _sp
