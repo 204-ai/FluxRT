@@ -574,6 +574,7 @@ class FluxRTTrack(VideoStreamTrack):
         self._last_send = time.time()
 
         if publisher.i420 and out.height % 2 == 0 and out.width % 2 == 0:
+            publisher.note_i420_use()
             frame = out.video_frame(self._size)
         else:
             rgb = out.rgb()

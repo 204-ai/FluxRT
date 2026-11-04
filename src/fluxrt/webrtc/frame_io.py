@@ -165,13 +165,18 @@ class FramePublisher:
     Consumers wait for a version newer than the one they have instead of
     polling: publish() wakes them. With `i420`, publish() converts the frame
     to I420 in the publishing thread (the output pump), before any track
-    asks for it."""
+    asks for it, while a track has used I420 in the last I420_IDLE_S seconds
+    (a show on the local transport alone has no WebRTC viewer to convert
+    for). A track's first frame after that converts it on first use."""
+
+    I420_IDLE_S = 2.0
 
     def __init__(self, i420: bool = True):
         self.i420 = i420
         # also prepare RGB in publish() (the local transport, Spout): it
         # would otherwise be converted on first use, on the event loop
         self.want_rgb = False
+        self._i420_used = float("-inf")  # monotonic time a track last used I420
         self._converter = I420Converter()
         self._cond = threading.Condition()
         self._latest: Optional[OutputFrame] = None
@@ -185,14 +190,21 @@ class FramePublisher:
     def latest(self) -> Optional[OutputFrame]:
         return self._latest
 
+    def note_i420_use(self) -> None:
+        """A track is sending I420: convert eagerly in publish() for a while."""
+        self._i420_used = time.monotonic()
+
     def publish(self, bgr: np.ndarray) -> OutputFrame:
         """Publish an output frame. `bgr` must not be written afterwards
         (pass a fresh copy, e.g. SharedTensor.to_numpy())."""
         frame = OutputFrame(0, bgr)
-        i420 = self.i420 and bgr.shape[0] % 2 == 0 and bgr.shape[1] % 2 == 0
-        if i420:
-            frame.i420(self._converter)
-        if self.want_rgb or not i420:  # rgb24 tracks, local transport, Spout
+        even = bgr.shape[0] % 2 == 0 and bgr.shape[1] % 2 == 0
+        if self.i420 and even:
+            if time.monotonic() - self._i420_used < self.I420_IDLE_S:
+                frame.i420(self._converter)
+            if self.want_rgb:  # local transport, Spout
+                frame.rgb()
+        else:  # rgb24 tracks (egress_i420 off, odd sizes)
             frame.rgb()
         with self._cond:
             frame.version = self._version + 1

@@ -124,15 +124,23 @@ def test_output_frame_derives_and_caches_its_forms():
 
 
 # ── egress: publisher ─────────────────────────────────────────────────────────
-def test_publish_converts_eagerly_and_bumps_the_version():
+def test_publish_converts_eagerly_while_a_track_uses_i420():
     pub = frame_io.FramePublisher(i420=True)
     assert pub.latest() is None and pub.version == 0
+    idle = pub.publish(picture(H, W))  # no WebRTC viewer: nothing to convert for
+    assert idle.version == 1 and pub.version == 1 and idle._i420 is None and idle._rgb is None
+    assert idle.video_frame().format.name == "yuv420p"  # converted on first use instead
+    pub.note_i420_use()
     f = pub.publish(picture(H, W))
-    assert f.version == 1 and pub.version == 1 and f._i420 is not None
+    assert f.version == 2 and f._i420 is not None
+    pub._i420_used -= pub.I420_IDLE_S  # the last track went away
+    assert pub.publish(picture(H, W))._i420 is None
     plain = frame_io.FramePublisher(i420=False).publish(picture(H, W))
     assert plain._i420 is None and plain._rgb is not None
     both = frame_io.FramePublisher(i420=True)
     both.want_rgb = True
+    assert both.publish(picture(H, W))._rgb is not None  # local transport alone: RGB only
+    both.note_i420_use()
     f = both.publish(picture(H, W))
     assert f._i420 is not None and f._rgb is not None
 

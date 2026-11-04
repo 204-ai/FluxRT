@@ -509,7 +509,9 @@ copied it again into an rgb24 `av.VideoFrame` on the event loop.
 Now (`fluxrt/webrtc/frame_io.py`, `"egress_i420": true`, the default) the
 output pump reads the frame once (seqlock read, below), converts it to I420
 once for every viewer, and each track hands its encoder a yuv420p frame, so
-aiortc skips its conversion. Per output frame, shared memory to the encoder's
+aiortc skips its conversion. The pump converts only while a WebRTC track has used
+I420 in the last 2 s: a show on the local transport alone (the laptop's
+kiosk) has no viewer to convert for and does no I420 work. Per output frame, shared memory to the encoder's
 input (`perf_webrtc.py stages`):
 
 | Output | Viewers | Old: copy, BGR->RGB, rgb24 frame, encoder's swscale | New: seqlock copy, I420 once, yuv420p frame | |
