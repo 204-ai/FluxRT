@@ -93,6 +93,16 @@ Quality-neutral keys (on by default, kept as toggles for A/B):
 | `compile_upscaler` | `true` | Compile the flow upscaler's UNet (level 1) |
 | `tiny_vae_channels_last` | `true` | TAEF2 in NHWC memory layout (level 1) |
 | `stage_cudagraphs` | `true` | VAE encoder / decoder and upscaler UNet replayed from CUDA graphs (level 0) |
+| `egress_i420` | `true` | WebRTC output converted to I420 once per frame for every viewer (box-filtered chroma) instead of by aiortc per viewer; `false`: rgb24 frames as before |
+
+WebRTC server environment (read at start, see "WebRTC ingress and egress"):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `FLUXRT_JITTER_MARKER` | `1` | Inbound video decoded on its last packet (RTP marker); `0`: aiortc's buffer, one frame interval later |
+| `FLUXRT_VP8_DENOISE` | `0` | libvpx noise-sensitivity; aiortc used `4` (the temporal denoiser) |
+| `FLUXRT_VP8_CPU_USED` | `-6` | libvpx speed; `-10`: 6-18% faster, -1.4 to -1.6 dB at equal bitrate |
+| `FLUXRT_VP8_THREADS` | `0` | encoder threads, `0` = aiortc's choice by frame size |
 
 Opt-in, level 1, needs extra packages:
 
@@ -449,6 +459,278 @@ py-spy on the live server (`record --nonblocking`, read-only):
 The GPU's power limit sat at 92 W of 110 W: the 15 W Dynamic Boost goes to
 the GPU only while the CPU is idle, and about six cores were busy.
 
+## WebRTC ingress and egress (CPU side, November 2026)
+
+Everything between a peer's video and the model's input shared memory, and
+between the output shared memory and every viewer's encoder. Measured without
+a GPU (4-core cloud VM, Python 3.13, aiortc 1.15, PyAV 17.1, OpenCV 5.0):
+the model is replaced by a stub process; everything else is the real code.
+
+### How to measure
+
+`scripts/perf_webrtc.py`:
+
+```bash
+python scripts/perf_webrtc.py stages                       # per-stage costs, old vs new, in-process
+git worktree add ../fluxrt-main main                       # the code to compare against
+python scripts/perf_webrtc.py loopback --repo ../fluxrt-main --label old --out runs/old.json
+python scripts/perf_webrtc.py loopback --repo . --label new --out runs/new.json
+python scripts/perf_webrtc.py compare runs/old.json runs/new.json
+```
+
+`loopback` starts the server of the given checkout (its `run_webrtc` app,
+`StreamProcessor` shared memory and output scheduler, aiortc encoders) with a
+stub in place of `ModelInferenceSubprocess`: it reads the newest input frame
+the way `condition_from_input` does, sleeps a frame time (the GPU's share),
+upscales 2x when the flow upscaler is configured, blends RIFE-style
+in-betweens, stamps its frame counter and the in-between index into the
+picture and hands the pack over like `sync_fps_and_send`. A client process
+publishes a 30 fps camera (photographs panning and zooming) whose frames carry
+a Gray-coded id, lifts the 30 fps cap with `out-fps:0`, and reads both stamps
+back from what it receives: glass-to-glass latency of generated frames, how
+many generated frames reached it, output fps, keyframes. psutil measures the
+CPU of the server process, the scheduler and the stub over the same window.
+`--preset production|fast`, `--viewers N` (WHEP viewers besides the /offer
+peer), `--input-size WxH`, `--input-fps N`, `--set KEY=VALUE` (e.g. the stub's
+`bench_frame_pattern`, frame-time multipliers; the default varies 0.45-1.4x
+like the spatial cache does).
+
+### Egress: one conversion per frame instead of a swscale context per frame per viewer
+
+aiortc's encoders take whatever the track yields and convert it to yuv420p
+themselves (`frame.reformat(format="yuv420p")` in `Vp8Encoder.encode`, on the
+encoder's executor thread). PyAV's `reformat` builds a new swscale context
+for every call, and RGB -> YUV is swscale's expensive initialisation (filter
+tables): 2.5 ms at 576x320 and 5.4 ms at 1152x640, per frame, per viewer;
+the conversion itself on a kept context is 0.4 / 1.2 ms. The old path also
+copied the frame out of shared memory, converted BGR -> RGB in the pump, and
+copied it again into an rgb24 `av.VideoFrame` on the event loop.
+
+Now (`fluxrt/webrtc/frame_io.py`, `"egress_i420": true`, the default) the
+output pump reads the frame once (seqlock read, below), converts it to I420
+once for every viewer, and each track hands its encoder a yuv420p frame, so
+aiortc skips its conversion. Per output frame, shared memory to the encoder's
+input (`perf_webrtc.py stages`):
+
+| Output | Viewers | Old: copy, BGR->RGB, rgb24 frame, encoder's swscale | New: seqlock copy, I420 once, yuv420p frame | |
+|---|---:|---:|---:|---:|
+| 576x320 | 1 | 2.71 ms | 0.66 ms | 4.1x |
+| 576x320 | 3 | 8.27 ms | 1.06 ms | 7.8x |
+| 1152x640 | 1 | 7.09 ms | 2.76 ms | 2.6x |
+| 1152x640 | 3 | 17.98 ms | 3.95 ms | 4.6x |
+
+The conversion is OpenCV's fixed-point BT.601 limited range (what VP8 / H.264
+receivers assume, swscale's default) for luma, with chroma taken as the mean
+of each 2x2 block: an exact 2x area downscale, nearest-upscaled back so that
+whichever pixel the conversion samples gives the block mean. OpenCV's own
+`BGR2YUV_I420` point-samples chroma (colour fringes up to ~90 levels on hard
+edges, chroma PSNR 45 dB against a float reference); swscale filters it
+(within 9 levels, 53.7-55.1 dB); this is within 1 level (57.9 dB). `cv2.transform`
+for the chroma rows was correct too but 0.76 ms for two quarter-size planes
+(OpenCV's float path for 8-bit); the block trick costs 0.5 / 1.0 ms in all.
+
+WHEP viewers with `?w=` get the I420 resized plane by plane, once per frame
+per width (`OutputFrame.i420_at`), instead of an RGB resize per viewer on the
+event loop.
+
+### VP8: the denoiser off
+
+aiortc opens libvpx with `noise-sensitivity: 4`, the temporal denoiser, which
+filters sensor noise out of the source before encoding. Generated frames have
+none, so it only costs time and smears detail. `fluxrt/webrtc/vp8_encoder.py`
+routes video/vp8 senders to a copy of aiortc's encoder with that one option
+changed (everything else is aiortc's: rate control, keyframes,
+packetization). Photographic content with camera motion, equal target
+bitrate (`perf_webrtc.py stages --only encoder`):
+
+| Frame | Bitrate | Settings | ms / frame | Mbps | PSNR |
+|---|---:|---|---:|---:|---:|
+| 576x320 @ 60 | 8 Mbps | aiortc (denoiser 4) | 9.10 | 7.78 | 41.75 dB |
+| | | **denoiser 0 (default now)** | 5.63 | 7.74 | 44.29 dB |
+| | | denoiser 0, `cpu-used -10` | 4.63 | 7.75 | 42.92 dB |
+| 1152x640 @ 24 | 8 Mbps | aiortc (denoiser 4) | 16.90 | 7.85 | 44.73 dB |
+| | | **denoiser 0** | 14.13 | 7.85 | 46.22 dB |
+| | | denoiser 0, `cpu-used -10` | 13.25 | 7.86 | 44.85 dB |
+| 1152x640 @ 24 | 3 Mbps | aiortc (denoiser 4) | 11.90 | 2.95 | 41.66 dB |
+| | | **denoiser 0** | 10.76 | 2.95 | 42.43 dB |
+| | | denoiser 0, `cpu-used -10` | 9.48 | 2.94 | 40.86 dB |
+
+Median of 130 frames per row, single runs: timings move by ~15% between runs
+on this VM (an earlier run: 6.3 -> 5.6 ms at 576x320, 17.2 -> 15.4 ms at
+1152x640); the PSNR is deterministic.
+
+`cpu-used -10` buys another 6-18% at -1.4 to -1.6 dB: opt-in
+(`FLUXRT_VP8_CPU_USED=-10`). `FLUXRT_VP8_DENOISE=4` restores aiortc's
+setting; `FLUXRT_VP8_THREADS` overrides aiortc's thread count by frame size.
+
+Bitrate changes: libvpx ignores a new `bit_rate` once the codec is open
+(measured: 1.99 Mbps before and 1.97 after setting 8 Mbps), so aiortc's
+rebuild-on-a-10%-change (a new keyframe each time) is the only way to follow
+REMB; kept. No rebuild happened in the measured window of any loopback run
+(aiortc's own REMB as the receiver); Chrome's estimate moves more and was not
+measured here.
+
+### Output scheduler: generated frames hidden when a fast frame follows a slow one
+
+The scheduler paced a pack's frames over the *previous* frame's processing
+time, read `batch[i]` straight from shared memory while doing so, and cleared
+`pack_is_ready` only after pacing. When the next frame came in less than half
+that time (the spatial cache makes consecutive frames differ 2x easily), the
+model had already overwritten the batch: the newer pack's generated frame went
+out in place of the older one, and the newer pack's flag was then cleared, so
+it was never paced. Replayed in-process with frame times alternating 100 / 40
+ms: generated frames 2, 4 and 6 of 1-6 shown, none of the in-betweens after a
+slow frame.
+
+Now (`OutputSchedulerSubprocess.step`) the pack is copied out of shared memory
+(seqlock read) after clearing the flag, every published frame is held for one
+interval of the pack being shown, and a pack arriving early drops the old
+pack's in-betweens not shown yet but keeps its generated frame first in line;
+the hold switches to the new pack's interval. Same alternation: every
+generated frame and every in-between shown. Steady frame times give the same
+sequence as before (tests/test_output_scheduler.py).
+
+### Shared memory: no torn frames
+
+Every shared tensor (input, output batch, output frame) was read while another
+process could be writing it: a reader got the top of one frame and the bottom
+of the next. Measured with 1152x640 frames, a writer in another process and a
+reader in this one (`perf_webrtc.py stages --only shm`):
+
+| Writer | Torn reads, old (unversioned) | Torn reads, seqlock |
+|---|---:|---:|
+| one frame every 1/60 s | 24 of 4441 (0.54%) | 0 of 4588 |
+| one frame every 1 ms | 299 of 3554 (8.4%) | 0 of 2249 |
+
+`SharedTensor` now carries a 64-byte trailer after the payload (magic number
+and a sequence counter: a seqlock). Writers (`copy_from`, `writing()`) make
+the counter odd, copy, make it even; readers (`to_numpy`, `read_into`) copy
+between two reads of it and retry when it changed. Readers never block the
+writer. The payload stays at offset 0, so code that maps a segment by name
+with the old shape still works; tensors attached by name find the trailer
+themselves, so `get_output_tensor().to_numpy()` in the GUI and demos is
+tear-free without changes. A reader gives up after 20 ms or 16 overlapped
+copies and says so (returns False): a writer that writes back to back with no
+pause can starve it, which none of FluxRT's writers do (one frame per frame
+time, ~2% duty cycle). The input is converted into a per-thread buffer and
+copied in one 0.05 ms write, so the model's read never waits out a
+conversion. Ordering relies on x86-64's store / load order (and the fenced
+non-temporal stores of glibc's / MSVC's memcpy).
+
+### Inbound video: decoded on its last packet
+
+aiortc's `JitterBuffer` declares a video frame complete only when a packet of
+the next frame arrives (a different RTP timestamp); it does not look at the
+RTP marker bit that VP8 (RFC 7741) and H.264 (RFC 6184) senders set on a
+frame's last packet (browsers do, aiortc's sender does). Every input frame
+from a peer therefore waited one frame interval before it was decoded: 33 ms
+from a 30 fps camera, ~60 ms from the kiosk, which sends at ~1.5x the
+generated fps. `fluxrt/webrtc/jitter.py` also completes a frame when the
+contiguous run of packets ends in a marker packet: the decoder gets the same
+bytes (tests/webrtc/test_jitter.py compares them with aiortc's buffer), a
+gap still holds the frame until the retransmission, and a lost marker packet
+falls back to aiortc's rule. `FLUXRT_JITTER_MARKER=0` keeps aiortc's buffer.
+(The loopback client uses the marker-aware buffer for every checkout, as a
+browser's receiver would.)
+
+### Ingress: kept bit-identical
+
+The input path is unchanged in output: aiortc's frame converted to BGR at
+full size (swscale), crop_maximal_rectangle's crop and filter, now written
+into a per-thread buffer (no intermediate frame) and copied into shared
+memory in one short seqlock write (`IngressConverter`). The local transport's
+RGBX frames are cropped and resized before the channel swap. Per frame
+(`perf_webrtc.py stages --only ingress`):
+
+| Input | Old: to BGR, crop_maximal_rectangle, copy | New: to BGR, crop + resize into a buffer, seqlock copy | Same output |
+|---|---:|---:|---|
+| 576x320 | 0.39 ms | 0.30 ms | bit-identical |
+| 640x360 | 2.86 ms | 2.79 ms | bit-identical |
+| 1280x720 | 4.61 ms | 4.84 ms | bit-identical |
+| 1920x1080 | 8.84 ms | 7.20 ms | bit-identical |
+
+(Within run-to-run noise but for the saved copy: the time is the BGR
+conversion and OpenCV's area filter, both kept.)
+
+Faster ways to scale a 720p / 1080p yuv420p frame were measured and dropped:
+against the ideal (the original picture cropped and area-resized before YUV
+coding), swscale scaling (area, bicubic, gauss, lanczos; cropped planes, exact
+geometry) and OpenCV area on the Y/U/V planes were 1.5-3x faster but 2-10 dB
+further from the ideal at 720p and 1080p (aliasing in swscale's filters,
+half-resolution chroma on the planes), and scaling the whole frame then
+cropping shifted the picture by up to 0.44 px. At 640x360 swscale's area was
+as good as the current path and 2x faster; not worth a second code path for
+a size browsers rarely send (Chrome delivers the requested 576x320).
+
+### End to end (loopback)
+
+`perf_webrtc.py loopback`, 30 s measured after 6 s, old = `main` before this
+work, new = this branch, every row the mean of two runs (old and new
+interleaved; the two runs agreed within 1-12 ms and 0.03 cores). Production:
+576x320 generated, flow upscaler (1152x640 out), RIFE x2, stub frame 80 ms;
+fast: 576x320 out, 33 ms. Camera 640x360 at 30 fps unless noted. Latency is
+camera frame sent -> the generated frame made from it received, split into
+ingress (sent -> the model read it), the model (the stub's sleep and work)
+and egress (pack written -> received; includes the half-frame RIFE pacing).
+
+| Scenario | | Latency p50 | p95 | Ingress | Egress | Server CPU (cores) | Output fps | Generated frames shown |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| A production, steady frame times | old | 276 ms | 321 ms | 75 ms | 113 ms | 1.56 | 21.9 | 98.9% |
+| | new | **235 ms** | **273 ms** | 42 ms | 103 ms | **1.47** | 22.1 | 99.5% |
+| B as A, 3 viewers (CPU saturated) | old | 427 ms | 523 ms | 119 ms | 206 ms | 2.53 | 11.1 | 46% |
+| | new | 403 ms | 509 ms | 99 ms | 205 ms | 2.60 | **13.4** | **66%** |
+| C production, frame times 0.45-1.4x | old | 190 ms | 276 ms | 68 ms | 68 ms | 1.13 | 13.8 | 54% |
+| | new | 230 ms | 281 ms | 39 ms | 109 ms | 1.50 | **24.0** | **94%** |
+| D fast, steady | old | 156 ms | 180 ms | 70 ms | 49 ms | 1.33 | 53.9 | 95.8% |
+| | new | **113 ms** | **135 ms** | 36 ms | 41 ms | **1.22** | 56.0 | 99.8% |
+| E as A, camera at 15 fps (the kiosk) | old | 326 ms | 367 ms | 128 ms | 109 ms | 1.44 | 22.3 | 99.9% |
+| | new | **239 ms** | **277 ms** | 58 ms | 92 ms | **1.21** | 22.5 | 99.9% |
+
+- Ingress drops by one camera frame interval (33 ms at 30 fps, 70 ms at 15):
+  the jitter buffer. What is left is mostly waiting for the model's next
+  read (half a frame time on average).
+- Egress drops 8-17 ms: the conversion and the denoiser on the encode path,
+  and tracks woken by the publisher instead of a 5 ms poll.
+- Server CPU drops 6-16% for the same frames sent (A, D, E). The server also
+  decodes the 30 fps camera, which did not change; at 15 fps (E) the share of
+  the egress is larger and so is the drop. With three viewers the 4-core
+  machine is saturated in both runs (client included): the new code turns
+  the CPU into 21% more frames per viewer instead.
+- C is the scheduler fix. The old code showed 54% of the generated frames:
+  the ones it lost are the slow frames' (their pack overwritten by the next,
+  faster one), so its latency and CPU are averaged over the cheaper,
+  fresher half of the frames and are not comparable. The new code shows 94%
+  (the rest are frames whose next frame came in before their in-between
+  was due; the generated frame is still shown) and encodes 74% more frames.
+- The scheduler process costs 0.07 cores instead of 0.04 (it polls in 1 ms
+  steps while holding a frame, so a newer pack is seen at once, and copies
+  each pack out of shared memory).
+- No keyframes beyond the first in any measured window: aiortc's bitrate
+  rebuilds did not trigger with aiortc as the receiver.
+
+### Not done (needs a GPU, or a design decision)
+
+- **Download straight into shared memory.** `interpolate_frames` downloads
+  the pack into pageable memory (`.cpu()`) and `send_frames` copies it into
+  the batch shared memory: two copies of 4.4 MB per frame at 1152x640 x2, and
+  a pageable transfer (staged by the driver). Registering the batch segment
+  with `cudaHostRegister` (`torch.cuda.cudart().cudaHostRegister(ptr, size,
+  0)`) makes it pinned: one DMA into shared memory, inside the seqlock write.
+  Not measured (no GPU here).
+- **I420 on the GPU.** Emitting I420 instead of BGR halves the download and
+  every shared-memory copy (1.5 instead of 3 bytes per pixel) and removes the
+  CPU conversion; it changes the output tensor that GUI / demos read, so it
+  would be a second output.
+- **One encode per resolution for all viewers.** aiortc encodes per viewer;
+  its sender also accepts pre-encoded `av.Packet`s from a track, so one VP8
+  encoder could feed every viewer at a size. N viewers would cost one encode,
+  but share one bitrate and each viewer's keyframe request (PLI) would reach
+  all of them.
+- **Event-driven pump and scheduler.** The output pump polls the frame
+  counter every 2 ms and the scheduler polls for packs every 0.5 ms (the
+  tracks now wait on the publisher). A cross-process event would save about
+  1 ms of average latency.
+
 ## Tried and dropped
 
 | Idea | Result |
@@ -465,6 +747,10 @@ the GPU only while the CPU is idle, and about six cores were busy.
 | `prompt_travel_refresh=rolling` as default | Visible dither mid-travel |
 | Host-side masks | No gain on the laptop (67.7 against 68.0 ms); kept, harmless |
 | Hybrid TAEF2 decoder without `image_processor.postprocess` | Garbled output (LPIPS 0.48); a bug, fixed |
+| Scaling a 720p / 1080p WebRTC input in swscale or on its Y/U/V planes | 1.5-3x faster, 2-10 dB further from the ideal resize than the current path; scale-then-crop shifted the picture up to 0.44 px |
+| OpenCV's `BGR2YUV_I420` as is for the WebRTC output | Point-sampled chroma: colour fringes up to ~90 levels on edges |
+| VP8 `cpu-used -10` / `-16` by default | 6-18% / ~35% faster encode, -1.4 / -5 to -8 dB at equal bitrate; `-10` kept as `FLUXRT_VP8_CPU_USED` |
+| Changing the VP8 bitrate without a new codec | libvpx ignores `bit_rate` once open (1.99 Mbps before and after asking for 8) |
 
 ## Wrong turns
 
@@ -491,6 +777,10 @@ Worth keeping, because each looked convincing at the time:
 
 ## Open
 
+- WebRTC: the GPU-side items under "WebRTC ingress and egress / Not done"
+  (pinned download straight into shared memory, I420 on the GPU), one encode
+  per resolution for all viewers, and a loopback run on the show laptop with
+  a browser instead of the aiortc client.
 - TensorRT for the full VAE; the frame loop on a non-default CUDA stream.
 - Whether `conv_backend` should become `"auto"` (TensorRT when installed).
 - One benchmark from an interactive desktop session (all runs so far came
