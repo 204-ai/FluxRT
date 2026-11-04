@@ -573,6 +573,32 @@ def _cpu_seconds(pids: dict) -> dict:
     return out
 
 
+def _stop_tree(server) -> None:
+    """Stop the bench server and every process it started. On Windows
+    terminate() is a hard kill: the server's children (the stub, the
+    scheduler) would keep running and load the CPU of the next run."""
+    import subprocess
+
+    import psutil
+
+    try:
+        children = psutil.Process(server.pid).children(recursive=True)
+    except psutil.Error:
+        children = []
+    server.terminate()  # Linux: SIGTERM, uvicorn shuts down and stops its children
+    try:
+        server.wait(20)
+    except subprocess.TimeoutExpired:
+        server.kill()
+    _, alive = psutil.wait_procs(children, timeout=5)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.Error:
+            pass
+    psutil.wait_procs(alive, timeout=5)
+
+
 def _unwrap(values, modulus: int):
     """Counters that wrap at `modulus`, in arrival order, made monotonic."""
     out, offset, last = [], 0, None
@@ -671,11 +697,7 @@ def cmd_loopback(args) -> None:
         if cpu1 is None or client.returncode != 0:
             raise SystemExit(f"client failed (exit {client.returncode})")
     finally:
-        server.terminate()
-        try:
-            server.wait(20)
-        except subprocess.TimeoutExpired:
-            server.kill()
+        _stop_tree(server)
     raw = json.loads((tmp / "client.json").read_text())
     trace = tmp / "trace.jsonl"
     raw["trace"] = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
