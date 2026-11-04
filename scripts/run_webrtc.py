@@ -62,13 +62,14 @@ WORKFLOWS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_
 QWEN_EDIT_TEMPLATE = os.path.join(WORKFLOWS_DIR, "qwen_edit_2509.api.json")
 
 from fluxrt import StreamProcessor
-from fluxrt.utils import crop_maximal_rectangle, gpu_stats, travel
+from fluxrt.utils import gpu_stats, travel
 from fluxrt.webrtc.comfy_template import TemplateInvalid, TemplateMissing, load_edit_template
+from fluxrt.webrtc.frame_io import FramePublisher, IngressConverter, OutputFrame
 from fluxrt.webrtc.ice_config import stun_urls
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
 from fluxrt.webrtc.stats import AverageFps, NetStats, connection_pool_stats
-from fluxrt.webrtc import local_transport
+from fluxrt.webrtc import jitter, local_transport, vp8_encoder
 
 try:  # Windows only; --spout-in / --spout-out need it
     import SpoutGL
@@ -112,6 +113,19 @@ for _codec_mod in (_aiortc_vpx, _aiortc_h264):
     _codec_mod.MIN_BITRATE = max(int(_codec_mod.MIN_BITRATE), min(EGRESS_MIN_BITRATE, _codec_mod.MAX_BITRATE))
     _codec_mod.DEFAULT_BITRATE = max(int(_codec_mod.DEFAULT_BITRATE), min(EGRESS_START_BITRATE, _codec_mod.MAX_BITRATE))
 
+# libvpx options for generated video (fluxrt/webrtc/vp8_encoder.py): the
+# temporal denoiser aiortc enables for camera video is off — faster and
+# sharper on frames without sensor noise. FLUXRT_VP8_DENOISE / _CPU_USED /
+# _THREADS override.
+vp8_encoder.install()
+
+# Inbound video: a frame goes to the decoder with its last packet (the RTP
+# marker bit), not when the next frame's first packet arrives — aiortc's
+# buffer held every input frame one frame interval (fluxrt/webrtc/jitter.py).
+# FLUXRT_JITTER_MARKER=0 keeps aiortc's buffer.
+if os.environ.get("FLUXRT_JITTER_MARKER", "1") != "0":
+    jitter.install()
+
 
 def _prefer_codec(pc: RTCPeerConnection, sender) -> None:
     """Reorder (not filter) this sender's codec preferences so EGRESS_CODEC negotiates
@@ -136,12 +150,19 @@ output_tensor = None
 resolution = None
 out_resolution = None
 
-latest_rgb: Optional[np.ndarray] = None
-output_version = 0   # bumped per processed frame (under latest_lock) — output tracks gate on it
-# Latest pipeline INPUT frame (cropped BGR), so a recvonly/listening client can
-# preview what's being sent in. Guarded by latest_lock alongside latest_rgb.
-latest_input_bgr: Optional[np.ndarray] = None
-latest_lock = threading.Lock()
+# The newest output frame and its version, for every consumer (output tracks,
+# the local transport, the Spout sender). They wait on it for a newer version
+# instead of polling. With "egress_i420" (default on) each frame is converted
+# to I420 once, in the output pump's thread, and tracks hand the encoder
+# yuv420p frames: aiortc otherwise converts every frame for every viewer with
+# a freshly built swscale context (fluxrt/webrtc/frame_io.py).
+publisher = FramePublisher(i420=True)
+# Inbound frame -> the model's input (crop_maximal_rectangle's crop, written
+# into the input shared memory); set in main() from the resolution.
+ingress: Optional[IngressConverter] = None
+# Whether any input frame was pushed (GET /input.jpg previews the input
+# shared memory then).
+input_seen = False
 producer_stop = threading.Event()
 
 # --spout-in / --spout-out: sender names, and the size of the Spout input once a
@@ -279,9 +300,9 @@ def _drive_prompt_travel(prompt: str, frames: int, mode: str, seconds: float | N
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Shared frame push — runs the BGR input through the pipeline and updates
-# `latest_rgb` for any active video track to send out. Used by both the local
-# camera producer thread and per-peer track consumers.
+# Shared frame push — writes an input frame into the pipeline's input shared
+# memory, and the output pump publishes what the output scheduler writes.
+# Used by both the local camera producer thread and per-peer track consumers.
 # ──────────────────────────────────────────────────────────────────────────────
 output_pump_stop = threading.Event()
 _output_pump_on = False   # True once the scheduler-counter pump owns publishing
@@ -289,11 +310,12 @@ _output_pump_on = False   # True once the scheduler-counter pump owns publishing
 
 def output_pump() -> None:
     """Publishes EVERY scheduler-written output frame (including interpolated
-    in-betweens) to latest_rgb/output_version, at the scheduler's own pace.
-    The old path sampled the output tensor once per INPUT frame, which pinned
-    the webrtc output at the input fps and silently dropped the interpolated
-    frames (SPEC B2)."""
-    global latest_rgb, output_version
+    in-betweens) to the output tracks, at the scheduler's own pace. The old
+    path sampled the output tensor once per INPUT frame, which pinned the
+    webrtc output at the input fps and silently dropped the interpolated
+    frames (SPEC B2). The read is the shared tensor's seqlock read (never half
+    of one frame and half of the next), and publish() converts the frame to
+    I420 here, off the event loop, once for every viewer."""
     log.info("Output pump started (scheduler frame counter).")
     last = sp.frame_counter.value
     while not output_pump_stop.is_set():
@@ -302,41 +324,48 @@ def output_pump() -> None:
             time.sleep(0.002)
             continue
         last = c
-        with pipeline_lock:
-            out_bgr = output_tensor.to_numpy()
-        rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
-        with latest_lock:
-            latest_rgb = rgb
-            output_version += 1   # gates output tracks: 1 send per scheduled frame
+        publisher.publish(output_tensor.to_numpy())
     log.info("Output pump stopped.")
 
 
-def push_input_frame(frame_bgr: np.ndarray) -> None:
-    global latest_rgb, latest_input_bgr, output_version
+# The converted input frame, per thread (the camera / Spout producer and the
+# executor threads of peer inputs), copied into shared memory in one short
+# write: converting in place would hold the seqlock's write open for the whole
+# conversion (milliseconds for a 1080p frame) and the model's read would wait
+# that long.
+_ingress_buffers = threading.local()
+
+
+def push_input_frame(frame) -> None:
+    """One input frame into the pipeline: a BGR ndarray (camera, Spout), an
+    av.VideoFrame (a WebRTC peer) or a local-transport RawFrame."""
+    global input_seen, ingress
     h, w = resolution["height"], resolution["width"]
-    cropped = crop_maximal_rectangle(
-        frame_bgr, h, w, area_downscale=bool(sp.config.get("area_downscale", True))
-    )
+    if ingress is None:
+        ingress = IngressConverter(h, w, area_downscale=bool(sp.config.get("area_downscale", True)))
+    buffer = getattr(_ingress_buffers, "bgr", None)
+    if buffer is None:
+        buffer = _ingress_buffers.bgr = np.empty((h, w, 3), np.uint8)
+    ingress.write(frame, buffer)
     # Hold pipeline_lock across the shared-tensor access so the producer thread
-    # and a peer's executor call can't interleave during handoff.
+    # and a peer's executor call can't interleave during handoff (the seqlock
+    # also needs one writer at a time).
     with pipeline_lock:
-        input_tensor.copy_from(cropped)
+        input_tensor.copy_from(buffer)
+        input_seen = True
         # Legacy publish path (StreamProcessor without frame_counter): sample
         # the output at the input rate. With the pump active, publishing is
         # ENTIRELY the pump's job so interpolated frames aren't skipped.
         out_bgr = None if _output_pump_on else output_tensor.to_numpy()
-    with latest_lock:
-        latest_input_bgr = cropped  # served to listeners via GET /input.jpg
-        if out_bgr is not None:
-            latest_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
-            output_version += 1
+    if out_bgr is not None:
+        publisher.publish(out_bgr)
 
 
 def _decode_and_push(frame) -> None:
-    """Decode an av.VideoFrame to BGR and run it through the pipeline. Kept
-    separate so the CPU-bound decode (to_ndarray) runs in an executor thread,
-    never on the asyncio event loop."""
-    push_input_frame(frame.to_ndarray(format="bgr24"))
+    """Convert a decoded frame and run it through the pipeline. Kept separate
+    so the CPU-bound conversion runs in an executor thread, never on the
+    asyncio event loop."""
+    push_input_frame(frame)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -442,15 +471,15 @@ def spout_output_loop(sender_name: str) -> None:
     # still went out, and TD showed nothing; re-register when that happens.
     lister = SpoutGL.SpoutReceiver()
     next_check = 0.0
-    last = -1
+    last = 0
+    publisher.want_rgb = True  # the pump prepares the RGB frame Spout sends
     try:
         while not output_pump_stop.is_set():
-            with latest_lock:
-                version, rgb = output_version, latest_rgb
-            if version == last or rgb is None:
-                time.sleep(0.002)
+            frame = publisher.wait_frame(last, timeout=0.1)
+            if frame is None:
                 continue
-            last = version
+            last = frame.version
+            rgb = frame.rgb()
             sender.sendImage(rgb, rgb.shape[1], rgb.shape[0], GL_RGB, False, 0)
             now = time.monotonic()
             if now >= next_check:
@@ -494,7 +523,7 @@ def _input_notify(event: str, pc, outcome=None) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# WebRTC video track — emits latest_rgb at a fixed frame rate.
+# WebRTC video track — emits the publisher's newest output frame.
 # ──────────────────────────────────────────────────────────────────────────────
 class FluxRTTrack(VideoStreamTrack):
     """Yields the latest FluxRT output frame as `av.VideoFrame`s at `fps` Hz.
@@ -502,7 +531,12 @@ class FluxRTTrack(VideoStreamTrack):
     `width` (WHEP `?w=`, SPEC V15) downscales this session's frames before
     encode — aiortc encodes per-sender (§R5) and reconfigures from frame dims
     (§R6), so this is a genuine per-viewer bandwidth/CPU knob. None → native
-    path, zero resize calls."""
+    path, zero resize calls. Viewers asking for the same width share one
+    resize per frame (OutputFrame.i420_at).
+
+    Frames are yuv420p, converted once per published frame by the publisher
+    ("egress_i420"), so the encoder does not convert them again; with
+    egress_i420 off they are rgb24 and aiortc converts per viewer as before."""
 
     kind = "video"
 
@@ -519,33 +553,33 @@ class FluxRTTrack(VideoStreamTrack):
             tw = max(64, int(width)) & ~1               # clamp floor 64, even (h264 mod-2)
             th = max(2, round(h * tw / w / 2) * 2)      # aspect kept, even
             self._size = (tw, th)
-            h, w = th, tw
-        self._blank = np.zeros((h, w, 3), dtype=np.uint8)
+        self._blank = OutputFrame(0, np.zeros((h, w, 3), dtype=np.uint8))
 
     async def recv(self) -> av.VideoFrame:
-        # Output rate == pipeline rate: send only when push_input_frame publishes
-        # a NEW frame (output_version gate), so a slow pipeline never gets padded
-        # with re-encoded duplicates. `fps` only caps the rate; when no new frame
+        # Output rate == pipeline rate: send only when the output pump publishes
+        # a NEW frame (version gate), so a slow pipeline never gets padded with
+        # re-encoded duplicates. `fps` only caps the rate; when no new frame
         # arrives, a 1 Hz keepalive repeats the last one so the stream and the
-        # receiver's decoder stay alive.
+        # receiver's decoder stay alive. publish() wakes this wait (it used to
+        # poll every 5 ms).
         wait = send_wait(self._last_send, time.time(), self.fps)
         if wait > 0:
             await asyncio.sleep(wait)
-        deadline = time.time() + 1.0
-        while True:
-            with latest_lock:
-                v = output_version
-                rgb = latest_rgb if latest_rgb is not None else self._blank
-            if v != self._last_v or time.time() >= deadline:
-                break
-            await asyncio.sleep(0.005)
-        self._last_v = v
+        # the first call sends at once (the blank frame until the pipeline
+        # publishes), as before
+        out = await publisher.next_frame(self._last_v, timeout=1.0 if self._last_v >= 0 else 0.0)
+        if out is None:
+            out = publisher.latest() or self._blank
+        self._last_v = out.version
         self._last_send = time.time()
 
-        if self._size is not None and (rgb.shape[1], rgb.shape[0]) != self._size:
-            rgb = cv2.resize(rgb, self._size, interpolation=cv2.INTER_AREA)
-
-        frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+        if publisher.i420 and out.height % 2 == 0 and out.width % 2 == 0:
+            frame = out.video_frame(self._size)
+        else:
+            rgb = out.rgb()
+            if self._size is not None and (rgb.shape[1], rgb.shape[0]) != self._size:
+                rgb = cv2.resize(rgb, self._size, interpolation=cv2.INTER_AREA)
+            frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
         frame.pts = int((self._last_send - self._t0) * 90000)   # variable rate → wall-clock pts
         frame.time_base = fractions.Fraction(1, 90000)
         return frame
@@ -850,8 +884,9 @@ async def offer(request: Request):
 # peer count treat it like any other client.
 # ──────────────────────────────────────────────────────────────────────────────
 def _latest_output():
-    with latest_lock:
-        return output_version, latest_rgb
+    publisher.want_rgb = True  # a local client: the pump prepares RGB too
+    frame = publisher.latest()
+    return (0, None) if frame is None else (frame.version, frame.rgb())
 
 
 @app.websocket("/ws/local")
@@ -877,8 +912,9 @@ async def ws_local(websocket: WebSocket):
 # WHEP egress (draft-ietf-wish-whep) — playback of the FluxRT output with
 # standard clients (GStreamer whepsrc, browser WHEP libs, studio-world).
 # Decoupled from /offer by construction: each viewer gets its own recvonly PC
-# and its own FluxRTTrack (multi-consumer safe — the track only reads
-# `latest_rgb` under `latest_lock`), and no on("track")/on("datachannel")
+# and its own FluxRTTrack (multi-consumer safe — the track only reads the
+# publisher's frames, which are never written once published), and no
+# on("track")/on("datachannel")
 # handlers are registered, so a viewer can never touch input ownership or the
 # control channel. Sessions join `pcs` so _graceful_cleanup and the /healthz
 # peer count cover them.
@@ -1515,8 +1551,7 @@ async def get_input_jpg():
     # (a peer's stream or the server camera). Lets a recvonly/listening client
     # preview the input it isn't sending. 204 when nothing is driving input.
     if ownership.is_active() or ownership.has_server_camera:
-        with latest_lock:
-            frame = None if latest_input_bgr is None else latest_input_bgr.copy()
+        frame = input_tensor.to_numpy() if input_seen and input_tensor is not None else None
         if frame is not None:
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:
@@ -1669,7 +1704,7 @@ async def _health():
         # --spout-in / --spout-out sender names; in_size is None until the input sender is up
         "spout": spout_state,
         # every published output frame (interpolated ones included)
-        "output_frames": output_version,
+        "output_frames": publisher.version,
         **_perf_metrics(),
     }
 
@@ -2045,6 +2080,7 @@ def main() -> None:
     output_tensor = sp.get_output_tensor()
     resolution = sp.get_resolution()
     out_resolution = sp.get_out_resolution()
+    publisher.i420 = bool(sp.config.get("egress_i420", True))
     log.info(
         "Resolution: in %dx%d  out %dx%d",
         resolution["width"],
