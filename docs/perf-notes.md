@@ -712,6 +712,10 @@ and egress (pack written -> received; includes the half-frame RIFE pacing).
 
 ### Not done (needs a GPU, or a design decision)
 
+Researched further, with the wider picture (4-bit weights, NVENC already in
+the PyAV wheel, streaming editors as alternatives), in
+[research-2026-11.md](research-2026-11.md); its section 8 ranks the candidates.
+
 - **Download straight into shared memory.** `interpolate_frames` downloads
   the pack into pageable memory (`.cpu()`) and `send_frames` copies it into
   the batch shared memory: two copies of 4.4 MB per frame at 1152x640 x2, and
