@@ -262,6 +262,35 @@ on the branch, possibly below 2 on the old side when frame times jump
 than before (the local transport path does no I420 work now); enforced GPU
 limit and generated fps not lower.
 
+**H.264 on NVENC** (WebRTC viewers only; the kiosk's local transport does not
+encode). Start the branch with `$env:FLUXRT_CODEC = 'h264'` set in the same
+window, then:
+
+```powershell
+Invoke-RestMethod http://localhost:8765/healthz | Select-Object -ExpandProperty egress
+```
+
+`h264_encoder` must read `h264_nvenc` once a viewer is connected (open the
+built-in test page, `http://localhost:8765/`, or a WHEP viewer); if it reads
+`libx264`, `nvenc_error` says why (driver older than 570?). Then the
+loopback with NVENC against VP8, same CPU:
+
+```powershell
+$out = "$env:USERPROFILE\fluxrt-setup\branch-test"
+cd C:\AI\FluxRT-branch
+$bench = 'C:\AI\fluxrt-bench-venv\Scripts\python.exe'
+$env:FLUXRT_CODEC = 'vp8';  & $bench scripts\perf_webrtc.py loopback --repo C:\AI\FluxRT-branch --label vp8 --set "bench_frame_pattern=[1.0]" --out $out\N_vp8.json
+$env:FLUXRT_CODEC = 'h264'; & $bench scripts\perf_webrtc.py loopback --repo C:\AI\FluxRT-branch --label nvenc --set "bench_frame_pattern=[1.0]" --out $out\N_nvenc.json
+$env:FLUXRT_CODEC = $null
+& $bench scripts\perf_webrtc.py compare $out\N_vp8.json $out\N_nvenc.json | Tee-Object "$out\nvenc.md"
+```
+
+Look for: server CPU down by most of a core, egress latency down by
+~10 ms, keyframes not higher than VP8's, and in Chrome
+(`chrome://webrtc-internals`) the received stream decoding without
+freezes. The bench venv needs no CUDA for this: NVENC comes with PyAV's
+wheel and the driver.
+
 Optional, if time allows:
 
 - The kiosk on WebRTC instead of the local transport (admin: the engine's

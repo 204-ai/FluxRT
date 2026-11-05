@@ -103,6 +103,8 @@ WebRTC server environment (read at start, see "WebRTC ingress and egress"):
 | `FLUXRT_VP8_DENOISE` | `0` | libvpx noise-sensitivity; aiortc used `4` (the temporal denoiser) |
 | `FLUXRT_VP8_CPU_USED` | `-6` | libvpx speed; `-10`: 6-18% faster, -1.4 to -1.6 dB at equal bitrate |
 | `FLUXRT_VP8_THREADS` | `0` | encoder threads, `0` = aiortc's choice by frame size |
+| `FLUXRT_CODEC` | `vp8` | `h264`: H.264 on the GPU's NVENC (libx264 if NVENC cannot open); `auto`: H.264 when NVENC opens at start, else VP8 |
+| `FLUXRT_NVENC_PRESET` | `p4` | NVENC preset, `p1` (fastest) .. `p7` (best quality per bit) |
 
 Opt-in, level 1, needs extra packages:
 
@@ -663,6 +665,35 @@ half-resolution chroma on the planes), and scaling the whole frame then
 cropping shifted the picture by up to 0.44 px. At 640x360 swscale's area was
 as good as the current path and 2x faster; not worth a second code path for
 a size browsers rarely send (Chrome delivers the requested 576x320).
+
+### H.264 on NVENC (`FLUXRT_CODEC=h264` / `auto`)
+
+The pip PyAV wheels are built with NVENC: the installed 17.1.0 has
+`h264_nvenc`, `hevc_nvenc` and `av1_nvenc` (and the `*_cuvid` decoders),
+driver >= 570 required. `fluxrt/webrtc/h264_encoder.py` replaces aiortc's
+`H264Encoder` for video/h264 senders with `h264_nvenc` (tune ull, CBR, no
+B-frames, no lookahead, no output delay, profile baseline as aiortc's SDP
+offers, `forced-idr` so a keyframe request is an IDR with SPS/PPS, the
+frames' own 90 kHz timestamps, GOP 3000); aiortc's packetization, `pack()`,
+REMB setter and 10 % rebuild rule stay. The frames are the publisher's
+I420, which NVENC takes as is.
+
+Without NVENC the first open fails ("Cannot load libcuda.so.1" here) and
+every H.264 encoder of the process uses aiortc's libx264 path. That path is
+not a good choice on its own: in the loopback (production preset, steady
+frame times, this 4-core VM) it cost 2.0 server cores and delivered 17.4
+output fps against VP8's 1.47 cores and 22.1 fps. Hence `auto` resolves to
+H.264 only when NVENC opens at start, and VP8 stays the default until the
+NVENC path has been measured on a GPU (`docs/show-laptop-branch-test.md`).
+
+Each NVENC encoder opens its own CUDA context in the server process (a few
+hundred MB of VRAM per viewer); the GeForce limit is 8 concurrent encode
+sessions per system (12 by recent reports, unverified). `/healthz` reports
+`egress: {codec, h264_encoder, nvenc_error}`.
+
+Expected on the GPU, not measured: NVIDIA quotes 800-900 frames per second
+at 1080p for the fastest presets on Ada, so ~1-2 ms per 1152x640 frame
+including the upload, against libvpx's 10-14 ms on the CPU per viewer.
 
 ### End to end (loopback)
 

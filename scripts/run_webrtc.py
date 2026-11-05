@@ -69,7 +69,7 @@ from fluxrt.webrtc.ice_config import stun_urls
 from fluxrt.webrtc.input_ownership import InputOwnership, consume_peer_input
 from fluxrt.webrtc.output_rate import parse_out_fps, send_wait
 from fluxrt.webrtc.stats import AverageFps, NetStats, connection_pool_stats
-from fluxrt.webrtc import jitter, local_transport, vp8_encoder
+from fluxrt.webrtc import h264_encoder, jitter, local_transport, vp8_encoder
 
 try:  # Windows only; --spout-in / --spout-out need it
     import SpoutGL
@@ -90,10 +90,14 @@ log = logging.getLogger("fluxrt.webrtc")
 # call time, so raising the constants before any PC exists lifts the ceiling
 # while REMB congestion control keeps working underneath it.
 #
-# Codec: VP8 by default. aiortc's H.264 encoder pins x264 to MAX_FRAME_RATE (30)
-# and a 1/30 time_base while FluxRT emits ~6–10 fps, so x264's rate control
-# hands each frame a 30-fps share of the budget — measured 0.1 Mbps at 1152×640,
-# far worse than VP8 (libvpx CBR on real pts). H.264 stays selectable.
+# Codec: VP8 by default. FLUXRT_CODEC=h264 encodes on the GPU's NVENC
+# (fluxrt/webrtc/h264_encoder.py: the pip PyAV wheel has h264_nvenc; driver
+# >= 570), which takes the 10–14 ms libvpx encode per frame and viewer off the
+# CPU; without NVENC it falls back to aiortc's libx264 path, whose rate control
+# is poor here (it pins x264 to 30 fps and a 1/30 time_base while FluxRT emits
+# ~6–30 fps: measured 0.1 Mbps at 1152×640). FLUXRT_CODEC=auto picks H.264 when
+# NVENC opens at start, VP8 otherwise. Each NVENC encoder (one per viewer)
+# holds its own CUDA context in this process (a few hundred MB of VRAM).
 #
 # Floor: Chrome's receive-side estimate only grows from bits it actually sees,
 # and aiortc follows REMB exactly, so a low first estimate is self-sustaining
@@ -103,7 +107,7 @@ log = logging.getLogger("fluxrt.webrtc")
 # RTX stays in the preference list so NACK retransmission survives (aiortc drops
 # it when the list is filtered). Env: FLUXRT_MAX_BITRATE (bps, default 20 Mbps),
 # FLUXRT_MIN_BITRATE (bps, default 6 Mbps), FLUXRT_START_BITRATE (bps, default
-# 8 Mbps), FLUXRT_CODEC (vp8|h264).
+# 8 Mbps), FLUXRT_CODEC (vp8|h264|auto), FLUXRT_NVENC_PRESET (p1..p7, default p4).
 EGRESS_MAX_BITRATE = int(os.environ.get("FLUXRT_MAX_BITRATE", str(20_000_000)))
 EGRESS_MIN_BITRATE = int(os.environ.get("FLUXRT_MIN_BITRATE", str(6_000_000)))
 EGRESS_START_BITRATE = int(os.environ.get("FLUXRT_START_BITRATE", str(8_000_000)))
@@ -118,6 +122,23 @@ for _codec_mod in (_aiortc_vpx, _aiortc_h264):
 # sharper on frames without sensor noise. FLUXRT_VP8_DENOISE / _CPU_USED /
 # _THREADS override.
 vp8_encoder.install()
+# video/h264 senders on NVENC (libx264 when it cannot open); installed on top
+# of the VP8 route, used when FLUXRT_CODEC negotiates H.264.
+h264_encoder.install()
+_egress_codec_resolved: Optional[str] = None
+
+
+def egress_codec() -> str:
+    """The codec the output tracks negotiate first: FLUXRT_CODEC, with
+    "auto" resolved once (H.264 if NVENC opens here, VP8 otherwise)."""
+    global _egress_codec_resolved
+    if _egress_codec_resolved is None:
+        if EGRESS_CODEC == "auto":
+            _egress_codec_resolved = "h264" if h264_encoder.nvenc_available() else "vp8"
+        else:
+            _egress_codec_resolved = EGRESS_CODEC
+        log.info("egress codec: %s (%s)", _egress_codec_resolved, h264_encoder.status())
+    return _egress_codec_resolved
 
 # Inbound video: a frame goes to the decoder with its last packet (the RTP
 # marker bit), not when the next frame's first packet arrives — aiortc's
@@ -128,10 +149,10 @@ if os.environ.get("FLUXRT_JITTER_MARKER", "1") != "0":
 
 
 def _prefer_codec(pc: RTCPeerConnection, sender) -> None:
-    """Reorder (not filter) this sender's codec preferences so EGRESS_CODEC negotiates
-    first. Keeping the full list keeps `video/rtx` — filtering it out would lose
-    NACK-driven retransmission."""
-    want = "video/" + EGRESS_CODEC
+    """Reorder (not filter) this sender's codec preferences so the egress codec
+    negotiates first. Keeping the full list keeps `video/rtx` — filtering it out
+    would lose NACK-driven retransmission."""
+    want = "video/" + egress_codec()
     codecs = RTCRtpSender.getCapabilities("video").codecs
     order = sorted(codecs, key=lambda c: 0 if c.mimeType.lower() == want else 1)
     for transceiver in pc.getTransceivers():
@@ -1701,6 +1722,8 @@ async def _health():
         "prompt_travel_seconds": True,
         # ws://…/ws/local: raw frames for a client on the same machine
         "local_transport": True,
+        # output codec, and which encoder H.264 viewers get (h264_nvenc / libx264)
+        "egress": {"codec": egress_codec(), **h264_encoder.status()},
         "local_clients": local_transport.client_stats(pcs),
         # --spout-in / --spout-out sender names; in_size is None until the input sender is up
         "spout": spout_state,
@@ -2082,6 +2105,7 @@ def main() -> None:
     resolution = sp.get_resolution()
     out_resolution = sp.get_out_resolution()
     publisher.i420 = bool(sp.config.get("egress_i420", True))
+    egress_codec()  # resolves FLUXRT_CODEC=auto now (opens NVENC once to see)
     log.info(
         "Resolution: in %dx%d  out %dx%d",
         resolution["width"],
