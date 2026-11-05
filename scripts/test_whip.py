@@ -53,16 +53,15 @@ def check(name: str, cond: bool, detail: str = ""):
     print(f"ok   {name}")
 
 
-_RGB = np.zeros((512, 512, 3), dtype=np.uint8)
+_BGR = np.zeros((512, 512, 3), dtype=np.uint8)
 
 
 async def _counting_sink(frame) -> None:
-    """Counts sunk frames AND publishes like push_input_frame does (latest_rgb +
-    output_version bump) so the version-gated output tracks pace realistically."""
+    """Counts sunk frames AND publishes an output frame like the output pump
+    does (one new version per frame) so the version-gated output tracks pace
+    realistically."""
     sunk["n"] += 1
-    with run_webrtc.latest_lock:
-        run_webrtc.latest_rgb = _RGB
-        run_webrtc.output_version += 1
+    run_webrtc.publisher.publish(_BGR)
 
 
 class BlackTrack(VideoStreamTrack):
@@ -131,7 +130,7 @@ async def main():
     check("V17 frames reach sink", True)
 
     # V19: output fps == pipe fps — WHEP viewer capped high (?fps=60) so the
-    # output_version gate dominates; received frames over 4s should match the
+    # version gate dominates; received frames over 4s should match the
     # sink's processed-frame count over the same window.
     pcv = RTCPeerConnection()
     gotv = asyncio.get_event_loop().create_future()

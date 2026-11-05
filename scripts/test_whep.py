@@ -2,7 +2,7 @@
 """WHEP endpoint smoke test (SPEC §T.10) — GPU-free.
 
 Uses the torch-free `fluxrt` shim (same trick as tests/webrtc/conftest.py) to
-import run_webrtc without StreamProcessor, seeds `latest_rgb` with a synthetic
+import run_webrtc without StreamProcessor, publishes a synthetic
 frame, runs the FastAPI app in-process, and drives it with an aiortc client:
 
   V10: POST /whep (application/sdp) -> 201 + Location + application/sdp answer;
@@ -142,10 +142,9 @@ async def main():
 if __name__ == "__main__":
     # Seed server globals normally set by main(): output resolution + a frame.
     run_webrtc.out_resolution = {"width": NATIVE, "height": NATIVE}
-    rgb = np.zeros((NATIVE, NATIVE, 3), dtype=np.uint8)
-    rgb[:, :, 0] = 200  # non-black so a human eyeballing a viewer sees red
-    with run_webrtc.latest_lock:
-        run_webrtc.latest_rgb = rgb
+    bgr = np.zeros((NATIVE, NATIVE, 3), dtype=np.uint8)
+    bgr[:, :, 2] = 200  # non-black so a human eyeballing a viewer sees red
+    run_webrtc.publisher.publish(bgr)
 
     server = uvicorn.Server(uvicorn.Config(run_webrtc.app, host="127.0.0.1", port=PORT, log_level="warning"))
     t = threading.Thread(target=server.run, daemon=True)

@@ -439,6 +439,7 @@ class StepGraphs:
             id(kwargs["img_ids"]),
             id(kwargs["txt_ids"]),
             id(kwargs["timestep"]),
+            bool(kwargs.get("compact_residual", False)),
         )
         entry = self.graphs.get(key)
         recording = cuda_graphs.recording()
@@ -922,7 +923,16 @@ class Flux2AttnProcessor:
         spatial_cache: SpatialCache | None = None,
         mask: torch.Tensor | None = None,
         spatial_kv: tuple | None = None,
+        compact: bool = False,
     ) -> torch.Tensor:
+        if compact:
+            # The block hands over its active rows only ("compact_residual"):
+            # hidden_states / encoder_hidden_states are the active image / text
+            # rows, or None where a stream has none.
+            return self._on_rows(
+                attn, hidden_states, encoder_hidden_states, attention_mask,
+                image_rotary_emb, spatial_kv, mask,
+            )
         if (
             mask is not None
             and spatial_kv is not None
@@ -1253,7 +1263,12 @@ class Flux2ParallelSelfAttnProcessor:
         spatial_cache: SpatialCache | None = None,
         mask: torch.Tensor | None = None,
         spatial_kv: tuple | None = None,
+        compact: bool = False,
     ) -> torch.Tensor:
+        if compact:  # hidden_states = the rows of mask.full ("compact_residual")
+            return self._on_rows(
+                attn, hidden_states, attention_mask, image_rotary_emb, spatial_kv, mask.full
+            )
         if mask is not None and spatial_kv is not None and not mask.exec_only:
             return self._compact(
                 attn, hidden_states, attention_mask, image_rotary_emb, spatial_kv, mask.full
@@ -1391,7 +1406,61 @@ def _flux2_attn_compact(
     return img_out, txt_out
 
 
+def _flux2_attn_on_rows(
+    self,
+    attn: "Flux2Attention",
+    img: torch.Tensor | None,
+    txt: torch.Tensor | None,
+    attention_mask,
+    image_rotary_emb,
+    spatial_kv: tuple,
+    mask: SparseMask,
+):
+    """A double block's attention on its active rows: `txt` = the active text
+    rows (mask.txt.idx order) through the added projections, `img` = the
+    active image rows (mask.img.idx) through to_q/k/v, None where a stream has
+    none. Joined in sequence order (text first, as mask.full), K/V written
+    into the cache in place, queries attend to the whole cached sequence.
+    Returns the (image rows, text rows) outputs, None where the input was.
+    The same ops as _flux2_attn_compact without its gathers and scatters;
+    that one stays as it was, so the default path traces the same graph."""
+    queries, keys, values = [], [], []
+    if txt is not None:
+        queries.append(attn.norm_added_q(attn.add_q_proj(txt).unflatten(-1, (attn.heads, -1))))
+        keys.append(attn.norm_added_k(attn.add_k_proj(txt).unflatten(-1, (attn.heads, -1))))
+        values.append(attn.add_v_proj(txt).unflatten(-1, (attn.heads, -1)))
+    if img is not None:
+        queries.append(attn.norm_q(attn.to_q(img).unflatten(-1, (attn.heads, -1))))
+        keys.append(attn.norm_k(attn.to_k(img).unflatten(-1, (attn.heads, -1))))
+        values.append(attn.to_v(img).unflatten(-1, (attn.heads, -1)))
+    query, key, value = torch.cat(queries, 1), torch.cat(keys, 1), torch.cat(values, 1)
+
+    if image_rotary_emb is not None:
+        idx = mask.full.idx
+        rope = (image_rotary_emb[0].index_select(0, idx), image_rotary_emb[1].index_select(0, idx))
+        query = apply_rotary_emb(query, rope, sequence_dim=1)
+        key = apply_rotary_emb(key, rope, sequence_dim=1)
+
+    key, value = SpatialCache.write_kv(mask.full, key, value, spatial_kv)
+
+    attn_out = dispatch_attention_fn(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        backend=self._attention_backend,
+        parallel_config=self._parallel_config,
+    )
+    attn_out = attn_out.flatten(2, 3).to(query.dtype)
+
+    n_txt = mask.txt.idx.numel()
+    txt_rows = attn.to_add_out(attn_out[:, :n_txt]) if txt is not None else None
+    img_rows = attn.to_out[1](attn.to_out[0](attn_out[:, n_txt:])) if img is not None else None
+    return img_rows, txt_rows
+
+
 Flux2AttnProcessor._compact = _flux2_attn_compact
+Flux2AttnProcessor._on_rows = _flux2_attn_on_rows
 
 
 def _flux2_parallel_compact(
@@ -1415,8 +1484,30 @@ def _flux2_parallel_compact(
     if not rows.any:
         return out  # nothing executes; the caches stay as they are
     idx = rows.idx
+    out.index_copy_(
+        1, idx,
+        _flux2_parallel_on_rows(
+            self, attn, hidden_states.index_select(1, idx), attention_mask,
+            image_rotary_emb, spatial_kv, rows,
+        ),
+    )
+    return out
 
-    projected = attn.to_qkv_mlp_proj(hidden_states.index_select(1, idx))
+
+def _flux2_parallel_on_rows(
+    self,
+    attn: "Flux2ParallelSelfAttention",
+    hidden_states: torch.Tensor,
+    attention_mask,
+    image_rotary_emb,
+    spatial_kv: tuple,
+    rows: ActiveRows,
+) -> torch.Tensor:
+    """A single block's attention + MLP on its active rows: `hidden_states`
+    holds the rows of `rows.idx` (joint sequence), in that order. K/V are
+    written into the cache in place; returns the output of those rows."""
+    idx = rows.idx
+    projected = attn.to_qkv_mlp_proj(hidden_states)
     qkv, mlp_hidden_states = torch.split(
         projected,
         [3 * attn.inner_dim, attn.mlp_hidden_dim * attn.mlp_mult_factor],
@@ -1445,11 +1536,11 @@ def _flux2_parallel_compact(
     attn_out = attn_out.flatten(2, 3).to(query.dtype)
 
     mlp_out = attn.mlp_act_fn(mlp_hidden_states)
-    out.index_copy_(1, idx, attn.to_out(torch.cat([attn_out, mlp_out], dim=-1)))
-    return out
+    return attn.to_out(torch.cat([attn_out, mlp_out], dim=-1))
 
 
 Flux2ParallelSelfAttnProcessor._compact = _flux2_parallel_compact
+Flux2ParallelSelfAttnProcessor._on_rows = _flux2_parallel_on_rows
 
 
 class Flux2KVParallelSelfAttnProcessor:
@@ -1767,6 +1858,11 @@ class Flux2TransformerBlock(nn.Module):
         joint_attention_kwargs = joint_attention_kwargs or {}
 
         mask = joint_attention_kwargs.get("mask", None)
+        if joint_attention_kwargs.get("compact", False):
+            return self._forward_rows(
+                hidden_states, encoder_hidden_states, temb_mod_img, temb_mod_txt,
+                image_rotary_emb, joint_attention_kwargs,
+            )
 
         # Modulation parameters shape: [1, 1, self.dim]
         (shift_msa, scale_msa, gate_msa), (shift_mlp, scale_mlp, gate_mlp) = (
@@ -1838,6 +1934,70 @@ class Flux2TransformerBlock(nn.Module):
         encoder_hidden_states = encoder_hidden_states + c_gate_mlp * context_ff_output
         if encoder_hidden_states.dtype == torch.float16:
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
+
+        return encoder_hidden_states, hidden_states
+
+    def _forward_rows(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        temb_mod_img: torch.Tensor,
+        temb_mod_txt: torch.Tensor,
+        image_rotary_emb,
+        joint_attention_kwargs: dict[str, Any],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """forward on the active rows only ("compact_residual"):
+        hidden_states / encoder_hidden_states hold the rows of mask.img.idx /
+        mask.txt.idx. The same per-row ops as forward, in the same order; the
+        rows forward skips (zero updates, never read) are not there, and a
+        stream without active rows is passed through untouched."""
+        mask = joint_attention_kwargs["mask"]
+        (shift_msa, scale_msa, gate_msa), (shift_mlp, scale_mlp, gate_mlp) = (
+            Flux2Modulation.split(temb_mod_img, 2)
+        )
+        (
+            (c_shift_msa, c_scale_msa, c_gate_msa),
+            (c_shift_mlp, c_scale_mlp, c_gate_mlp),
+        ) = Flux2Modulation.split(temb_mod_txt, 2)
+
+        norm_hidden_states = norm_encoder_hidden_states = None
+        if mask.img.any:
+            norm_hidden_states = self.norm1(hidden_states)
+            norm_hidden_states = (1 + scale_msa) * norm_hidden_states + shift_msa
+        if mask.txt.any:
+            norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states)
+            norm_encoder_hidden_states = (
+                1 + c_scale_msa
+            ) * norm_encoder_hidden_states + c_shift_msa
+
+        attn_output, context_attn_output = self.attn(
+            hidden_states=norm_hidden_states,
+            encoder_hidden_states=norm_encoder_hidden_states,
+            image_rotary_emb=image_rotary_emb,
+            **joint_attention_kwargs,
+        )
+
+        if mask.img.any:
+            attn_output = gate_msa * attn_output
+            hidden_states = hidden_states + attn_output
+
+            norm_hidden_states = self.norm2(hidden_states)
+            norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+            hidden_states = hidden_states + gate_mlp * self.ff(norm_hidden_states)
+
+        if mask.txt.any:
+            context_attn_output = c_gate_msa * context_attn_output
+            encoder_hidden_states = encoder_hidden_states + context_attn_output
+
+            norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
+            norm_encoder_hidden_states = (
+                norm_encoder_hidden_states * (1 + c_scale_mlp) + c_shift_mlp
+            )
+            encoder_hidden_states = encoder_hidden_states + c_gate_mlp * self.ff_context(
+                norm_encoder_hidden_states
+            )
+            if encoder_hidden_states.dtype == torch.float16:
+                encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
 
         return encoder_hidden_states, hidden_states
 
@@ -2140,6 +2300,7 @@ class Flux2Transformer2DModel(
         ref_fixed_timestep: float = 0.0,
         spatial_cache: "SpatialCache | None" = None,
         mask: "SparseMask | torch.Tensor | None" = None,
+        compact_residual: bool = False,
     ) -> torch.Tensor | Flux2Transformer2DModelOutput:
         """
         The [`Flux2Transformer2DModel`] forward method.
@@ -2169,6 +2330,9 @@ class Flux2Transformer2DModel(
                 `kv_cache_mode="extract"`).
             ref_fixed_timestep (`float`, defaults to `0.0`):
                 Fixed timestep for reference token modulation (only used when `kv_cache_mode="extract"`).
+            compact_residual (`bool`, defaults to `False`):
+                With a spatial cache and a SparseMask: run the blocks on the active rows only (see
+                `_forward_active_rows`). Same values; other cases ignore it.
 
         Returns:
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
@@ -2275,6 +2439,23 @@ class Flux2Transformer2DModel(
 
         if joint_attention_kwargs is None:
             joint_attention_kwargs = {}
+
+        if (
+            compact_residual
+            and isinstance(mask, SparseMask)
+            and spatial_cache is not None
+            and not mask.exec_only
+            and kv_cache_mode is None
+            and not (torch.is_grad_enabled() and self.gradient_checkpointing)
+        ):
+            output = self._forward_active_rows(
+                hidden_states, encoder_hidden_states, temb, double_stream_mod_img,
+                double_stream_mod_txt, single_stream_mod, concat_rotary_emb,
+                joint_attention_kwargs, spatial_cache, mask,
+            )
+            if not return_dict:
+                return (output,)
+            return Flux2Transformer2DModelOutput(sample=output)
 
         # 4. Build joint_attention_kwargs with KV cache info
         if kv_cache_mode == "extract":
@@ -2408,3 +2589,76 @@ class Flux2Transformer2DModel(
             return (output,)
 
         return Flux2Transformer2DModelOutput(sample=output)
+
+    def _forward_active_rows(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        temb: torch.Tensor,
+        double_stream_mod_img: torch.Tensor,
+        double_stream_mod_txt: torch.Tensor,
+        single_stream_mod: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor],
+        joint_attention_kwargs: dict[str, Any],
+        spatial_cache: SpatialCache,
+        mask: SparseMask,
+    ) -> torch.Tensor:
+        """Steps 4-7 of forward with the residual stream on the active rows
+        only ("compact_residual"). forward keeps both streams full-length
+        (1952 x 3072 at 576x320): every block runs its LayerNorms,
+        modulations and residual adds over all rows, zero-fills full-length
+        outputs and gathers / scatters the active rows around each op. But
+        every one of those ops is per row, a skipped row's residual is never
+        read (its K/V come from the spatial cache, its output from the output
+        cache) and the active rows are the same in every block of a step. So
+        the active rows are gathered once here (after the input projections,
+        which stay full-length: their GEMM shapes are the same as in forward),
+        carried through all blocks as is, and scattered once into the output.
+
+        hidden_states / encoder_hidden_states: after x_embedder / _embed_text.
+        Returns the output after sync_with_output_cache."""
+        txt_idx, img_idx = mask.txt.idx, mask.img.idx
+        output = torch.zeros(
+            1, hidden_states.shape[1], self.proj_out.out_features,
+            device=hidden_states.device, dtype=hidden_states.dtype,
+        )
+        if mask.full.any:
+            img = hidden_states.index_select(1, img_idx) if mask.img.any else hidden_states[:, :0]
+            txt = (
+                encoder_hidden_states.index_select(1, txt_idx)
+                if mask.txt.any
+                else encoder_hidden_states[:, :0]
+            )
+            # A copy: the caller's dict must not carry "compact" into other calls.
+            kwargs = {**joint_attention_kwargs, "spatial_cache": spatial_cache, "mask": mask, "compact": True}
+
+            for index_block, block in enumerate(self.transformer_blocks):
+                kwargs["block_id"] = index_block
+                kwargs["spatial_kv"] = spatial_cache.kv_tensors(index_block, "double")
+                txt, img = block(
+                    hidden_states=img,
+                    encoder_hidden_states=txt,
+                    temb_mod_img=double_stream_mod_img,
+                    temb_mod_txt=double_stream_mod_txt,
+                    image_rotary_emb=rotary_emb,
+                    joint_attention_kwargs=kwargs,
+                )
+
+            # The rows of mask.full, in its order (text rows, then image rows).
+            joint = torch.cat([txt, img], dim=1) if mask.txt.any else img
+            for index_block, block in enumerate(self.single_transformer_blocks):
+                kwargs["block_id"] = index_block
+                kwargs["spatial_kv"] = spatial_cache.kv_tensors(index_block, "single")
+                joint = block(
+                    hidden_states=joint,
+                    encoder_hidden_states=None,
+                    temb_mod=single_stream_mod,
+                    image_rotary_emb=rotary_emb,
+                    joint_attention_kwargs=kwargs,
+                )
+
+            if mask.img.any:
+                img = joint[:, txt_idx.numel() :]
+                output.index_copy_(1, img_idx, self.proj_out(self.norm_out(img, temb)))
+
+        return spatial_cache.sync_with_output_cache(mask.tensor, output)

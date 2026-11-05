@@ -1,8 +1,12 @@
 from multiprocessing import Process, Value
 from fluxrt.utils.shared_tensor import SharedTensor
-import os
-import signal
+import numpy as np
 import time
+
+# How often the idle loop looks for a new pack, and the longest single sleep
+# while a frame is held (so a newer pack is noticed this soon).
+IDLE_POLL_S = 0.0005
+HOLD_POLL_S = 0.001
 
 
 class OutputSchedulerSubprocess:
@@ -64,27 +68,71 @@ class OutputSchedulerSubprocess:
             (height, width, 3),
             name=self.output_shared_tensor_name,
         )
+        # This process's own copy of the pack being shown: the model writes
+        # the next pack into shared memory meanwhile (reading batch[i] from
+        # shared memory while pacing showed frames of a pack written since).
+        self.pack = np.empty(self.output_batch_shared_tensor.shape, dtype=np.uint8)
+        self.pack_sequence = -1
+        self.queue = []  # frames still to show, oldest first
+        self.interval = 0.0  # how long each frame of the current pack is shown
+        self.next_due = 0.0
+
+    def take_pack(self) -> bool:
+        """Copy the newest pack out of shared memory. False when there is
+        nothing new (a flag left set by a pack this process already took)."""
+        # Clear the flag BEFORE copying: a pack that lands while this one is
+        # shown sets it again and is not lost (the flag used to be cleared
+        # after pacing, which dropped it).
+        self.pack_is_ready.value = False
+        batch = self.output_batch_shared_tensor
+        if not batch.read_into(self.pack):
+            return True  # no clean copy within the retry budget: show what we got, as before
+        if batch.versioned:
+            if batch.last_read_sequence == self.pack_sequence:
+                return False
+            self.pack_sequence = batch.last_read_sequence
+        return True
+
+    def publish(self, frame: np.ndarray) -> None:
+        self.output_shared_tensor.copy_from(frame)
+        if self.frame_written is not None and not self.frame_written.value:
+            self.frame_written.value = True
+        if self.frame_counter is not None:
+            self.frame_counter.value += 1
+
+    def step(self) -> float:
+        """One scheduling step. Returns how long to sleep before the next.
+
+        Each pack (interpolated frames, then the generated one) is shown over
+        one frame's processing time: its first frame as soon as it arrives,
+        each next one `interval` later. A pack that arrives while the
+        previous one is still being shown drops the previous pack's
+        in-betweens that were not shown yet but keeps its generated frame
+        first in line, so every generated frame is shown: that one goes out
+        at once, and the new pack follows at the new pack's interval (the
+        new frame came sooner than the old interval said)."""
+        if self.pack_is_ready.value:
+            carry = [self.queue[-1].copy()] if self.queue else []
+            if self.take_pack():
+                proc_time = min(max(self.last_processing_time.value, 0.001), 1.0)
+                self.interval = proc_time / self.batch_size
+                self.queue = carry + list(self.pack)
+                # no hold before a new pack: its first frame (a pack that
+                # comes early is the late one) goes out now, as it always did
+                self.next_due = 0.0
+        if not self.queue:
+            return IDLE_POLL_S
+        now = time.perf_counter()
+        if now < self.next_due:
+            return min(self.next_due - now, HOLD_POLL_S)
+        self.publish(self.queue.pop(0))
+        self.next_due = now + self.interval
+        return 0.0
 
     def process_main(self) -> None:
         self.process_init()
 
         while self.running.value:
-            if not self.pack_is_ready.value:
-                time.sleep(0.0005)  # was a hot spin: one core + the Value lock per read
-                continue
-
-            proc_time = min(max(self.last_processing_time.value, 0.001), 1.0)
-            sleep_interval = proc_time / self.batch_size
-
-            for i in range(self.batch_size):
-                self.output_shared_tensor.copy_from(
-                    self.output_batch_shared_tensor.array[i]
-                )
-                if self.frame_written is not None and not self.frame_written.value:
-                    self.frame_written.value = True
-                if self.frame_counter is not None:
-                    self.frame_counter.value += 1
-                if i < self.batch_size - 1:
-                    time.sleep(sleep_interval)
-
-            self.pack_is_ready.value = False
+            wait = self.step()
+            if wait > 0:
+                time.sleep(wait)

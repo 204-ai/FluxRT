@@ -471,6 +471,8 @@ Add `--save` flag to write into `benchmark.md` file.
 
 You can check report generated on my machine in `benchmark.md`
 
+The WebRTC side (input decode to shared memory, output to every viewer's encoder) has its own GPU-free benchmark, `scripts/perf_webrtc.py`: per-stage costs, and an end-to-end loopback of the real server with a stub in place of the model (latency, frames delivered, server CPU), comparable across checkouts. See [docs/perf-notes.md](docs/perf-notes.md#webrtc-ingress-and-egress-cpu-side-november-2026).
+
 I would appreciate it if you could share your report in the [issues](https://github.com/tensorforger/FluxRT/issues), especially if it was generated on different hardware setup.
 
 # How It Works
