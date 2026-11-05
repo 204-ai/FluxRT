@@ -1142,6 +1142,9 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                         return_dict=False,
                         mask=step_mask,
                         spatial_cache=spatial_cache,
+                        # "compact_residual" (default off until measured on a
+                        # GPU): the blocks run on the active rows only.
+                        compact_residual=bool(self.subprocess_config.get("compact_residual", False)),
                     )[0]
                     profile("transformer only")
 

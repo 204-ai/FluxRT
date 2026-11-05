@@ -106,6 +106,13 @@ WebRTC server environment (read at start, see "WebRTC ingress and egress"):
 | `FLUXRT_CODEC` | `vp8` | `h264`: H.264 on the GPU's NVENC (libx264 if NVENC cannot open); `auto`: H.264 when NVENC opens at start, else VP8 |
 | `FLUXRT_NVENC_PRESET` | `p4` | NVENC preset, `p1` (fastest) .. `p7` (best quality per bit) |
 
+Off until measured on a GPU (bit-identical on the CPU, see "Compact residual
+stream" below):
+
+| Key | Default | What it does |
+|---|---|---|
+| `compact_residual` | `false` | The transformer blocks run on the active rows only: the residual stream is gathered once after the input projections and scattered once before the output cache, instead of full-length LayerNorm / modulation / residual passes plus a gather and a zero-filled scatter around every sparse op |
+
 Opt-in, level 1, needs extra packages:
 
 | Key | Default | What it does |
@@ -332,6 +339,48 @@ What the implementation has to respect:
   that one error restores normal operation; the step stays on the normal path
   and recording stops after three failures. Tested by injecting a GPU wait
   into two recordings: no crash, the following 300 steps bit-identical.
+
+### Compact residual stream (`compact_residual`, off until measured)
+
+Projections, MLPs and attention queries already ran on the active rows only,
+but both streams stayed full-length (1952 x 3072 at 576x320): every block
+ran its LayerNorms, modulations and residual adds over all rows, and every
+sparse op gathered its input rows and zero-filled and scattered a
+full-length output. None of it is read: a skipped row's K/V come from the
+spatial cache and its output from the output cache, and the active rows are
+the same in every block of a step. With `compact_residual` the transformer
+gathers the active rows once (after `x_embedder` / `context_embedder`, which
+stay full-length so their GEMM shapes do not change), carries them through
+all 25 blocks, and scatters once before `sync_with_output_cache`
+(`_forward_active_rows`, `Flux2TransformerBlock._forward_rows`, the
+processors' `_on_rows`). K/V caches and attention keys stay full-length.
+Masks with execute-only rows, the KV-extract modes and gradient
+checkpointing keep the old path.
+
+Measured on the CPU (no GPU here):
+
+- **Bit-identical** (`tests/test_compact_residual.py`): a small random
+  FLUX.2 transformer, 8 frames on two spatial caches (everything, nothing,
+  partial image with padded rows, prompt change with and without image
+  rows, a single row, execute-only rows); outputs and every cache tensor
+  equal in fp32, bf16 and bf16 + INT8. The test fails on a wrong last row
+  (1e-3 off) or on skipped double blocks.
+- **Compiled per block** (Inductor, CPU): compact and full path equal to each
+  other (max difference 0.0), no graph breaks, no recompiles on a second
+  pass, 6 compiled graphs instead of 12.
+- **Real widths** (3072, 24 x 128 heads, 512 + 1440 tokens, 1 double + 1
+  single block, bf16, 320 active image rows, text inactive): outputs equal;
+  time in the non-GEMM ops 86 → 53 ms, aten calls 896 → 823. On the CPU the
+  GEMMs dominate, so this says nothing about the GPU's ms per frame.
+
+On a GPU the compiled kernels may fuse differently (Inductor could already
+have fused some gathers into the norms), so the gain and the level are open.
+The traffic model (`scripts/perf_model_traffic.py`) puts the step's
+activation traffic at 4.2 → 2.0 GB at 320 active rows, an estimated 3-5 ms
+per frame on the 4090. Check with `perf_ab`: the all-in preset is
+bit-reproducible across processes, so `--set compact_residual=true` against
+the same branch without it should give 300/300 identical frames (level 0);
+otherwise LPIPS inside the noise floor (level 1). Then default on.
 
 ### Whole-frame identity checks
 
@@ -814,6 +863,8 @@ Worth keeping, because each looked convincing at the time:
 
 ## Open
 
+- `compact_residual` on a GPU: ms per frame and the identity check
+  (section "Compact residual stream"), then default on.
 - WebRTC: the GPU-side items under "WebRTC ingress and egress / Not done"
   (pinned download straight into shared memory, I420 on the GPU), one encode
   per resolution for all viewers, and a loopback run on the show laptop with

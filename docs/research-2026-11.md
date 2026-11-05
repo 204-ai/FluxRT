@@ -95,6 +95,9 @@ per step, `perf-notes.md`). The measured all-in frame on the 4090 is
 
 ### 2.1 Compact residual stream (bit-identical; est. -3 to -5 ms per frame on the 4090, more on the laptop)
 
+Implemented as the opt-in `compact_residual` (see `perf-notes.md`,
+"Compact residual stream"); what follows is the analysis that led to it.
+
 Projections, MLPs and attention queries already run on active rows only,
 but the residual stream stays full length: `Flux2SingleTransformerBlock.forward`
 and `Flux2TransformerBlock.forward` run LayerNorm, modulation and
@@ -583,8 +586,8 @@ bit-identical, 1 = rounding, 2 = measurable, 3 = different look).
 
 | # | Change | Expected | Level | Effort | Platform | Evidence | First experiment |
 |---|---|---|---|---|---|---|---|
-| 1 | H.264 on NVENC through PyAV inside aiortc (5.2), `bgr0` input | -8 to -12 ms encode per viewer per frame; server CPU ~1.4 -> ~0.4 core at 1 viewer | 1 (codec change) | 1-2 days | both; driver >= 570 | verified wheel + remote-desktop's working patch | `perf_webrtc.py loopback`, then chrome://webrtc-internals keyframes / bitrate |
-| 2 | Compact residual stream in the transformer (2.1) | -3 to -5 ms per frame on the 4090, more on the laptop | 0 | 2-3 days + GPU time | both | traffic model; code reading | `perf_ab.py` A/B, 300/300 identical frames expected |
+| 1 | H.264 on NVENC through PyAV inside aiortc (5.2), `bgr0` input. **Implemented** (`FLUXRT_CODEC=h264` / `auto`, yuv420p input; `webrtc/h264_encoder.py`) | -8 to -12 ms encode per viewer per frame; server CPU ~1.4 -> ~0.4 core at 1 viewer | 1 (codec change) | 1-2 days | both; driver >= 570 | verified wheel + remote-desktop's working patch | `perf_webrtc.py loopback`, then chrome://webrtc-internals keyframes / bitrate |
+| 2 | Compact residual stream in the transformer (2.1). **Implemented, opt-in** (`compact_residual`; bit-identical on the CPU, GPU unmeasured) | -3 to -5 ms per frame on the 4090, more on the laptop | 0 | 2-3 days + GPU time | both | traffic model; code reading | `perf_ab.py` A/B, 300/300 identical frames expected |
 | 3 | `winmm.timeBeginPeriod(1)` on Windows (5.7) | fewer late frames / keyframe bursts; p95 | 0 | 1 hour | Windows | remote-desktop measurement | live `/healthz` + kiosk `lag` |
 | 4 | Fused q/k/v in the double blocks (2.2) | -0.5 to -1 ms per frame | 0 | 1 day | both | code reading | perf_ab |
 | 5 | Re-measure FP8 `_scaled_mm` for the block linears on the laptop (4.2) | unknown; FP8 = INT8 peak on sm_120 and no int32 epilogue | 2 (3x INT8's error) | half a day | 5090 | whitepaper peaks | microbenchmark at M = 320, then perf_ab LPIPS |

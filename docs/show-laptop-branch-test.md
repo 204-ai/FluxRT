@@ -23,6 +23,8 @@ The kiosk on this laptop talks to FluxRT over the **local transport**
 | I420 once per frame for all viewers (`egress_i420`) | no (converted only while a WebRTC track uses it) | yes | — |
 | VP8 denoiser off (`FLUXRT_VP8_*`) | no | yes | — |
 | Inbound video decoded on its last packet (`FLUXRT_JITTER_MARKER`) | no | yes | — |
+| H.264 on NVENC (`FLUXRT_CODEC=h264` / `auto`, default VP8) | no | yes | — |
+| Compact residual stream (`compact_residual`, default off) | — | — | only with `--set compact_residual=true` (section 3b) |
 
 What to find out here:
 
@@ -130,7 +132,7 @@ cd tests\webrtc; & $bench -m pytest -q; cd ..\..
 
 Run the two test folders separately, as above: `tests\webrtc` has its own
 `pytest.ini` (asyncio mode), and run from the top its async tests fail.
-Expected: every test passes (on the VM: 76 + 130 unit tests, WHEP 27 checks,
+Expected: every test passes (on the VM: 81 + 139 unit tests, WHEP 27 checks,
 WHIP 19 checks). `stages` prints four tables: egress conversion, VP8 settings,
 ingress, shared-memory tearing. Keep its whole output for the report.
 
@@ -178,6 +180,28 @@ machines), output differences inside the noise floor. The model process only
 changed how it reads its input from shared memory and how the warm-up writes
 it. `perf_ab` drives the model in-process: it does not exercise the output
 scheduler (step 5 does).
+
+## 3b. Compact residual stream (~20 min, GPU to itself)
+
+`compact_residual` runs the transformer blocks on the active rows only (same
+math; `docs/perf-notes.md`, "Compact residual stream"). It is off by
+default and has never run on a GPU. One more run of the branch with it on,
+all-in preset, same clip and warm-up as section 3:
+
+```powershell
+cd C:\AI\FluxRT-branch
+.\.venv\Scripts\python.exe scripts\perf_ab.py run --repo C:\AI\FluxRT-branch --config C:\AI\FluxRT-branch\configs\show_laptop.json --set interpolation_exp=1 --set area_downscale=false --set enable_tiny_vae=true --set int8_linear=true --set mask_dilation=1 --set rife_cudagraphs=true --set conv_backend=tensorrt --set compact_residual=true --clip C:\AI\test-clip-webcam.mov --frames 300 --warmup 120 --live-warmup --out $env:USERPROFILE\fluxrt-setup\runs\allin-trt_compact
+cd $env:USERPROFILE\fluxrt-setup
+C:\AI\FluxRT\.venv\Scripts\python.exe C:\AI\FluxRT-branch\scripts\perf_ab.py compare runs\allin-trt_branch runs\allin-trt_compact --noise runs\allin-trt_main2 --out branch-test\report-compact
+```
+
+(Check that the flags match what `bench-fluxrt.ps1` used for
+`allin-trt_branch`; the comparison only holds with the same preset.)
+
+Expected: "bit-identical frames" 300/300 (the all-in preset reproduces
+itself across processes), or else differences inside the noise floor; ms per
+frame lower than `allin-trt_branch` (estimated a few ms). If the run fails,
+the traceback goes into the report; nothing else depends on this flag.
 
 ## 4. WebRTC loopback on this CPU (~12 min, GPU not used)
 
